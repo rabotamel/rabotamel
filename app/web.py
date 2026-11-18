@@ -39,7 +39,13 @@ def same_origin(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Cross-origin request blocked")
 
 
-router = APIRouter(dependencies=[Depends(require_auth), Depends(same_origin)])
+def require_ready(request: Request) -> None:
+    """Пока приложение не подключилось к БД (или не хватает настроек) — понятный 503 вместо 500."""
+    if request.app.state.manager is None:
+        raise HTTPException(status_code=503, detail=f"Сервис не готов: {request.app.state.error}")
+
+
+router = APIRouter(dependencies=[Depends(require_ready), Depends(require_auth), Depends(same_origin)])
 
 
 # ---------- хелперы ----------

@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
 
 def _int(name: str, default: int) -> int:
@@ -25,13 +26,33 @@ class Settings:
     max_polling_crashes: int
 
 
+def _secret(name: str) -> str:
+    """Сначала переменная окружения Render (Environment → Environment Variables),
+    затем Secret File с таким же именем (/etc/secrets/<name> или ./<name>)."""
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    for path in (Path("/etc/secrets") / name, Path(name)):
+        try:
+            if path.is_file():
+                value = path.read_text(encoding="utf-8").strip()
+                if value:
+                    return value
+        except OSError:
+            continue
+    return ""
+
+
 @lru_cache
 def get_settings() -> Settings:
-    database_url = os.environ.get("DATABASE_URL", "").strip()
+    database_url = _secret("DATABASE_URL")
     if not database_url:
-        raise RuntimeError("Не задана переменная окружения DATABASE_URL (строка подключения Neon)")
+        raise RuntimeError(
+            "Не задан DATABASE_URL: добавьте его в Render → Environment "
+            "(или как Secret File с именем DATABASE_URL)"
+        )
 
-    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+    admin_password = _secret("ADMIN_PASSWORD")
     if not admin_password:
         raise RuntimeError(
             "Не задана переменная окружения ADMIN_PASSWORD. "
