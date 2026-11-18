@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: tg-bot-rotator
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # Строго один воркер: два процесса одновременно опрашивали бы Telegram одним токеном
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
