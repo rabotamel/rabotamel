@@ -1,43 +1,28 @@
-import re
-import secrets
+import asyncio
+import json
 from pathlib import Path
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramNotFound, TelegramUnauthorizedError
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
-from . import repo
-from .config import get_settings
-from .models import STATUS_ACTIVE
+from . import auth, push, repo
+from .events import bus
+from .models import STATUS_ACTIVE, STATUS_QUEUED
 
-templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
-security = HTTPBasic()
+BASE = Path(__file__).parent
+templates = Jinja2Templates(directory=str(BASE / "templates"))
+
+import re
 
 TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
 
 
-# ---------- защита панели ----------
-
-def require_auth(creds: HTTPBasicCredentials = Depends(security)) -> None:
-    s = get_settings()
-    user_ok = secrets.compare_digest(creds.username.encode(), s.admin_user.encode())
-    pass_ok = secrets.compare_digest(creds.password.encode(), s.admin_password.encode())
-    if not (user_ok and pass_ok):
-        raise HTTPException(status_code=401, detail="Unauthorized", headers={"WWW-Authenticate": "Basic"})
-
-
-def same_origin(request: Request) -> None:
-    """Защита от CSRF: браузер сам подставляет Basic-логин, поэтому для POST проверяем Origin."""
-    if request.method in ("GET", "HEAD", "OPTIONS"):
-        return
-    origin = request.headers.get("origin") or request.headers.get("referer")
-    if origin and urlparse(origin).netloc != request.headers.get("host"):
-        raise HTTPException(status_code=403, detail="Cross-origin request blocked")
-
+# ---------- зависимости ----------
 
 def require_ready(request: Request) -> None:
     """Пока приложение не подключилось к БД (или не хватает настроек) — понятный 503 вместо 500."""
@@ -45,26 +30,62 @@ def require_ready(request: Request) -> None:
         raise HTTPException(status_code=503, detail=f"Сервис не готов: {request.app.state.error}")
 
 
-router = APIRouter(dependencies=[Depends(require_ready), Depends(require_auth), Depends(same_origin)])
+def same_origin(request: Request) -> None:
+    """Защита от CSRF: для изменяющих запросов проверяем, что Origin совпадает с адресом сайта."""
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if origin and urlparse(origin).netloc != request.headers.get("host"):
+        raise HTTPException(status_code=403, detail="Cross-origin request blocked")
+
+
+def is_authed(request: Request) -> bool:
+    return auth.verify_token(request.cookies.get(auth.COOKIE))
+
+
+def api_auth(request: Request) -> None:
+    if not is_authed(request):
+        raise HTTPException(status_code=401, detail="Требуется вход")
+
+
+router = APIRouter(dependencies=[Depends(require_ready), Depends(same_origin)])
+api = APIRouter(prefix="/api", dependencies=[Depends(api_auth)])
+
+
+# ---------- модели запросов ----------
+
+class BotIn(BaseModel):
+    token: str = ""
+    name: str = ""
+    description: str = ""
+    avatar_url: str = ""
+
+
+class ReorderIn(BaseModel):
+    ids: list[int]
+
+
+class PushSubIn(BaseModel):
+    endpoint: str
+    keys: dict[str, str] = {}
+
+
+class PushUnsubIn(BaseModel):
+    endpoint: str
 
 
 # ---------- хелперы ----------
 
-def back(msg: str | None = None, err: str | None = None) -> RedirectResponse:
-    params = {k: v for k, v in (("msg", msg), ("err", err)) if v}
-    return RedirectResponse("/" + (f"?{urlencode(params)}" if params else ""), status_code=303)
-
-
 def clean_profile(name: str, description: str, avatar_url: str) -> tuple[str, str, str | None]:
     name, description, avatar_url = name.strip(), description.strip(), avatar_url.strip()
     if not name:
-        raise ValueError("Укажите имя бота")
+        raise HTTPException(400, "Укажите имя бота")
     if len(name) > 64:
-        raise ValueError("Имя бота — не более 64 символов (лимит Telegram)")
+        raise HTTPException(400, "Имя бота — не более 64 символов (лимит Telegram)")
     if len(description) > 512:
-        raise ValueError("Описание — не более 512 символов (лимит Telegram)")
+        raise HTTPException(400, "Описание — не более 512 символов (лимит Telegram)")
     if avatar_url and not avatar_url.lower().startswith(("http://", "https://")):
-        raise ValueError("Ссылка на аватарку должна начинаться с http:// или https://")
+        raise HTTPException(400, "Ссылка на аватарку должна начинаться с http:// или https://")
     return name, description, avatar_url or None
 
 
@@ -82,83 +103,223 @@ async def check_token(token: str) -> tuple[str | None, bool]:
         await bot.session.close()
 
 
-# ---------- страницы ----------
+def _bot_dict(b, queue: int | None) -> dict:
+    return {
+        "id": b.id,
+        "name": b.name,
+        "description": b.description,
+        "avatar_url": b.avatar_url,
+        "username": b.username,
+        "status": b.status,
+        "queue": queue,
+        "masked_token": b.masked_token,
+        "last_error": b.last_error,
+    }
+
+
+async def build_state(request: Request) -> dict:
+    manager = request.app.state.manager
+    bots = await repo.list_ordered()
+
+    items: list[dict] = []
+    num = 0
+    for b in bots:
+        if b.status in (STATUS_ACTIVE, STATUS_QUEUED):
+            num += 1
+            items.append(_bot_dict(b, num))
+        else:
+            items.append(_bot_dict(b, None))
+
+    active = next((b for b in bots if b.status == STATUS_ACTIVE), None)
+    current = None
+    if active:
+        st = manager.state
+        running = bool(st["running"] and st["bot_id"] == active.id)
+        current = {
+            **_bot_dict(active, 1),
+            "running": running,
+            "note": st["note"] if not running else "работает",
+            "users": manager.users_count() if running else None,
+            "since": active.active_since.isoformat() if active.active_since else None,
+        }
+
+    return {
+        "bots": items,
+        "current": current,
+        "has_any": bool(bots),
+        "alerts": bus.recent_alerts(),
+        "push_key": push.public_key,
+    }
+
+
+# ---------- вход / выход ----------
+
+@router.get("/login")
+async def login_page(request: Request):
+    if is_authed(request):
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(request, "login.html", {"error": None})
+
+
+@router.post("/login")
+async def login(request: Request, password: str = Form("")):
+    ip = request.client.host if request.client else "unknown"
+    wait = auth.locked_for(ip)
+    if wait:
+        return templates.TemplateResponse(
+            request, "login.html", {"error": f"Слишком много попыток. Подождите {wait} с."}, status_code=429
+        )
+    if not auth.check_password(password):
+        auth.register_failure(ip)
+        return templates.TemplateResponse(request, "login.html", {"error": "Неверный пароль"}, status_code=401)
+
+    auth.clear_failures(ip)
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(
+        auth.COOKIE,
+        auth.make_token(),
+        max_age=auth.MAX_AGE,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        path="/",
+    )
+    return resp
+
+
+@router.post("/logout")
+async def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.COOKIE, path="/")
+    return resp
+
 
 @router.get("/")
-async def index(request: Request, msg: str | None = None, err: str | None = None):
-    bots = await repo.list_bots()
-    manager = request.app.state.manager
-    has_active = any(b.status == STATUS_ACTIVE for b in bots)
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {"bots": bots, "state": manager.state, "msg": msg, "err": err, "has_active": has_active},
+async def index(request: Request):
+    if not is_authed(request):
+        return RedirectResponse("/login", status_code=303)
+    return FileResponse(BASE / "static" / "app.html", headers={"Cache-Control": "no-store"})
+
+
+# ---------- API ----------
+
+@api.get("/state")
+async def get_state(request: Request):
+    return await build_state(request)
+
+
+@api.get("/events")
+async def events(request: Request):
+    """Server-Sent Events: изменения состояния и число пользователей в реальном времени."""
+    queue = bus.subscribe()
+
+    async def stream():
+        try:
+            yield "retry: 3000\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                except TimeoutError:
+                    yield ": ping\n\n"  # держим соединение живым за прокси
+                    if await request.is_disconnected():
+                        break
+                    continue
+                if event.get("type") == "_close":
+                    break
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            bus.unsubscribe(queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-@router.post("/bots")
-async def add_bot(
-    request: Request,
-    token: str = Form(...),
-    name: str = Form(...),
-    description: str = Form(""),
-    avatar_url: str = Form(""),
-):
-    token = token.strip()
+@api.post("/bots")
+async def add_bot(body: BotIn, request: Request):
+    token = body.token.strip()
     if not TOKEN_RE.match(token):
-        return back(err="Токен выглядит неверно. Формат: 123456789:AA... (из @BotFather)")
-    try:
-        name, description, avatar = clean_profile(name, description, avatar_url)
-    except ValueError as e:
-        return back(err=str(e))
+        raise HTTPException(400, "Токен выглядит неверно. Формат: 123456789:AA... (из @BotFather)")
+    name, description, avatar = clean_profile(body.name, body.description, body.avatar_url)
     if await repo.token_exists(token):
-        return back(err="Такой токен уже добавлен")
+        raise HTTPException(400, "Такой токен уже добавлен")
 
     username, valid = await check_token(token)
     if not valid:
-        return back(err="Telegram отклонил этот токен (недействителен или отозван)")
+        raise HTTPException(400, "Telegram отклонил этот токен (недействителен или отозван)")
 
     await repo.add_bot(token, name, description, avatar, username)
     request.app.state.manager.poke()
-    return back(msg=f"Бот «{name}» добавлен")
+    bus.publish({"type": "changed"})
+    return {"ok": True}
 
 
-@router.post("/bots/{bot_id}/edit")
-async def edit_bot(
-    request: Request,
-    bot_id: int,
-    name: str = Form(...),
-    description: str = Form(""),
-    avatar_url: str = Form(""),
-):
-    try:
-        name, description, avatar = clean_profile(name, description, avatar_url)
-    except ValueError as e:
-        return back(err=str(e))
+@api.post("/bots/reorder")
+async def reorder(body: ReorderIn):
+    await repo.reorder(body.ids)
+    bus.publish({"type": "changed"})
+    return {"ok": True}
+
+
+@api.post("/bots/{bot_id}/edit")
+async def edit_bot(bot_id: int, body: BotIn, request: Request):
+    name, description, avatar = clean_profile(body.name, body.description, body.avatar_url)
     await repo.update_profile(bot_id, name, description, avatar)
     # если бот сейчас активен — перезапускаем его, чтобы новые имя/описание ушли в Telegram
     request.app.state.manager.poke(switch=await repo.is_active(bot_id))
-    return back(msg="Профиль сохранён")
+    bus.publish({"type": "changed"})
+    return {"ok": True}
 
 
-@router.post("/bots/{bot_id}/activate")
-async def activate_bot(request: Request, bot_id: int):
+@api.post("/bots/{bot_id}/activate")
+async def activate_bot(bot_id: int, request: Request):
     if not await repo.activate(bot_id):
-        return back(err="Бот не найден")
+        raise HTTPException(404, "Бот не найден")
     request.app.state.manager.poke(switch=True)
-    return back(msg="Переключаю бота на выбранный токен")
+    bus.publish({"type": "changed"})
+    return {"ok": True}
 
 
-@router.post("/bots/{bot_id}/requeue")
-async def requeue_bot(request: Request, bot_id: int):
+@api.post("/bots/{bot_id}/requeue")
+async def requeue_bot(bot_id: int, request: Request):
     await repo.requeue(bot_id)
     request.app.state.manager.poke()
-    return back(msg="Токен возвращён в очередь")
+    bus.publish({"type": "changed"})
+    return {"ok": True}
 
 
-@router.post("/bots/{bot_id}/delete")
-async def delete_bot(request: Request, bot_id: int):
+@api.delete("/bots/{bot_id}")
+async def delete_bot(bot_id: int, request: Request):
     was_active = await repo.is_active(bot_id)
     await repo.delete_bot(bot_id)
     request.app.state.manager.poke(switch=was_active)
-    return back(msg="Бот удалён")
+    bus.publish({"type": "changed"})
+    return {"ok": True}
+
+
+@api.get("/bots/{bot_id}/token")
+async def reveal_token(bot_id: int):
+    bot = await repo.get_bot(bot_id)
+    if bot is None:
+        raise HTTPException(404, "Бот не найден")
+    return {"token": bot.token}
+
+
+@api.post("/push/subscribe")
+async def push_subscribe(body: PushSubIn):
+    p256dh, auth_key = body.keys.get("p256dh"), body.keys.get("auth")
+    if not (body.endpoint.startswith("https://") and p256dh and auth_key):
+        raise HTTPException(400, "Некорректная подписка")
+    await repo.add_push_sub(body.endpoint, p256dh, auth_key)
+    return {"ok": True}
+
+
+@api.post("/push/unsubscribe")
+async def push_unsubscribe(body: PushUnsubIn):
+    await repo.delete_push_sub(body.endpoint)
+    return {"ok": True}
+
+
+router.include_router(api)

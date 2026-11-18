@@ -14,10 +14,13 @@ def _int(name: str, default: int) -> int:
 @dataclass(frozen=True)
 class Settings:
     database_url: str
-    admin_user: str
     admin_password: str
+    # Необязательный отдельный секрет для подписи cookie входа (иначе берётся из пароля)
+    session_secret: str
     admin_chat_id: int | None
     greeting: str
+    # Контакт для Web Push (требование протокола VAPID), например mailto:you@example.com
+    vapid_subject: str
     # Сколько подряд сетевых ошибок к Telegram считаем «критической ошибкой соединения»
     network_fail_threshold: int
     # Если Telegram просит подождать дольше N секунд (флуд-контроль) — меняем токен
@@ -63,10 +66,11 @@ def get_settings() -> Settings:
 
     return Settings(
         database_url=database_url,
-        admin_user=os.environ.get("ADMIN_USER", "admin"),
         admin_password=admin_password,
+        session_secret=_secret("SESSION_SECRET"),
         admin_chat_id=int(chat_id_raw) if chat_id_raw else None,
         greeting=os.environ.get("GREETING_TEXT", "Привет, это тестовый код."),
+        vapid_subject=os.environ.get("VAPID_SUBJECT", "mailto:admin@example.com"),
         network_fail_threshold=_int("NETWORK_FAIL_THRESHOLD", 8),
         flood_rotate_threshold=_int("FLOOD_ROTATE_THRESHOLD", 300),
         max_polling_crashes=_int("MAX_POLLING_CRASHES", 3),
