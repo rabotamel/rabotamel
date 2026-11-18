@@ -27,7 +27,9 @@ render.yaml          # blueprint для Render
    - Build: `pip install -r requirements.txt`
    - Start: `uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1`
    - Health check path: `/healthz`
-4. Переменные окружения: `DATABASE_URL`, `ADMIN_PASSWORD` (обязательно), `ADMIN_USER`, `ADMIN_CHAT_ID` (по желанию).
+4. Переменные окружения (Render → Environment): `DATABASE_URL`, `ADMIN_PASSWORD` (обязательно), `ADMIN_USER`, `ADMIN_CHAT_ID` (по желанию).
+   Вместо переменной можно создать Secret File с тем же именем (`DATABASE_URL`) — он читается из `/etc/secrets/DATABASE_URL`.
+   Если переменной нет, сервис всё равно поднимется и откроет порт, а страница панели покажет, чего не хватает.
 5. Откройте URL сервиса, войдите под `ADMIN_USER` / `ADMIN_PASSWORD` и добавьте первый токен. Бот запустится сразу.
    Таблицы создаются автоматически при старте.
 
