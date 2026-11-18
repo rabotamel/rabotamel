@@ -2,12 +2,16 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from app import db
+from app import db, push
 from app.config import get_settings
+from app.events import bus
 from app.manager import BotManager
 from app.web import router
 
@@ -38,6 +42,11 @@ async def _startup(app: FastAPI) -> None:
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30)
 
+    try:
+        await push.init_vapid()
+    except Exception:
+        log.exception("Не удалось подготовить ключи Web Push — уведомления будут недоступны")
+
     manager = BotManager(settings)
     app.state.manager = manager
     app.state.error = None
@@ -53,6 +62,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        bus.close()  # закрывает открытые SSE-соединения, чтобы остановка не зависала
         startup.cancel()
         await asyncio.gather(startup, return_exceptions=True)
         if app.state.manager is not None:
@@ -62,12 +72,24 @@ async def lifespan(app: FastAPI):
 
 # Документацию API отключаем: панель закрыта паролем, а лишнего наружу светить не нужно
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+# За прокси Render берём реальный IP и схему (https) из X-Forwarded-* — нужно для cookie и защиты от перебора пароля
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 app.include_router(router)
 
 
 @app.get("/healthz", include_in_schema=False)
 async def healthz():
     return {"ok": True}
+
+
+@app.get("/sw.js", include_in_schema=False)
+async def service_worker():
+    # Service Worker должен отдаваться с корня сайта, иначе у него не будет нужной области действия
+    return FileResponse(
+        Path(__file__).parent / "app" / "static" / "sw.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 if __name__ == "__main__":
