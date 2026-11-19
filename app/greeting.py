@@ -288,8 +288,8 @@ def generate_config(seed: str, taken: set[str] | None = None) -> GreetingConfig:
 # ---------- вывод пользователю ----------
 
 def format_number(n: int) -> str:
-    """12345 -> «12 345» (неразрывный пробел), чтобы число не переносилось."""
-    return f"{int(n):,}".replace(",", "\u00a0")
+    """Число для текста пользователю — без разделителей разрядов: 1000, 12345 (не «1 000»)."""
+    return str(int(n))
 
 
 def render(cfg: GreetingConfig, bot_name: str, balance: int) -> str:

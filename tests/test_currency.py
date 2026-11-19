@@ -38,7 +38,7 @@ class CurrencyTests(unittest.TestCase):
     def test_format_money(self):
         self.assertEqual(c.format_money(D("100")), "100")
         self.assertEqual(c.format_money(D("1.5")), "1,5")
-        self.assertEqual(c.format_money(D("1234.56")), "1 234,56")
+        self.assertEqual(c.format_money(D("1234.56")), "1234,56")
         self.assertEqual(c.format_money(D("0.005")), "0,01")
 
 

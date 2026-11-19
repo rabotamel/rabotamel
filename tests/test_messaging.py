@@ -23,9 +23,16 @@ except ImportError:
 
     exc.TelegramAPIError, exc.TelegramBadRequest, exc.TelegramForbiddenError = (
         TelegramAPIError, TelegramBadRequest, TelegramForbiddenError)
+    tps = types.ModuleType("aiogram.types")
+
+    class BufferedInputFile:
+        def __init__(self, file, filename):
+            self.file, self.filename = file, filename
+
+    tps.BufferedInputFile = BufferedInputFile
     pkg = types.ModuleType("aiogram")
-    pkg.exceptions = exc
-    sys.modules["aiogram"], sys.modules["aiogram.exceptions"] = pkg, exc
+    pkg.exceptions, pkg.types = exc, tps
+    sys.modules["aiogram"], sys.modules["aiogram.exceptions"], sys.modules["aiogram.types"] = pkg, exc, tps
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError  # noqa: E402
 
@@ -59,6 +66,16 @@ def run(coro):
 class MessagingTests(unittest.TestCase):
     def setUp(self):
         messaging._file_ids.clear()
+        messaging._fetch_failed.clear()
+        self._orig_fetch = messaging._fetch_image
+
+        async def no_download(url):  # в тестах в сеть не ходим: «скачать не вышло» -> ссылка уходит в Telegram как есть
+            return None
+
+        messaging._fetch_image = no_download
+
+    def tearDown(self):
+        messaging._fetch_image = self._orig_fetch
 
     def test_without_image_is_plain_text(self):
         bot = FakeBot()
@@ -97,6 +114,50 @@ class MessagingTests(unittest.TestCase):
         bot = PickyBot()
         run(messaging.send_message(bot, 1, "<b>x</b> &amp; y"))
         self.assertEqual(bot.calls[-1], ("text", "x & y", None))
+
+    def test_image_is_downloaded_and_uploaded_as_file(self):
+        async def fake_fetch(url):
+            return b"JPEGDATA"
+
+        messaging._fetch_image = fake_fetch
+        bot = FakeBot()
+        run(messaging.send_message(bot, 1, "<b>Привет</b>", "https://x/y"))
+        kind, photo, caption, mode = bot.calls[0]
+        self.assertEqual((kind, caption, mode), ("photo", "<b>Привет</b>", "HTML"))
+        self.assertNotIsInstance(photo, str)  # не ссылка, а загруженный файл
+        run(messaging.send_message(bot, 1, "b", "https://x/y"))
+        self.assertEqual(bot.calls[1][1], "FILE1")  # дальше по file_id
+
+    def test_rejected_upload_falls_back_to_url(self):
+        async def fake_fetch(url):
+            return b"JPEGDATA"
+
+        class PickyBot(FakeBot):
+            async def send_photo(self, chat_id, photo, caption=None, parse_mode=None):
+                if not isinstance(photo, str):
+                    self.calls.append(("upload",))
+                    raise TelegramBadRequest("Bad Request: IMAGE_PROCESS_FAILED")
+                return await super().send_photo(chat_id, photo, caption, parse_mode)
+
+        messaging._fetch_image = fake_fetch
+        bot = PickyBot()
+        run(messaging.send_message(bot, 1, "t", "https://x/y.jpg"))
+        self.assertEqual(bot.calls[0], ("upload",))
+        self.assertEqual(bot.calls[1][:2], ("photo", "https://x/y.jpg"))
+
+    def test_prepare_jpeg(self):
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGBA", (3000, 1000), (255, 0, 0, 128)).save(buf, "PNG")
+        out = messaging._prepare_jpeg(buf.getvalue())
+        img = Image.open(io.BytesIO(out))
+        self.assertEqual(img.format, "JPEG")
+        self.assertLessEqual(max(img.size), messaging.MAX_SIDE)
+        with self.assertRaises(ValueError):
+            messaging._prepare_jpeg(b"not an image")
 
     def test_blocked_user_error_propagates(self):
         bot = FakeBot(photo_error=TelegramForbiddenError("blocked"))

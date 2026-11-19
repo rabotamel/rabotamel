@@ -34,6 +34,10 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
     # Нужно, чтобы убирать старую капчу при повторном /start и не показывать подряд тот же порядок.
     # Хранится в памяти; при перезапуске просто начнётся заново.
     shown: dict[int, tuple[int, list[str], float, int]] = {}
+    # user_id -> id приветствия, присланного после /start или после прохождения капчи. При следующем /start
+    # (и при новой капче) оно удаляется, чтобы в чате не копились одинаковые сообщения. В памяти: после
+    # перезапуска бота прежнее приветствие просто останется в чате.
+    last_greeting: dict[int, int] = {}
 
     async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> None:
         try:
@@ -65,10 +69,22 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             shown.clear()
         shown[user_id] = (msg.message_id, order, now, texts.version)
 
+    async def drop_last_greeting(bot: Bot, user_id: int) -> None:
+        old_id = last_greeting.pop(user_id, None)
+        if old_id is not None:
+            await safe_delete(bot, user_id, old_id)
+
     async def send_greeting(bot: Bot, user_id: int, balance: int) -> None:
         text = greeting.render(texts.greeting, profile.name, balance)
         try:
-            await messaging.send_message(bot, user_id, text, profile.message_image_url)
+            msg = await messaging.send_message(bot, user_id, text, profile.message_image_url)
+            # подмена записи синхронная: при нескольких /start подряд прежнее приветствие удалит каждый следующий
+            if len(last_greeting) > 5000:
+                last_greeting.clear()
+            old_id = last_greeting.get(user_id)
+            last_greeting[user_id] = msg.message_id
+            if old_id is not None and old_id != msg.message_id:
+                await safe_delete(bot, user_id, old_id)
         except TelegramForbiddenError:
             pass  # пользователь заблокировал бота
         except TelegramAPIError as e:
@@ -84,6 +100,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             # баланс живёт только в БД (его меняют и «Песочница», и в будущем платежи) — один запрос по ключу
             await send_greeting(bot, user.id, await repo.get_candies(stats.bot_id, user.id))
         else:
+            # человек снова должен пройти капчу (например, его удалили в «Песочнице») — старое приветствие убираем
+            await drop_last_greeting(bot, user.id)
             await send_captcha(bot, user.id, force=True)
 
     @router.message(F.chat.type == "private")

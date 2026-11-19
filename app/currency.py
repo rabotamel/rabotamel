@@ -60,9 +60,8 @@ def convert_all(amount: Decimal, currency: str) -> dict[str, Decimal]:
 
 
 def format_money(value: Decimal) -> str:
-    """Сумма для текста пользователю: «1 234,5» (неразрывный пробел между тысячами, запятая в дроби)."""
+    """Сумма для текста пользователю: «1234,5» (без разделителей разрядов, запятая в дроби)."""
     q = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     whole, _, frac = f"{q:f}".partition(".")
-    whole = f"{int(whole):,}".replace(",", " ")
     frac = frac.rstrip("0")
     return f"{whole},{frac}" if frac else whole

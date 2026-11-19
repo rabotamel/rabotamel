@@ -70,7 +70,7 @@ class GreetingTests(unittest.TestCase):
 
     def test_number_format(self):
         self.assertEqual(g.format_number(0), "0")
-        self.assertEqual(g.format_number(1234567), "1\u00a0234\u00a0567")
+        self.assertEqual(g.format_number(1234567), "1234567")
 
     def test_stored_template_is_independent_from_dictionaries(self):
         cfg = g.generate_config("stable")

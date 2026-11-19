@@ -98,7 +98,7 @@ async def change_candies(
     if candies < 1:
         raise SandboxError(400, "Сумма меньше одной конфеты")
     if candies > currency.MAX_CANDIES:
-        raise SandboxError(400, f"Не больше {currency.MAX_CANDIES:,} конфет за раз".replace(",", " "))
+        raise SandboxError(400, f"Не больше {currency.MAX_CANDIES} конфет за раз")
     paid = None if cur == currency.CANDY else currency.format_money(value)
 
     uid, who = resolve(manager, target)
