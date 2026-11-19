@@ -1,20 +1,29 @@
 """Все операции с базой данных."""
 import json
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import bindparam, delete, func, select, update
+from sqlalchemy import bindparam, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 from . import db
 from .models import (
     STATUS_ACTIVE,
     STATUS_BLOCKED,
     STATUS_QUEUED,
+    SUB_APPROVED,
+    SUB_PENDING,
+    SUB_REJECTED,
+    BlockedAuthor,
     BotProfile,
     BotUser,
     KeyValue,
+    Moderator,
     PushSubscription,
+    SubmissionMessage,
+    VideoSubmission,
 )
 
 
@@ -269,6 +278,254 @@ async def add_candies(bot_id: int, user_id: int, delta: int) -> int | None:
             .returning(BotUser.candies)
         )
         return res.scalar_one_or_none()
+
+
+async def spend_candies(bot_id: int, user_id: int, amount: int) -> int | None:
+    """Атомарно списывает `amount` 🍬, только если хватает. Возвращает новый баланс; None — не хватает
+    (или пользователя нет в базе). Проверка и списание — один UPDATE, поэтому два быстрых нажатия подряд
+    не потратят одни и те же конфеты дважды."""
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(
+            update(BotUser)
+            .where(BotUser.bot_id == bot_id, BotUser.user_id == user_id, BotUser.candies >= amount)
+            .values(candies=BotUser.candies - amount)
+            .returning(BotUser.candies)
+        )
+        return res.scalar_one_or_none()
+
+
+# ---------- модераторы предложки ----------
+
+async def list_moderators() -> list[Moderator]:
+    async with db.SessionLocal() as s:
+        return list((await s.execute(select(Moderator).order_by(Moderator.id))).scalars())
+
+
+async def add_moderator(user_id: int | None, username: str | None) -> Moderator | None:
+    """Добавляет модератора по user_id или по юзернейму (нижний регистр, без «@»). None — такой уже есть.
+
+    Человека может не быть среди пользователей бота: запись всё равно создаётся. Если он уже встречался
+    боту (есть в bot_users), недостающие данные (юзернейм или ID) подставляются оттуда; иначе ID у записи
+    по юзернейму появится, когда человек впервые напишет боту (bind_moderator)."""
+    try:
+        async with db.SessionLocal() as s, s.begin():
+            if user_id is not None and username is None:
+                username = (
+                    await s.execute(
+                        select(BotUser.username).where(BotUser.user_id == user_id, BotUser.username.is_not(None)).limit(1)
+                    )
+                ).scalar_one_or_none()
+            elif username is not None and user_id is None:
+                user_id = (
+                    await s.execute(select(BotUser.user_id).where(BotUser.username == username).limit(1))
+                ).scalar_one_or_none()
+
+            conds = []
+            if user_id is not None:
+                conds.append(Moderator.user_id == user_id)
+            if username is not None:
+                conds.append(Moderator.username == username)
+            if not conds:
+                return None
+            if (await s.execute(select(Moderator.id).where(or_(*conds)).limit(1))).first() is not None:
+                return None
+            mod = Moderator(user_id=user_id, username=username)
+            s.add(mod)
+            await s.flush()
+            return mod
+    except IntegrityError:
+        return None  # одновременное добавление того же человека
+
+
+async def delete_moderator(mod_id: int) -> bool:
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(delete(Moderator).where(Moderator.id == mod_id))
+        return res.rowcount > 0
+
+
+async def bind_moderator(user_id: int, username: str | None) -> None:
+    """Пользователь написал боту: привязывает его к записи модератора и актуализирует юзернейм.
+    Запись «только юзернейм» получает user_id; если для этого user_id запись уже есть, дубль по юзернейму удаляется."""
+    try:
+        async with db.SessionLocal() as s, s.begin():
+            by_id = (await s.execute(select(Moderator).where(Moderator.user_id == user_id))).scalar_one_or_none()
+            by_name = None
+            if username:
+                by_name = (
+                    await s.execute(
+                        select(Moderator).where(Moderator.username == username, Moderator.user_id.is_(None))
+                    )
+                ).scalar_one_or_none()
+            if by_id is not None and by_name is not None:
+                await s.delete(by_name)
+                await s.flush()
+                by_id.username = username
+            elif by_name is not None:
+                by_name.user_id = user_id
+            elif by_id is not None and by_id.username != username:
+                by_id.username = username
+    except IntegrityError:
+        pass  # чужая запись уже занимает этот юзернейм — оставляем как есть
+
+
+# ---------- заявки «Предложки» ----------
+
+@dataclass(frozen=True)
+class Submission:
+    id: int
+    bot_id: int
+    user_id: int
+    author_username: str | None
+    file_id: str
+    duration: int
+    status: str = SUB_PENDING
+    decision: str | None = None
+    moderator_id: int | None = None
+    moderator_username: str | None = None
+    moderator_name: str | None = None
+
+
+@dataclass(frozen=True)
+class Decision:
+    sub: Submission
+    rewarded: bool                 # +🍬 автору действительно начислены
+    auto_rejected: tuple[int, ...]  # заявки автора, закрытые вместе с его блокировкой
+
+
+def _sub(row: VideoSubmission) -> Submission:
+    return Submission(
+        id=row.id, bot_id=row.bot_id, user_id=row.user_id, author_username=row.author_username,
+        file_id=row.file_id, duration=row.duration, status=row.status, decision=row.decision,
+        moderator_id=row.moderator_id, moderator_username=row.moderator_username, moderator_name=row.moderator_name,
+    )
+
+
+async def is_author_blocked(user_id: int) -> bool:
+    async with db.SessionLocal() as s:
+        return (await s.execute(select(BlockedAuthor.user_id).where(BlockedAuthor.user_id == user_id))).first() is not None
+
+
+async def create_submission(
+    bot_id: int, user_id: int, username: str | None, file_id: str, file_unique_id: str, duration: int
+) -> Submission:
+    async with db.SessionLocal() as s, s.begin():
+        row = VideoSubmission(
+            bot_id=bot_id, user_id=user_id, author_username=username, file_id=file_id,
+            file_unique_id=file_unique_id or "", duration=duration or 0, status=SUB_PENDING,
+        )
+        s.add(row)
+        await s.flush()
+        return _sub(row)
+
+
+async def get_submissions(ids: list[int]) -> list[Submission]:
+    if not ids:
+        return []
+    async with db.SessionLocal() as s:
+        rows = (await s.execute(select(VideoSubmission).where(VideoSubmission.id.in_(ids)))).scalars()
+        return [_sub(r) for r in rows]
+
+
+async def save_submission_message(sub_id: int, chat_id: int, message_id: int) -> None:
+    async with db.SessionLocal() as s, s.begin():
+        stmt = pg_insert(SubmissionMessage).values(submission_id=sub_id, chat_id=chat_id, message_id=message_id)
+        await s.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["submission_id", "chat_id"], set_={"message_id": message_id}
+            )
+        )
+
+
+async def submission_messages(ids: list[int]) -> dict[int, list[tuple[int, int]]]:
+    """id заявки -> [(chat_id модератора, message_id), ...]."""
+    out: dict[int, list[tuple[int, int]]] = {i: [] for i in ids}
+    if not ids:
+        return out
+    async with db.SessionLocal() as s:
+        res = await s.execute(
+            select(SubmissionMessage.submission_id, SubmissionMessage.chat_id, SubmissionMessage.message_id)
+            .where(SubmissionMessage.submission_id.in_(ids))
+        )
+        for sid, chat_id, msg_id in res.all():
+            out.setdefault(sid, []).append((chat_id, msg_id))
+    return out
+
+
+async def decide_submission(
+    bot_id: int, sub_id: int, action: str, moderator_id: int, moderator_username: str | None,
+    moderator_name: str | None, reward: int = 0,
+) -> Decision | None:
+    """Решение модератора по заявке (action: approve | reject | block) — одна транзакция.
+
+    Переход pending -> approved/rejected делает один UPDATE ... WHERE status = 'pending': при двух
+    одновременных нажатиях второе не найдёт строку и вернёт None (заявка уже обработана), поэтому конфеты
+    автору не начисляются дважды. Начисление идёт в той же транзакции, что и смена статуса.
+    block: автор попадает в чёрный список, а его остальные pending-заявки закрываются как отклонённые."""
+    new_status = SUB_APPROVED if action == "approve" else SUB_REJECTED
+    now = _now()
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(
+            update(VideoSubmission)
+            .where(
+                VideoSubmission.id == sub_id,
+                VideoSubmission.bot_id == bot_id,
+                VideoSubmission.status == SUB_PENDING,
+            )
+            .values(
+                status=new_status, decision=action, moderator_id=moderator_id,
+                moderator_username=moderator_username, moderator_name=moderator_name, decided_at=now,
+            )
+            .returning(
+                VideoSubmission.id, VideoSubmission.bot_id, VideoSubmission.user_id,
+                VideoSubmission.author_username, VideoSubmission.file_id, VideoSubmission.duration,
+            )
+        )
+        row = res.first()
+        if row is None:
+            return None
+        sub = Submission(
+            id=row[0], bot_id=row[1], user_id=row[2], author_username=row[3], file_id=row[4], duration=row[5],
+            status=new_status, decision=action, moderator_id=moderator_id,
+            moderator_username=moderator_username, moderator_name=moderator_name,
+        )
+
+        rewarded = False
+        auto: list[int] = []
+        if action == "approve" and reward > 0:
+            paid = await s.execute(
+                update(BotUser)
+                .where(BotUser.bot_id == bot_id, BotUser.user_id == sub.user_id)
+                .values(candies=BotUser.candies + reward)
+                .returning(BotUser.candies)
+            )
+            rewarded = paid.scalar_one_or_none() is not None
+        elif action == "block":
+            await s.execute(
+                pg_insert(BlockedAuthor)
+                .values(user_id=sub.user_id, blocked_by=moderator_id)
+                .on_conflict_do_nothing()
+            )
+            closed = await s.execute(
+                update(VideoSubmission)
+                .where(VideoSubmission.user_id == sub.user_id, VideoSubmission.status == SUB_PENDING)
+                .values(
+                    status=SUB_REJECTED, decision="block_auto", moderator_id=moderator_id,
+                    moderator_username=moderator_username, moderator_name=moderator_name, decided_at=now,
+                )
+                .returning(VideoSubmission.id)
+            )
+            auto = [r[0] for r in closed.all()]
+        return Decision(sub=sub, rewarded=rewarded, auto_rejected=tuple(auto))
+
+
+async def load_approved_pool(bot_id: int) -> list[tuple[int, str]]:
+    """(id заявки, file_id) всех одобренных видео этого бота — пул для кнопки покупки видео."""
+    async with db.SessionLocal() as s:
+        res = await s.execute(
+            select(VideoSubmission.id, VideoSubmission.file_id)
+            .where(VideoSubmission.bot_id == bot_id, VideoSubmission.status == SUB_APPROVED)
+        )
+        return [(i, f) for i, f in res.all()]
 
 
 # ---------- рандомизируемые сообщения и аватарки ----------

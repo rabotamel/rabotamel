@@ -144,6 +144,9 @@
   .dd-list .dd-btn{box-shadow:0 6px 18px rgba(0,0,0,.22)}
   .conv{margin-top:8px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
   .sb-submit-row .btn{min-width:120px}
+  .mod-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+  .mod-row:first-child{border-top:0}
+  .mod-row .grow{flex:1;min-width:0}
   .btn.danger-outline{border-color:var(--red);color:var(--red)}
 
   #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;z-index:60;max-width:calc(100vw - 32px)}
@@ -168,6 +171,7 @@
 <nav class="wrap tabs">
   <button class="tab active" data-tab="bot">Бот</button>
   <button class="tab" data-tab="tokens">Токены</button>
+  <button class="tab" data-tab="moderators">Модераторы</button>
   <button class="tab" data-tab="sandbox">Песочница</button>
 </nav>
 
@@ -180,6 +184,21 @@
       <button class="btn" id="btn-edit">Редактировать</button>
     </div>
     <div id="list"></div>
+  </section>
+
+  <section id="tab-moderators" hidden>
+    <div class="card sb">
+      <h3>Добавить модератора</h3>
+      <p class="hint">Модератор принимает видео из предложки в боте. К сайту доступа не получает.</p>
+      <label for="mod-user">Юзернейм или ID пользователя</label>
+      <input id="mod-user" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="msg" id="mod-msg"></div>
+      <div class="row"><button type="button" class="btn green" id="mod-add">Добавить</button></div>
+    </div>
+    <div class="card sb">
+      <h3>Модераторы</h3>
+      <div id="mod-list"></div>
+    </div>
   </section>
 
   <section id="tab-sandbox" hidden>
@@ -352,6 +371,7 @@ function render() {
   renderBanners();
   renderBot();
   renderList();
+  renderModerators();
   renderSandbox();
 }
 
@@ -469,6 +489,7 @@ document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () 
   document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
   $('#tab-bot').hidden = tab !== 'bot';
   $('#tab-tokens').hidden = tab !== 'tokens';
+  $('#tab-moderators').hidden = tab !== 'moderators';
   $('#tab-sandbox').hidden = tab !== 'sandbox';
 }));
 
@@ -640,6 +661,50 @@ function askConfirm({title, text, ok, danger}) {
 }
 $('#confirm-ok').addEventListener('click', () => $('#dlg-confirm').close('ok'));
 $('#confirm-cancel').addEventListener('click', () => $('#dlg-confirm').close('cancel'));
+
+/* ---------- вкладка «Модераторы» ---------- */
+function renderModerators() {
+  const list = (S && S.moderators) || [];
+  $('#mod-list').innerHTML = list.length ? list.map((m) => {
+    const title = m.username ? '@' + esc(m.username) : esc(m.user_id);
+    const sub = m.user_id
+      ? (m.username ? 'ID ' + esc(m.user_id) : '')
+      : 'ID появится, когда человек впервые напишет боту';
+    return `<div class="mod-row"><div class="grow"><div class="name">${title}</div>` +
+      (sub ? `<div class="sub">${sub}</div>` : '') +
+      `</div><button type="button" class="btn red" data-mod-del="${m.id}" data-mod-name="${m.username ? '@' + esc(m.username) : esc(m.user_id)}">Удалить</button></div>`;
+  }).join('') : '<p class="hint">Модераторов пока нет.</p>';
+}
+
+$('#mod-add').addEventListener('click', async () => {
+  const target = $('#mod-user').value.trim();
+  setMsg('#mod-msg', '');
+  if (!target) { setMsg('#mod-msg', 'Укажите юзернейм или ID', true); return; }
+  $('#mod-add').disabled = true;
+  try {
+    await api('POST', '/api/moderators', {target});
+    $('#mod-user').value = '';
+    setMsg('#mod-msg', 'Модератор добавлен');
+    await loadState();
+  } catch (err) { setMsg('#mod-msg', err.message, true); }
+  $('#mod-add').disabled = false;
+});
+
+$('#mod-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-mod-del]');
+  if (!btn) return;
+  const ok = await askConfirm({
+    title: 'Удалить модератора?',
+    text: `${btn.dataset.modName} больше не сможет принимать и отклонять заявки из предложки.`,
+    ok: 'Удалить',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api('DELETE', '/api/moderators/' + btn.dataset.modDel);
+    await loadState();
+  } catch (err) { toast(err.message); }
+});
 
 /* ---------- вкладка «Песочница» ---------- */
 const fmtNum = (n) => Number(n).toLocaleString('ru-RU', {useGrouping: false});  // без разделителей разрядов: 1000

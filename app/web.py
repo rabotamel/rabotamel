@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import auth, avatars, push, repo, sandbox
+from . import auth, avatars, moderation, push, repo, sandbox
 from .events import bus
 from .models import STATUS_ACTIVE, STATUS_QUEUED
 
@@ -98,6 +98,10 @@ class ConfirmIn(BaseModel):
     confirm: bool = False
 
 
+class ModeratorIn(BaseModel):
+    target: str = ""  # @username, username или Telegram user_id
+
+
 # ---------- хелперы ----------
 
 def _clean_url(url: str, what: str) -> str | None:
@@ -171,6 +175,16 @@ def _bot_dict(b, queue: int | None) -> dict:
     }
 
 
+def _moderator_dict(m) -> dict:
+    return {
+        "id": m.id,
+        "user_id": m.user_id,
+        "username": m.username,
+        # True — добавлен по юзернейму, ID появится, когда человек впервые напишет боту
+        "pending": m.user_id is None,
+    }
+
+
 async def build_state(request: Request) -> dict:
     manager = request.app.state.manager
     bots = await repo.list_ordered()
@@ -201,6 +215,7 @@ async def build_state(request: Request) -> dict:
         "bots": items,
         "current": current,
         "has_any": bool(bots),
+        "moderators": [_moderator_dict(m) for m in await repo.list_moderators()],
         "alerts": bus.recent_alerts(),
         "push_key": push.public_key,
     }
@@ -434,6 +449,33 @@ async def sandbox_delete_user(body: UserTargetIn, request: Request):
     if st:
         bus.publish({"type": "stats", "bot_id": st.bot_id, "users": res["users"]})
     return res
+
+
+# ---------- модераторы «Предложки» ----------
+
+@api.post("/moderators")
+async def add_moderator(body: ModeratorIn):
+    """Добавляет модератора по @username или ID. Человека может не быть среди пользователей бота."""
+    try:
+        kind, value = sandbox.parse_target(body.target)
+    except sandbox.SandboxError as e:
+        raise HTTPException(e.status, e.message)
+    user_id, username = (int(value), None) if kind == "id" else (None, str(value))
+    mod = await repo.add_moderator(user_id, username)
+    if mod is None:
+        raise HTTPException(409, "Этот модератор уже в списке")
+    moderation.cache.invalidate()
+    bus.publish({"type": "changed"})
+    return {"ok": True, "moderator": _moderator_dict(mod)}
+
+
+@api.delete("/moderators/{mod_id}")
+async def delete_moderator(mod_id: int):
+    if not await repo.delete_moderator(mod_id):
+        raise HTTPException(404, "Модератор не найден")
+    moderation.cache.invalidate()
+    bus.publish({"type": "changed"})
+    return {"ok": True}
 
 
 @api.post("/push/subscribe")

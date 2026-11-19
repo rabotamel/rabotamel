@@ -9,6 +9,11 @@ STATUS_ACTIVE = "active"
 STATUS_BLOCKED = "blocked"
 STATUS_QUEUED = "queued"
 
+# статусы заявок предложки
+SUB_PENDING = "pending"
+SUB_APPROVED = "approved"
+SUB_REJECTED = "rejected"
+
 
 class BotProfile(Base):
     __tablename__ = "bot_profiles"
@@ -90,3 +95,69 @@ class KeyValue(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
+
+
+class Moderator(Base):
+    """Модераторы предложки. Не связаны с правами в панели: модератор видит заявки и жмёт кнопки только в боте.
+
+    Общие для всех токенов бота. Добавить можно по user_id или по @username: пока пользователь не написал боту,
+    у «юзернейм-записи» user_id пустой (NULL) и подставляется при первом обращении к боту (см. moderation.py)."""
+
+    __tablename__ = "moderators"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
+    # юзернейм в нижнем регистре, без «@»
+    username: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class VideoSubmission(Base):
+    """Заявка «Предложки». Хранятся только метаданные: сам файл остаётся у Telegram (file_id).
+    file_id действителен только для того бота, который его получил, поэтому заявки и пул одобренных видео
+    привязаны к bot_id (как и баланс 🍬)."""
+
+    __tablename__ = "video_submissions"
+    __table_args__ = (
+        Index("ix_video_submissions_pool", "bot_id", "status"),
+        Index("ix_video_submissions_author", "user_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("bot_profiles.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    author_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    file_id: Mapped[str] = mapped_column(Text)
+    file_unique_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    duration: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    status: Mapped[str] = mapped_column(String(16), default=SUB_PENDING, server_default=SUB_PENDING)
+    # что именно сделал модератор: approve | reject | block | block_auto (заявка закрыта блокировкой автора)
+    decision: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    moderator_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    moderator_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    moderator_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SubmissionMessage(Base):
+    """Сообщения с заявкой, отправленные модераторам: нужны, чтобы после решения одного модератора
+    убрать кнопки и обновить подпись у всех остальных (в том числе после перезапуска бота)."""
+
+    __tablename__ = "submission_messages"
+
+    submission_id: Mapped[int] = mapped_column(
+        ForeignKey("video_submissions.id", ondelete="CASCADE"), primary_key=True
+    )
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+
+
+class BlockedAuthor(Base):
+    """Заблокированные авторы предложки. Общий список для всех токенов бота (user_id у Telegram один и тот же)."""
+
+    __tablename__ = "blocked_authors"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    blocked_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

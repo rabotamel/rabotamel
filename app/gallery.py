@@ -13,6 +13,9 @@
 Описание, подписи и callback_data кнопок подбираются один раз по seed (токен) и хранятся в БД.
 Цена видео фиксирована — 3🍬 (PRICE), входит в тексты кнопки покупки и не меняется.
 Кнопка «⬅️ Назад» без рандомизации текста; её callback_data уникален для бота.
+Кнопка «📩 Предложка 🤍» (SUGGEST_LABEL) стоит перед «Назад», текст фиксированный; её callback_data и callback_data
+«Назад» внутри меню предложки не хранятся, а выводятся из back_cb бота (suggest_cb / suggest_back_cb): так они
+уникальны для бота и появляются у уже сохранённых в БД конфигов без перезаписи.
 """
 import hashlib
 import html
@@ -23,6 +26,7 @@ from dataclasses import dataclass
 PRICE = 3
 CANDY = "🍬"
 BACK_LABEL = "⬅️ Назад"
+SUGGEST_LABEL = "📩 Предложка 🤍"
 
 DESCRIPTIONS: tuple[str, ...] = (
     "Здесь вы можете поштучно покупать случайные видео из нашей галереи",
@@ -43,6 +47,7 @@ PREMIUM_TEXTS: tuple[str, ...] = ("Премиум подписка", "Преми
 PREMIUM_EMOJI: tuple[tuple[str, str], ...] = (("💝", "👑"), ("👑", "✨"), ("💎", "👑"), ("🌟", "💎"))
 
 BUY_PREFIX, PREMIUM_PREFIX, BACK_PREFIX = "gb:", "gp:", "gk:"
+SUGGEST_PREFIX, SUGGEST_BACK_PREFIX = "gs:", "gx:"
 HASH_LEN = 10
 
 
@@ -80,6 +85,16 @@ class GalleryConfig:
     buy_cb: str
     premium_cb: str
     back_cb: str
+
+    @property
+    def suggest_cb(self) -> str:
+        """Кнопка «Предложка» в меню галереи (выводится из back_cb: уникальна для бота, не хранится)."""
+        return SUGGEST_PREFIX + hashlib.sha256(f"suggest:{self.back_cb}".encode()).hexdigest()[:HASH_LEN]
+
+    @property
+    def suggest_back_cb(self) -> str:
+        """Кнопка «Назад» внутри меню предложки."""
+        return SUGGEST_BACK_PREFIX + hashlib.sha256(f"suggest-back:{self.back_cb}".encode()).hexdigest()[:HASH_LEN]
 
     def signature(self) -> str:
         return "|".join((self.description, self.buy_label, self.premium_label, self.buy_cb, self.premium_cb, self.back_cb))
@@ -172,26 +187,63 @@ def render(cfg: GalleryConfig, deco, title: str, greeting_template: str, balance
 
 
 def layout_rows(cfg: GalleryConfig) -> list[list[tuple[str, str]]]:
-    """Три кнопки по одной в ряд: покупка, премиум, назад (без aiogram — удобно для тестов)."""
-    return [[(cfg.buy_label, cfg.buy_cb)], [(cfg.premium_label, cfg.premium_cb)], [(BACK_LABEL, cfg.back_cb)]]
+    """Четыре кнопки по одной в ряд: покупка, премиум, предложка, назад (без aiogram — удобно для тестов)."""
+    return [
+        [(cfg.buy_label, cfg.buy_cb)],
+        [(cfg.premium_label, cfg.premium_cb)],
+        [(SUGGEST_LABEL, cfg.suggest_cb)],
+        [(BACK_LABEL, cfg.back_cb)],
+    ]
 
 
 # Цвета кнопок галереи по порядку рядов (Bot API 9.4+, нужен aiogram >= 3.25):
-# покупка — синяя, премиум — зелёная, «Назад» — красная.
-ROW_STYLES = ("primary", "success", "danger")
+# покупка — синяя, премиум — зелёная, «Предложка» — без цвета (владелец её не красил), «Назад» — красная.
+ROW_STYLES = ("primary", "success", None, "danger")
+
+
+def _button(text: str, cb: str, style: str | None):
+    from aiogram.types import InlineKeyboardButton
+
+    return InlineKeyboardButton(text=text, callback_data=cb, **({"style": style} if style else {}))
 
 
 def build_keyboard(cfg: GalleryConfig):
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    from aiogram.types import InlineKeyboardMarkup
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t, callback_data=cb, style=style) for t, cb in row]
+            [_button(t, cb, style) for t, cb in row]
             for row, style in zip(layout_rows(cfg), ROW_STYLES)
         ]
     )
 
 
+def video_rows(cfg: GalleryConfig) -> list[list[tuple[str, str]]]:
+    """Под купленным видео ровно две кнопки: та же покупка и «Назад» (callback_data те же, что в меню галереи)."""
+    return [[(cfg.buy_label, cfg.buy_cb)], [(BACK_LABEL, cfg.back_cb)]]
+
+
+def build_video_keyboard(cfg: GalleryConfig):
+    from aiogram.types import InlineKeyboardMarkup
+
+    styles = (ROW_STYLES[0], ROW_STYLES[3])  # те же цвета, что у этих кнопок в галерее
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[_button(t, cb, style) for t, cb in row] for row, style in zip(video_rows(cfg), styles)]
+    )
+
+
+def build_suggest_keyboard(cfg: GalleryConfig):
+    """Меню предложки: одна кнопка «Назад» (возвращает в меню галереи)."""
+    from aiogram.types import InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(inline_keyboard=[[_button(BACK_LABEL, cfg.suggest_back_cb, None)]])
+
+
 def parse_action(cfg: GalleryConfig, data: str | None) -> str | None:
-    """'buy' / 'premium' / 'back' по callback_data ЭТОГО бота; None — чужие или устаревшие."""
-    return {cfg.buy_cb: "buy", cfg.premium_cb: "premium", cfg.back_cb: "back"}.get(data) if data else None
+    """'buy' / 'premium' / 'back' / 'suggest' / 'suggest_back' по callback_data ЭТОГО бота; None — чужие или устаревшие."""
+    if not data:
+        return None
+    return {
+        cfg.buy_cb: "buy", cfg.premium_cb: "premium", cfg.back_cb: "back",
+        cfg.suggest_cb: "suggest", cfg.suggest_back_cb: "suggest_back",
+    }.get(data)

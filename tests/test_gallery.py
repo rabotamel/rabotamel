@@ -84,15 +84,17 @@ class _FakeAiogramTypes:
 
 
 class GalleryColorTests(unittest.TestCase):
-    def test_gallery_buttons_blue_green_red(self):
+    def test_gallery_buttons_blue_green_plain_red(self):
         for i in range(100):
             c = gl.generate_config(f"gc{i}")
             with _FakeAiogramTypes():
                 kb = gl.build_keyboard(c)
             rows = kb.inline_keyboard
-            self.assertEqual([len(r) for r in rows], [1, 1, 1])
-            self.assertEqual([r[0].style for r in rows], ["primary", "success", "danger"])
-            self.assertEqual(rows[2][0].text, "⬅️ Назад")
+            self.assertEqual([len(r) for r in rows], [1, 1, 1, 1])
+            # «Предложка» без цвета (владелец её не красил), поэтому поля style у неё нет
+            self.assertEqual([getattr(r[0], "style", None) for r in rows], ["primary", "success", None, "danger"])
+            self.assertEqual(rows[2][0].text, "📩 Предложка 🤍")
+            self.assertEqual(rows[3][0].text, "⬅️ Назад")
 
 
 class LegacyPremiumTests(unittest.TestCase):

@@ -2,11 +2,11 @@ import logging
 import time
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
-from . import captcha, gallery, greeting, messaging, repo, shop_buttons
+from . import captcha, gallery, greeting, messaging, moderation, repo, shop_buttons, suggest, video_pool
 from .models import BotProfile
 from .stats import UserStats
 from .texts import BotTexts
@@ -41,6 +41,9 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
     last_greeting: dict[int, int] = {}
     # user_id -> id сообщения раздела «Галерея» (в памяти). Нужно, чтобы /start не оставлял его висеть рядом с приветствием.
     last_gallery: dict[int, int] = {}
+    # user_id -> id сообщения с открытым меню предложки (в памяти). Пока запись есть, всё, что пользователь
+    # присылает, обрабатывается как предложка. Сбрасывается кнопкой «Назад» и /start.
+    suggest_menu: dict[int, int] = {}
 
     async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> None:
         try:
@@ -85,6 +88,33 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         if old_id is not None and old_id != keep:
             await safe_delete(bot, user_id, old_id)
 
+    async def drop_suggest(bot: Bot, user_id: int) -> None:
+        old_id = suggest_menu.pop(user_id, None)
+        if old_id is not None:
+            await safe_delete(bot, user_id, old_id)
+
+    async def safe_answer(call: CallbackQuery, text: str | None = None, alert: bool = False) -> None:
+        try:
+            await call.answer(text, show_alert=alert) if text else await call.answer()
+        except TelegramAPIError:
+            pass  # запрос устарел — не страшно
+
+    async def reply(bot: Bot, user_id: int, text: str) -> None:
+        """Ответ пользователю: как любое сообщение бота (с картинкой бота, если она задана)."""
+        try:
+            await messaging.send_message(bot, user_id, text, profile.message_image_url)
+        except TelegramForbiddenError:
+            pass
+        except TelegramAPIError as e:
+            log.warning("Сообщение пользователю %s не доставлено: %s", user_id, e)
+
+    async def touch_moderator(user) -> None:
+        """Модератор, добавленный по @username, получает ID, как только пишет боту."""
+        try:
+            await moderation.cache.touch(user.id, user.username)
+        except Exception as e:  # БД недоступна — обычный пользователь от этого пострадать не должен
+            log.warning("Проверка модератора %s не удалась: %s", user.id, e)
+
     async def drop_last_greeting(bot: Bot, user_id: int) -> None:
         old_id = last_greeting.pop(user_id, None)
         if old_id is not None:
@@ -92,6 +122,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
 
     async def send_greeting(bot: Bot, user_id: int, balance: int) -> None:
         await drop_last_gallery(bot, user_id)  # приветствие и раздел галереи одновременно не висят
+        await drop_suggest(bot, user_id)       # и меню предложки тоже (/start закрывает его)
         text = greeting.render(texts.greeting, profile.name, balance)
         try:
             # кнопки «Магазин» / «Галерея» крепятся прямо под приветствием (отдельного меню нет);
@@ -112,11 +143,96 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         except TelegramAPIError as e:
             log.warning("Приветствие пользователю %s не доставлено: %s", user_id, e)
 
+    async def handle_suggestion(message: Message, bot: Bot) -> None:
+        """Сообщение пользователя при открытом меню предложки: проверка и создание заявки.
+        Без кулдауна: видео можно слать подряд. Тяжёлые файлы не скачиваются — в БД только метаданные и file_id."""
+        user = message.from_user
+        try:
+            if await repo.is_author_blocked(user.id):
+                return  # заблокированному автору заявки не создаются и модераторам не уходят; отвечать ему не нужно
+            error = suggest.check(message)
+            if error:
+                await reply(bot, user.id, error)
+                return
+            video = message.video
+            sub = await repo.create_submission(
+                stats.bot_id, user.id, stats_username(user), video.file_id,
+                getattr(video, "file_unique_id", "") or "", int(video.duration or 0),
+            )
+            await moderation.deliver(bot, sub)
+        except Exception:
+            log.exception("Не удалось обработать предложку от %s", user.id)
+
+    def stats_username(user) -> str | None:
+        return (user.username or "").strip().lstrip("@").lower() or None
+
+    async def send_suggest_menu(bot: Bot, user_id: int) -> None:
+        text = suggest.render_menu(texts.deco)
+        try:
+            msg = await messaging.send_message(
+                bot, user_id, text, profile.message_image_url, reply_markup=gallery.build_suggest_keyboard(texts.gallery)
+            )
+            if len(suggest_menu) > 5000:
+                suggest_menu.clear()
+            suggest_menu[user_id] = msg.message_id
+        except TelegramForbiddenError:
+            pass
+        except TelegramAPIError as e:
+            log.warning("Меню предложки пользователю %s не доставлено: %s", user_id, e)
+
+    async def buy_video(call: CallbackQuery, bot: Bot) -> None:
+        """Покупка случайного видео из одобренных за gallery.PRICE 🍬. Списание атомарное и ДО отправки; если видео
+        отправить не удалось — конфеты возвращаются. Успех — без всплывающих уведомлений."""
+        user_id = call.from_user.id
+        bot_id = stats.bot_id
+        balance = await repo.spend_candies(bot_id, user_id, gallery.PRICE)
+        if balance is None:
+            await safe_answer(call, "❌ У вас недостаточно средств", alert=True)
+            return
+        sent, problem = False, None
+        try:
+            for _ in range(3):  # недействительный file_id пропускаем и берём следующее видео
+                pick = await video_pool.pool.pick(bot_id, user_id)
+                if pick is None:
+                    problem = "Видео пока нет, конфеты не списаны"
+                    break
+                sub_id, file_id = pick
+                try:
+                    # без подписи; кнопки: та же покупка и «Назад»; защита от пересылки и сохранения обязательна
+                    await bot.send_video(
+                        user_id, file_id, reply_markup=gallery.build_video_keyboard(texts.gallery),
+                        protect_content=True,
+                    )
+                except TelegramForbiddenError:
+                    break  # пользователь заблокировал бота
+                except TelegramBadRequest as e:
+                    log.warning("Видео %s не отправилось (%s), беру другое", sub_id, e)
+                    video_pool.pool.mark_bad(sub_id)
+                    continue
+                except TelegramAPIError as e:
+                    log.warning("Видео %s не отправилось: %s", sub_id, e)
+                    problem = "Не удалось отправить видео, конфеты не списаны"
+                    break
+                video_pool.pool.mark_shown(bot_id, user_id, sub_id)
+                sent = True
+                break
+            else:
+                problem = "Не удалось отправить видео, конфеты не списаны"
+        finally:
+            if not sent:
+                try:
+                    await repo.add_candies(bot_id, user_id, gallery.PRICE)  # возврат
+                except Exception:
+                    log.exception("Не удалось вернуть %s🍬 пользователю %s", gallery.PRICE, user_id)
+        await safe_answer(call, None if sent else (problem or "Не удалось отправить видео, конфеты не списаны"),
+                          alert=not sent)
+
     @router.message(CommandStart(), F.chat.type == "private")
     async def on_start(message: Message, bot: Bot) -> None:
         user = message.from_user
         if not user:
             return
+        await touch_moderator(user)
         if stats.has(user.id):
             stats.touch(user.id, user.username)
             # баланс живёт только в БД (его меняют и «Песочница», и в будущем платежи) — один запрос по ключу
@@ -124,6 +240,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         else:
             # человек снова должен пройти капчу (например, его удалили в «Песочнице») — старое приветствие убираем
             await drop_last_greeting(bot, user.id)
+            await drop_suggest(bot, user.id)
             await send_captcha(bot, user.id, force=True)
 
     @router.message(F.chat.type == "private")
@@ -131,9 +248,11 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         user = message.from_user
         if not user:
             return
+        await touch_moderator(user)
         if stats.has(user.id):
-            # Основная логика для прошедших капчу будет здесь. Пока только актуализируем юзернейм (в памяти).
-            stats.touch(user.id, user.username)
+            stats.touch(user.id, user.username)  # актуализируем юзернейм (в памяти)
+            if user.id in suggest_menu:
+                await handle_suggestion(message, bot)
         else:
             # Любое другое сообщение от непрошедшего проверку — капча (если она уже в чате, повторно не шлём)
             await send_captcha(bot, user.id, force=False)
@@ -207,19 +326,67 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             await send_gallery(bot, user_id)
         # TODO: action == "shop" — логика магазина (продажа пачками)
 
-    @router.callback_query(F.data.startswith((gallery.BUY_PREFIX, gallery.PREMIUM_PREFIX, gallery.BACK_PREFIX)))
+    @router.callback_query(
+        F.data.startswith((
+            gallery.BUY_PREFIX, gallery.PREMIUM_PREFIX, gallery.BACK_PREFIX,
+            gallery.SUGGEST_PREFIX, gallery.SUGGEST_BACK_PREFIX,
+        ))
+    )
     async def on_gallery_button(call: CallbackQuery, bot: Bot) -> None:
         action = gallery.parse_action(texts.gallery, call.data)
-        await call.answer()
         user_id = call.from_user.id
         if action is None or not stats.has(user_id):
+            await safe_answer(call)
             return
+        if action == "buy":
+            await buy_video(call, bot)  # сам отвечает на callback (алерт при нехватке конфет)
+            return
+        await safe_answer(call)
         if action == "back":
-            # сообщение галереи удаляется, приветствие отправляется заново
+            if getattr(call.message, "video", None) is not None:
+                # «Назад» под купленным видео: видео остаётся, меню галереи, из которого его открывали, удаляется,
+                # а новое меню приходит ниже
+                await drop_last_gallery(bot, user_id)
+                await send_gallery(bot, user_id)
+            else:
+                # сообщение галереи удаляется, приветствие отправляется заново
+                if call.message is not None:
+                    await safe_delete(bot, call.message.chat.id, call.message.message_id)
+                last_gallery.pop(user_id, None)
+                await send_greeting(bot, user_id, await repo.get_candies(stats.bot_id, user_id))
+        elif action == "suggest":
+            # меню галереи заменяется меню предложки
             if call.message is not None:
                 await safe_delete(bot, call.message.chat.id, call.message.message_id)
             last_gallery.pop(user_id, None)
-            await send_greeting(bot, user_id, await repo.get_candies(stats.bot_id, user_id))
-        # TODO: "buy" — покупка случайного видео за 3🍬; "premium" — премиум-подписка
+            await drop_suggest(bot, user_id)
+            await send_suggest_menu(bot, user_id)
+        elif action == "suggest_back":
+            if call.message is not None:
+                await safe_delete(bot, call.message.chat.id, call.message.message_id)
+            suggest_menu.pop(user_id, None)
+            await drop_last_gallery(bot, user_id)
+            await send_gallery(bot, user_id)
+        # TODO: "premium" — премиум-подписка
+
+    @router.callback_query(F.data.startswith(moderation.PREFIX))
+    async def on_moderation(call: CallbackQuery, bot: Bot) -> None:
+        """Кнопки модератора под заявкой. Доступ только у модераторов из списка (вкладка «Модераторы»)."""
+        user = call.from_user
+        parsed = moderation.parse(call.data)
+        if parsed is None:
+            await safe_answer(call)
+            return
+        if not await moderation.cache.touch(user.id, user.username):
+            await safe_answer(call, "У вас нет доступа к модерации", alert=True)
+            return
+        action, sub_id = parsed
+        try:
+            done = await moderation.handle_action(bot, stats.bot_id, sub_id, action, user)
+        except Exception:
+            log.exception("Модерация заявки %s (%s) не удалась", sub_id, action)
+            await safe_answer(call, "Ошибка, попробуйте ещё раз", alert=True)
+            return
+        await safe_answer(call, None if done else "Заявка уже обработана")
 
     return router
