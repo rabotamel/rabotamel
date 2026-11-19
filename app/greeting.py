@@ -121,7 +121,6 @@ PALETTES: tuple[tuple[str, str, str, str], ...] = (
 #   bullet_dot   — маркер «•» в начале строки
 #   bullet_dash  — маркер «—» в начале строки (разделитель внутри строки тогда «:»)
 #   quote_points — оба пункта в цитате, остальное обычным текстом
-#   airy         — дополнительная пустая строка между пунктами
 # Баланс никогда не оформляется цитатой (владелец проекта убрал такой вариант: выглядит криво).
 @dataclass(frozen=True)
 class Layout:
@@ -135,7 +134,7 @@ LAYOUTS: tuple[Layout, ...] = (
     Layout("classic", "Классический вертикальный вид", "anon_first", ("plain",)),
     Layout("swapped", "Пункты поменяны местами", "nolog_first", ("plain",)),
     Layout("emphasis", "Маркеры или жирные ключевые слова", "any", ("bold", "bullet_dot", "bullet_dash")),
-    Layout("calm", "Цитата или «воздух»", "any", ("quote_points", "airy")),
+    Layout("calm", "Цитата у пунктов", "any", ("quote_points",)),
 )
 
 ORDERS = ("anon_first", "nolog_first")
@@ -174,6 +173,16 @@ def _space_quote(template: str) -> str:
     return _QUOTE_AFTER.sub("\n\n", _QUOTE_BEFORE.sub("\n\n", template))
 
 
+def _tighten_points(template: str, variant: str) -> str:
+    """Убирает пустую строку между двумя пунктами (бывший вариант «airy») у шаблонов, уже сохранённых в БД."""
+    if variant != "airy":
+        return template
+    blocks = template.split("\n\n")
+    if len(blocks) == 4:   # заголовок, пункт, пункт, баланс
+        blocks = [blocks[0], blocks[1] + "\n" + blocks[2], blocks[3]]
+    return "\n\n".join(blocks)
+
+
 @dataclass(frozen=True)
 class GreetingConfig:
     layout: int
@@ -209,6 +218,9 @@ class GreetingConfig:
     @classmethod
     def from_json(cls, raw: str) -> "GreetingConfig":
         d = json.loads(raw)
+        if d.get("variant") == "airy":
+            d["template"] = _tighten_points(str(d["template"]), "airy")
+            d["variant"] = "plain"
         cfg = cls(
             layout=int(d["layout"]), variant=str(d["variant"]), order=str(d["order"]),
             hello=int(d["hello"]), anon_key=int(d["anon_key"]), pay=int(d["pay"]),
@@ -245,7 +257,8 @@ def _points(layout: Layout, variant: str, order: str, parts: dict) -> tuple[str,
     nolog = f"{marker}{e_nolog} {key(parts['nolog_key'])}{sep}{parts['chats']}, {parts['history']}."
     lines = [anon, nolog] if order == "anon_first" else [nolog, anon]
     balance = f"{parts['e_balance']} {parts['balance_label']}: {{balance}}{CANDY}"
-    return ("\n\n" if variant == "airy" else "\n").join(lines), balance
+    # Пункты всегда идут подряд, без пустой строки между ними — иначе сообщение выглядит неаккуратно.
+    return "\n".join(lines), balance
 
 
 def build_template(

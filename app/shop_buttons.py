@@ -20,16 +20,17 @@ from dataclasses import dataclass
 
 # ---------- списки ----------
 # Эмодзи заданы парами «левый ... правый»: подпись собирается как «<левый> <текст> <правый>».
-SHOP_TEXTS: tuple[str, ...] = ("Магазин", "Каталог", "Ассортимент")
+SHOP_TEXTS: tuple[str, ...] = ("Магазин", "Каталог", "Наш ассортимент")
 SHOP_EMOJI: tuple[tuple[str, str], ...] = (("🛍️", "🏩"), ("🛒", "🏬"), ("📦", "🛍️"))
 
 GALLERY_TEXTS: tuple[str, ...] = ("Галерея", "Случайное видео", "Видео-рулетка", "Смотреть видео")
 GALLERY_EMOJI: tuple[tuple[str, str], ...] = (("🖼️", "🩷"), ("🎬", "✨"), ("🎞️", "💫"), ("🎥", "💖"))
 
 # Как показываем эмодзи пары: оба, только левый или только правый («левый/правый акцент»).
-ACCENTS: tuple[str, ...] = ("both", "left", "right")
+# Одиночный эмодзи (только слева или только справа) не допускается: всегда по эмодзи с обеих сторон.
+ACCENTS: tuple[str, ...] = ("both",)
 LAYOUTS: tuple[str, ...] = ("row", "column")      # row — в один ряд, column — по кнопке в ряд
-ORDERS: tuple[str, ...] = ("shop_first", "gallery_first")
+ORDERS: tuple[str, ...] = ("shop_first",)   # «Магазин» всегда идёт раньше «Галереи»
 
 # Telegram: callback_data — до 64 байт. Префиксы короткие, ASCII.
 SHOP_PREFIX = "sh:"
@@ -61,6 +62,28 @@ def label(text: str, emoji: tuple[str, str], accent: str) -> str:
     return " ".join(parts)
 
 
+_LEGACY_TEXTS = {"Ассортимент": "Наш ассортимент"}
+
+
+def _migrate_legacy(d: dict) -> dict:
+    """Приводит конфиги, уже сохранённые в БД, к текущим правилам (без перезаписи в БД):
+    только эмодзи с обеих сторон, «Магазин» первым, «Наш ассортимент» вместо «Ассортимент»."""
+    d = dict(d)
+    for key, texts, emojis in (("shop", SHOP_TEXTS, SHOP_EMOJI), ("gallery", GALLERY_TEXTS, GALLERY_EMOJI)):
+        lbl = str(d[f"{key}_label"])
+        for old, new in _LEGACY_TEXTS.items():
+            if old in lbl and new not in lbl:
+                lbl = lbl.replace(old, new)
+        if d.get(f"{key}_accent") != "both":
+            idx_t, idx_e = int(d[f"{key}_text"]), int(d[f"{key}_emoji"])
+            if idx_t < len(texts) and idx_e < len(emojis):
+                lbl = label(texts[idx_t], emojis[idx_e], "both")
+            d[f"{key}_accent"] = "both"
+        d[f"{key}_label"] = lbl
+    d["order"] = "shop_first"
+    return d
+
+
 @dataclass(frozen=True)
 class ShopButtonsConfig:
     shop_text: int
@@ -78,8 +101,13 @@ class ShopButtonsConfig:
 
     @property
     def gallery_title(self) -> str:
-        """Название кнопки галереи без эмодзи — заголовок раздела «Галерея»."""
+        """Название кнопки галереи без эмодзи."""
         return GALLERY_TEXTS[self.gallery_text]
+
+    @property
+    def gallery_heading(self) -> str:
+        """Заголовок раздела «Галерея»: ровно подпись кнопки, по которой пользователь сюда перешёл (с её эмодзи)."""
+        return self.gallery_label
 
     def signature(self) -> str:
         """По чему сравниваем «одинаковость» ботов: подписи, порядок, раскладка и callback_data."""
@@ -102,6 +130,7 @@ class ShopButtonsConfig:
     @classmethod
     def from_json(cls, raw: str) -> "ShopButtonsConfig":
         d = json.loads(raw)
+        d = _migrate_legacy(d)
         cfg = cls(
             shop_text=int(d["shop_text"]), shop_emoji=int(d["shop_emoji"]), shop_accent=str(d["shop_accent"]),
             gallery_text=int(d["gallery_text"]), gallery_emoji=int(d["gallery_emoji"]),

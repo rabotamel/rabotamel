@@ -39,7 +39,7 @@ BUY_TEXTS: tuple[str, ...] = (
 BUY_EMOJI: tuple[tuple[str, str], ...] = (("🎥", "🖤"), ("🎬", "✨"), ("🎞️", "💫"), ("📹", "🤍"))
 
 # Подписка: бесплатный просмотр видео + можно скачивать и пересылать контент из бота
-PREMIUM_TEXTS: tuple[str, ...] = ("Премиум подписка", "Премиум-доступ", "Безлимит и скачивание", "VIP-подписка")
+PREMIUM_TEXTS: tuple[str, ...] = ("Премиум подписка", "Премиум-доступ", "VIP-подписка")
 PREMIUM_EMOJI: tuple[tuple[str, str], ...] = (("💝", "👑"), ("👑", "✨"), ("💎", "👑"), ("🌟", "💎"))
 
 BUY_PREFIX, PREMIUM_PREFIX, BACK_PREFIX = "gb:", "gp:", "gk:"
@@ -56,6 +56,10 @@ def validate_tables() -> None:
 
 
 validate_tables()
+
+
+# Тексты, убранные из списков: у уже работающих ботов они лежат в БД готовой подписью и заменяются при чтении.
+_LEGACY_PREMIUM = {"Безлимит и скачивание": "Премиум подписка"}
 
 
 def label(text: str, emoji: tuple[str, str]) -> str:
@@ -95,6 +99,9 @@ class GalleryConfig:
     @classmethod
     def from_json(cls, raw: str) -> "GalleryConfig":
         d = json.loads(raw)
+        for old, new in _LEGACY_PREMIUM.items():
+            if old in str(d.get("premium_label", "")):
+                d["premium_label"] = str(d["premium_label"]).replace(old, new)
         cfg = cls(
             desc=int(d["desc"]), buy_text=int(d["buy_text"]), buy_emoji=int(d["buy_emoji"]),
             premium_text=int(d["premium_text"]), premium_emoji=int(d["premium_emoji"]),

@@ -222,7 +222,7 @@ class GalleryNavigationTests(unittest.TestCase):
                 await router.handlers["on_shop_button"](call(texts.shop_buttons.gallery_cb, 10), bot)
                 self.assertEqual(bot.deleted, [10])                 # приветствие удалено
                 gid, text, _ = sent[-1]                             # и отправлена галерея
-                self.assertIn(f"<b>{texts.shop_buttons.gallery_title}</b>", text)
+                self.assertIn(f"<b>{texts.shop_buttons.gallery_heading}</b>", text)
                 self.assertTrue(text.endswith(f"7{greeting.CANDY}"))
                 await router.handlers["on_gallery_button"](call(texts.gallery.back_cb, gid), bot)
                 self.assertEqual(bot.deleted, [10, gid])            # галерея удалена

@@ -111,3 +111,23 @@ class CaptchaStillWorks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoGapBetweenPointsTests(unittest.TestCase):
+    def test_points_never_separated_by_blank_line(self):
+        for i in range(600):
+            t = g.generate_config(f"gap{i}").template
+            body = t.split("\n\n")
+            # заголовок, блок пунктов, баланс (цитата тоже один блок)
+            self.assertEqual(len(body), 3, t)
+
+    def test_legacy_airy_template_is_tightened(self):
+        import json
+        cfg = g.generate_config("airy")
+        d = json.loads(cfg.to_json())
+        parts = d["template"].split("\n\n")
+        pts = parts[1].replace("<blockquote>", "").replace("</blockquote>", "").split("\n")
+        d["variant"] = "airy"
+        d["template"] = "\n\n".join([parts[0], pts[0], pts[1], parts[2]])
+        n = g.GreetingConfig.from_json(json.dumps(d, ensure_ascii=False))
+        self.assertEqual(len(n.template.split("\n\n")), 3)

@@ -23,7 +23,10 @@ class ShopButtonsTests(unittest.TestCase):
             self.assertIn(sb.SHOP_TEXTS[c.shop_text], c.shop_label)
             self.assertIn(sb.GALLERY_TEXTS[c.gallery_text], c.gallery_label)
             l, r = sb.SHOP_EMOJI[c.shop_emoji]
-            self.assertTrue(c.shop_label.startswith(l) or c.shop_label.endswith(r) or c.shop_accent == "none")
+            self.assertTrue(c.shop_label.startswith(l) and c.shop_label.endswith(r))
+            l, r = sb.GALLERY_EMOJI[c.gallery_emoji]
+            self.assertTrue(c.gallery_label.startswith(l) and c.gallery_label.endswith(r))
+            self.assertEqual(c.gallery_heading, c.gallery_label)
             self.assertFalse(any(bad in c.shop_label + c.gallery_label for bad in FORBIDDEN))
 
     def test_text_and_emoji_are_independent(self):
@@ -32,9 +35,9 @@ class ShopButtonsTests(unittest.TestCase):
         pairs = {(c.gallery_text, c.gallery_emoji) for c in (sb.generate_config(f"g{n}") for n in range(600))}
         self.assertEqual(len(pairs), len(sb.GALLERY_TEXTS) * len(sb.GALLERY_EMOJI))
 
-    def test_both_orders_and_layouts_occur(self):
+    def test_shop_always_first_and_layouts_occur(self):
         cfgs = [sb.generate_config(f"o{i}") for i in range(200)]
-        self.assertEqual({c.order for c in cfgs}, set(sb.ORDERS))
+        self.assertEqual({c.order for c in cfgs}, {"shop_first"})
         self.assertEqual({c.layout for c in cfgs}, set(sb.LAYOUTS))
 
     def test_callback_data_unique_between_bots_and_valid(self):
@@ -117,3 +120,27 @@ class ButtonColorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LegacyMigrationTests(unittest.TestCase):
+    def test_old_stored_config_is_normalized(self):
+        import json
+        c = sb.generate_config("legacy")
+        d = json.loads(c.to_json())
+        d.update(shop_accent="left", gallery_accent="right", order="gallery_first",
+                 shop_label="Магазин", gallery_label="Галерея")
+        n = sb.ShopButtonsConfig.from_json(json.dumps(d, ensure_ascii=False))
+        self.assertEqual(n.order, "shop_first")
+        l, r = sb.SHOP_EMOJI[n.shop_emoji]
+        self.assertTrue(n.shop_label.startswith(l) and n.shop_label.endswith(r))
+        l, r = sb.GALLERY_EMOJI[n.gallery_emoji]
+        self.assertTrue(n.gallery_label.startswith(l) and n.gallery_label.endswith(r))
+
+    def test_assortment_renamed(self):
+        import json
+        c = sb.generate_config("legacy2")
+        d = json.loads(c.to_json())
+        d.update(shop_accent="both", shop_label="🛒 Ассортимент 🏬")
+        n = sb.ShopButtonsConfig.from_json(json.dumps(d, ensure_ascii=False))
+        self.assertEqual(n.shop_label, "🛒 Наш ассортимент 🏬")
+        self.assertNotIn("Ассортимент", sb.SHOP_TEXTS)

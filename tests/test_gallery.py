@@ -28,7 +28,7 @@ class GalleryTests(unittest.TestCase):
     def test_independent_choice_and_all_values_reachable(self):
         cfgs = [gl.generate_config(f"x{i}") for i in range(800)]
         self.assertEqual({(c.buy_text, c.buy_emoji) for c in cfgs}, {(a, b) for a in range(4) for b in range(4)})
-        self.assertEqual({(c.premium_text, c.premium_emoji) for c in cfgs}, {(a, b) for a in range(4) for b in range(4)})
+        self.assertEqual({(c.premium_text, c.premium_emoji) for c in cfgs}, {(a, b) for a in range(len(gl.PREMIUM_TEXTS)) for b in range(4)})
         self.assertEqual({c.desc for c in cfgs}, set(range(len(gl.DESCRIPTIONS))))
         self.assertEqual({deco.generate_config(f"d{i}").left for i in range(300)}, set(deco.EMOJI))
 
@@ -48,9 +48,9 @@ class GalleryTests(unittest.TestCase):
         for i in range(300):
             g = greeting.generate_config(f"g{i}")
             s = sb.generate_config(f"g{i}")
-            out = gl.render(gl.generate_config(f"g{i}"), deco.generate_config(f"g{i}"), s.gallery_title, g.template, 12)
+            out = gl.render(gl.generate_config(f"g{i}"), deco.generate_config(f"g{i}"), s.gallery_heading, g.template, 12)
             lines = out.split("\n")
-            self.assertEqual(lines[0], f"<b>{s.gallery_title}</b>")
+            self.assertEqual(lines[0], f"<b>{s.gallery_heading}</b>")
             d = deco.generate_config(f"g{i}")
             self.assertTrue(lines[2].startswith(d.left + " ") and lines[2].endswith(" " + d.right))
             self.assertEqual(lines[-1], greeting.render(g, "x", 12).rstrip().splitlines()[-1])
@@ -93,6 +93,18 @@ class GalleryColorTests(unittest.TestCase):
             self.assertEqual([len(r) for r in rows], [1, 1, 1])
             self.assertEqual([r[0].style for r in rows], ["primary", "success", "danger"])
             self.assertEqual(rows[2][0].text, "⬅️ Назад")
+
+
+class LegacyPremiumTests(unittest.TestCase):
+    def test_removed_premium_text_is_replaced_and_not_generated(self):
+        import json
+        self.assertNotIn("Безлимит и скачивание", gl.PREMIUM_TEXTS)
+        for i in range(300):
+            self.assertNotIn("Безлимит", gl.generate_config(f"p{i}").premium_label)
+        d = json.loads(gl.generate_config("old").to_json())
+        d["premium_label"] = "💎 Безлимит и скачивание 👑"
+        n = gl.GalleryConfig.from_json(json.dumps(d, ensure_ascii=False))
+        self.assertNotIn("Безлимит", n.premium_label)
 
 
 if __name__ == "__main__":

@@ -176,7 +176,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
     async def send_gallery(bot: Bot, user_id: int) -> None:
         """Сообщение раздела «Галерея»: заголовок = название кнопки этого бота, маркер бота, баланс как в приветствии."""
         balance = await repo.get_candies(stats.bot_id, user_id)
-        text = gallery.render(texts.gallery, texts.deco, texts.shop_buttons.gallery_title, texts.greeting.template, balance)
+        text = gallery.render(texts.gallery, texts.deco, texts.shop_buttons.gallery_heading, texts.greeting.template, balance)
         try:
             msg = await messaging.send_message(
                 bot, user_id, text, profile.message_image_url, reply_markup=gallery.build_keyboard(texts.gallery)
