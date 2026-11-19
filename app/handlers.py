@@ -1,14 +1,13 @@
 import logging
-import re
 import time
-from html import unescape
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
-from . import captcha, greeting, repo
+from . import captcha, greeting, messaging, repo
+from .models import BotProfile
 from .stats import UserStats
 from .texts import BotTexts
 
@@ -21,13 +20,14 @@ CAPTCHA_MIN_INTERVAL = 1.0
 CAPTCHA_RESEND_AFTER = 1800.0
 
 
-def build_router(stats: UserStats, texts: BotTexts, bot_name: str) -> Router:
+def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Router:
     """Каждый запуск polling получает свежий Router (один роутер нельзя подключить к двум Dispatcher).
 
     Логика: новый пользователь (его нет в БД) сначала проходит капчу; в БД он записывается только
     после правильного ответа. Прошедшему капчу она больше не показывается. Не прошедшие не пишутся в БД
     вообще. Варианты капчи и приветствия берутся из `texts` в момент отправки, поэтому «Песочница»
-    может заменить их без перезапуска бота.
+    может заменить их без перезапуска бота. Картинка сообщений (`profile.message_image_url`) идёт над текстом
+    во всех сообщениях, кроме капчи. Профиль при правке в панели подменяется перезапуском бота.
     """
     router = Router()
     # user_id -> (id сообщения с капчей, порядок кнопок, время показа, версия текстов).
@@ -66,18 +66,13 @@ def build_router(stats: UserStats, texts: BotTexts, bot_name: str) -> Router:
         shown[user_id] = (msg.message_id, order, now, texts.version)
 
     async def send_greeting(bot: Bot, user_id: int, balance: int) -> None:
-        text = greeting.render(texts.greeting, bot_name, balance)
+        text = greeting.render(texts.greeting, profile.name, balance)
         try:
-            await bot.send_message(user_id, text, parse_mode="HTML")
+            await messaging.send_message(bot, user_id, text, profile.message_image_url)
         except TelegramForbiddenError:
             pass  # пользователь заблокировал бота
-        except TelegramBadRequest as e:
-            # Telegram не разобрал разметку — отправляем тот же текст без тегов, чтобы человек не остался без ответа
-            log.warning("Приветствие не ушло с разметкой (%s), отправляю без неё", e)
-            try:
-                await bot.send_message(user_id, unescape(re.sub(r"</?(?:b|blockquote)>", "", text)))
-            except TelegramAPIError:
-                pass
+        except TelegramAPIError as e:
+            log.warning("Приветствие пользователю %s не доставлено: %s", user_id, e)
 
     @router.message(CommandStart(), F.chat.type == "private")
     async def on_start(message: Message, bot: Bot) -> None:

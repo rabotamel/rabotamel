@@ -45,7 +45,14 @@ async def token_exists(token: str) -> bool:
         return res.first() is not None
 
 
-async def add_bot(token: str, name: str, description: str, avatar_url: str | None, username: str | None) -> BotProfile:
+async def add_bot(
+    token: str,
+    name: str,
+    description: str,
+    avatar_url: str | None,
+    username: str | None,
+    message_image_url: str | None = None,
+) -> BotProfile:
     async with db.SessionLocal() as s, s.begin():
         max_pos = (await s.execute(select(func.coalesce(func.max(BotProfile.position), 0)))).scalar_one()
         bot = BotProfile(
@@ -53,6 +60,7 @@ async def add_bot(token: str, name: str, description: str, avatar_url: str | Non
             name=name,
             description=description,
             avatar_url=avatar_url or None,
+            message_image_url=message_image_url or None,
             username=username,
             status=STATUS_QUEUED,
             is_active=False,
@@ -142,13 +150,22 @@ async def delete_bot(bot_id: int) -> None:
         await s.execute(delete(BotProfile).where(BotProfile.id == bot_id))
 
 
-async def update_profile(bot_id: int, name: str, description: str, avatar_url: str | None) -> None:
+async def update_profile(
+    bot_id: int, name: str, description: str, avatar_url: str | None, message_image_url: str | None = None
+) -> None:
+    """Сохраняет профиль из формы. Если в форме указана ссылка на аватарку — сбрасываем «уже отправлено в Telegram»:
+    сохранение формы с ссылкой всегда ставит аватарку заново. Иначе та же ссылка, что уже уходила раньше,
+    молча пропускалась бы, даже если фото бота потом поменяли в самом Telegram."""
+    values = dict(
+        name=name,
+        description=description,
+        avatar_url=avatar_url or None,
+        message_image_url=message_image_url or None,
+    )
+    if avatar_url:
+        values["avatar_applied"] = None
     async with db.SessionLocal() as s, s.begin():
-        await s.execute(
-            update(BotProfile)
-            .where(BotProfile.id == bot_id)
-            .values(name=name, description=description, avatar_url=avatar_url or None)
-        )
+        await s.execute(update(BotProfile).where(BotProfile.id == bot_id).values(**values))
 
 
 async def reorder(ids: list[int]) -> None:

@@ -7,6 +7,7 @@ Telegram → сайт:  get_tg_avatar() берёт актуальное фото
                   поэтому напрямую в браузер она никогда не уходит.
 """
 import asyncio
+import hashlib
 import io
 import ipaddress
 import json
@@ -36,6 +37,15 @@ class AvatarError(Exception):
 
 def invalidate(bot_id: int) -> None:
     _cache.pop(bot_id, None)
+
+
+def prime(bot_id: int, jpeg: bytes) -> None:
+    """Кладёт в кэш только что загруженное в Telegram фото.
+    Сразу после setMyProfilePhoto getUserProfilePhotos может ещё отдавать СТАРОЕ фото (например, поставленное
+    через BotFather), и оно бы закрепилось в кэше на 5 минут — в панели казалось бы, что новая аватарка не встала.
+    Через CACHE_OK_TTL кэш истечёт и фото снова возьмётся из Telegram."""
+    etag = '"pushed-' + hashlib.sha1(jpeg).hexdigest()[:16] + '"'
+    _cache[bot_id] = (time.monotonic() + CACHE_OK_TTL, (jpeg, "image/jpeg", etag))
 
 
 # ---------- Telegram → сайт ----------
@@ -149,8 +159,9 @@ def _to_jpeg(data: bytes) -> bytes:
     return out.getvalue()
 
 
-async def push_avatar(token: str, url: str) -> None:
-    """Ставит фото бота в Telegram (setMyProfilePhoto). Бросает AvatarError с понятной причиной."""
+async def push_avatar(token: str, url: str) -> bytes:
+    """Ставит фото бота в Telegram (setMyProfilePhoto). Возвращает отправленный JPEG.
+    Бросает AvatarError с понятной причиной."""
     data = await _download(url)
     jpeg = await asyncio.to_thread(_to_jpeg, data)
 
@@ -165,3 +176,4 @@ async def push_avatar(token: str, url: str) -> None:
         raise AvatarError(f"не удалось связаться с Telegram ({type(e).__name__})") from None
     if not body.get("ok"):
         raise AvatarError(f"Telegram отклонил фото: {body.get('description', 'неизвестная ошибка')}")
+    return jpeg

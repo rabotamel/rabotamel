@@ -23,7 +23,7 @@ class GreetingTests(unittest.TestCase):
             out = g.render(cfg, "Тест", 42)
             self.assertIn("Тест", out)
             self.assertIn(f"42{g.CANDY}", out)                    # баланс сразу перед 🍬
-            self.assertTrue(out.rstrip().endswith(g.CANDY) or out.rstrip().endswith(g.CANDY + "</blockquote>"))
+            self.assertTrue(out.rstrip().endswith(g.CANDY))        # баланс последней строкой и не в цитате
             self.assertTrue(any(w in out for w in g.ANON_KEY))
             self.assertTrue(any(w in out for w in g.NOLOG_KEY))
             self.assertTrue(any(w in out for w in g.PAY))
@@ -45,6 +45,13 @@ class GreetingTests(unittest.TestCase):
         seen = {(g.LAYOUTS[c.layout].key, c.variant) for c in (g.generate_config(f"x{i}") for i in range(600))}
         expected = {(lay.key, v) for lay in g.LAYOUTS for v in lay.variants}
         self.assertEqual(seen, expected)
+
+    def test_balance_is_never_in_a_quote(self):
+        for i in range(600):
+            out = g.render(g.generate_config(f"q{i}"), "Тест", 5)
+            last = out.rstrip().splitlines()[-1]
+            self.assertNotIn("blockquote", last)
+        self.assertNotIn("quote_balance", {v for lay in g.LAYOUTS for v in lay.variants})
 
     def test_both_point_orders_occur(self):
         orders = {g.generate_config(f"o{i}").order for i in range(200)}

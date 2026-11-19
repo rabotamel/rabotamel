@@ -23,6 +23,8 @@ class BotProfile(Base):
     name: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(Text, default="", server_default="")
     avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # картинка, которая показывается над текстом во всех сообщениях бота (кроме капчи); см. app/messaging.py
+    message_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=STATUS_QUEUED, server_default=STATUS_QUEUED)
 
     # порядок в очереди (меньше — раньше)

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -60,6 +61,7 @@ class BotIn(BaseModel):
     name: str = ""
     description: str = ""
     avatar_url: str = ""
+    message_image_url: str = ""
 
 
 class ReorderIn(BaseModel):
@@ -81,7 +83,8 @@ class PushTestIn(BaseModel):
 
 class CandiesIn(BaseModel):
     target: str = ""
-    amount: int = 0
+    amount: str = ""  # строкой, чтобы не терять знаки после запятой у рублей/долларов
+    currency: Literal["candy", "rub", "usd"] = "candy"
     action: Literal["give", "take"]
     confirm: bool = False
 
@@ -97,17 +100,29 @@ class ConfirmIn(BaseModel):
 
 # ---------- хелперы ----------
 
-def clean_profile(name: str, description: str, avatar_url: str) -> tuple[str, str, str | None]:
-    name, description, avatar_url = name.strip(), description.strip(), avatar_url.strip()
+def _clean_url(url: str, what: str) -> str | None:
+    url = url.strip()
+    if url and not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(400, f"{what} должна начинаться с http:// или https://")
+    return url or None
+
+
+def clean_profile(
+    name: str, description: str, avatar_url: str, message_image_url: str = ""
+) -> tuple[str, str, str | None, str | None]:
+    name, description = name.strip(), description.strip()
     if not name:
         raise HTTPException(400, "Укажите имя бота")
     if len(name) > 64:
         raise HTTPException(400, "Имя бота — не более 64 символов (лимит Telegram)")
     if len(description) > 512:
         raise HTTPException(400, "Описание — не более 512 символов (лимит Telegram)")
-    if avatar_url and not avatar_url.lower().startswith(("http://", "https://")):
-        raise HTTPException(400, "Ссылка на аватарку должна начинаться с http:// или https://")
-    return name, description, avatar_url or None
+    return (
+        name,
+        description,
+        _clean_url(avatar_url, "Ссылка на аватарку"),
+        _clean_url(message_image_url, "Ссылка на картинку для сообщений"),
+    )
 
 
 async def check_token(token: str) -> tuple[str | None, bool]:
@@ -130,6 +145,10 @@ def _bot_dict(b, queue: int | None) -> dict:
         "name": b.name,
         "description": b.description,
         "avatar_url": b.avatar_url,
+        # «версия» аватарки: меняется, когда ссылка или факт её отправки в Telegram меняются, и браузер
+        # не показывает старую картинку из своего кэша
+        "avatar_v": hashlib.md5(f"{b.avatar_url}|{b.avatar_applied}".encode()).hexdigest()[:8],
+        "message_image_url": b.message_image_url,
         "username": b.username,
         "status": b.status,
         "queue": queue,
@@ -263,7 +282,7 @@ async def add_bot(body: BotIn, request: Request):
     token = body.token.strip()
     if not TOKEN_RE.match(token):
         raise HTTPException(400, "Токен выглядит неверно. Формат: 123456789:AA... (из @BotFather)")
-    name, description, avatar = clean_profile(body.name, body.description, body.avatar_url)
+    name, description, avatar, image = clean_profile(body.name, body.description, body.avatar_url, body.message_image_url)
     if await repo.token_exists(token):
         raise HTTPException(400, "Такой токен уже добавлен")
 
@@ -271,7 +290,7 @@ async def add_bot(body: BotIn, request: Request):
     if not valid:
         raise HTTPException(400, "Telegram отклонил этот токен (недействителен или отозван)")
 
-    await repo.add_bot(token, name, description, avatar, username)
+    await repo.add_bot(token, name, description, avatar, username, image)
     request.app.state.manager.poke()
     bus.publish({"type": "changed"})
     return {"ok": True}
@@ -286,10 +305,11 @@ async def reorder(body: ReorderIn):
 
 @api.post("/bots/{bot_id}/edit")
 async def edit_bot(bot_id: int, body: BotIn, request: Request):
-    name, description, avatar = clean_profile(body.name, body.description, body.avatar_url)
-    await repo.update_profile(bot_id, name, description, avatar)
+    name, description, avatar, image = clean_profile(body.name, body.description, body.avatar_url, body.message_image_url)
+    await repo.update_profile(bot_id, name, description, avatar, image)
     avatars.invalidate(bot_id)
-    # если бот сейчас активен — перезапускаем его, чтобы новые имя/описание ушли в Telegram
+    # если бот сейчас активен — перезапускаем его: новые имя/описание/аватарка уходят в Telegram,
+    # а обработчики получают свежий профиль (картинка сообщений)
     request.app.state.manager.poke(switch=await repo.is_active(bot_id))
     bus.publish({"type": "changed"})
     return {"ok": True}
@@ -357,16 +377,11 @@ async def reveal_token(bot_id: int):
 
 # ---------- «Песочница» ----------
 
-@api.get("/sandbox/preview")
-async def sandbox_preview(request: Request):
-    return sandbox.preview(request.app.state.manager)
-
-
 @api.post("/sandbox/candies")
 async def sandbox_candies(body: CandiesIn, request: Request):
     try:
         return await sandbox.change_candies(
-            request.app.state.manager, body.target, body.amount, body.action == "give", body.confirm
+            request.app.state.manager, body.target, body.amount, body.currency, body.action == "give", body.confirm
         )
     except sandbox.SandboxError as e:
         raise HTTPException(e.status, e.message)

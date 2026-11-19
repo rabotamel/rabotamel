@@ -7,7 +7,7 @@
 <style>
   :root{
     --bg:#f5f6f8;--card:#fff;--text:#14171c;--muted:#6b7280;--line:#e6e8ec;
-    --green:#16a34a;--blue:#2563eb;--red:#dc2626;--gray:#9ca3af;
+    --green:#16a34a;--blue:#2563eb;--red:#dc2626;--gray:#9ca3af;--pink:#ec4899;
     --amber-bg:#fff7db;--amber-line:#f5c542;--amber-text:#6b4e00;
     --radius:16px;color-scheme:light dark;
   }
@@ -43,6 +43,7 @@
   .btn{height:40px;padding:0 16px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit;font-weight:550;cursor:pointer}
   .btn.green{background:var(--green);border-color:var(--green);color:#fff}
   .btn.red{background:var(--red);border-color:var(--red);color:#fff}
+  .btn.pink{background:var(--pink);border-color:var(--pink);color:#fff}
   .btn:disabled{opacity:.6;cursor:default}
   .avatar{width:48px;height:48px;border-radius:50%;object-fit:cover;background:var(--bg);border:1px solid var(--line);display:grid;place-items:center;font-weight:650;color:var(--muted);flex:none;overflow:hidden}
   .name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -96,11 +97,15 @@
   .note{padding:28px;text-align:center;color:var(--muted)}
 
   /* окна */
-  dialog{border:1px solid var(--line);border-radius:18px;background:var(--card);color:var(--text);padding:22px;width:min(440px,calc(100vw - 32px))}
+  dialog{max-height:calc(100dvh - 24px);border:1px solid var(--line);border-radius:18px;background:var(--card);color:var(--text);padding:22px;width:min(440px,calc(100vw - 32px))}
   dialog::backdrop{background:rgba(0,0,0,.5)}
   dialog h2{margin:0 0 4px;font-size:18px}
   dialog p{margin:6px 0 0;color:var(--muted)}
   label{display:block;font-size:13px;color:var(--muted);margin:14px 0 6px}
+  /* поля профиля бота: заголовок обычного размера и цвета текста, пояснение серым под полем */
+  .field{margin-top:14px}
+  .field label{font-size:15px;color:var(--text);margin:0 0 6px}
+  .field .fhint{font-size:13px;color:var(--muted);margin-top:6px}
   input,textarea{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
   input:focus,textarea:focus{outline:2px solid var(--blue);outline-offset:-1px}
   textarea{resize:vertical;min-height:70px}
@@ -115,11 +120,24 @@
   .sb-note.off{color:var(--red)}
   .msg{font-size:13px;min-height:18px;margin-top:12px;color:var(--green);white-space:pre-line}
   .msg.bad{color:var(--red)}
-  .tg-label{font-size:12px;color:var(--muted);margin:14px 0 6px}
-  .tg{background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:10px 12px;white-space:pre-wrap;word-break:break-word}
-  .tg blockquote{margin:4px 0;padding:2px 0 2px 10px;border-left:3px solid var(--blue);border-radius:2px}
-  .tg-btns{display:flex;gap:8px;margin-top:8px}
-  .tg-btns span{flex:1;text-align:center;padding:8px 0;border-radius:10px;border:1px solid var(--line);background:var(--card);font-size:20px}
+  /* строка суммы: [ + / − ] [ сумма ] [ 🍬 / ₽ / $ ] */
+  .amt{display:flex;gap:8px;align-items:flex-start}
+  .amt > input{flex:1;min-width:0;height:44px}
+  .dd{position:relative;flex:none}
+  .dd-btn{position:relative;width:48px;height:44px;border-radius:12px;border:1px solid transparent;color:#fff;display:grid;place-items:center;cursor:pointer;padding:0;font:inherit;font-size:22px;font-weight:650;line-height:1}
+  .dd-btn.green{background:var(--green);border-color:var(--green)}
+  .dd-btn.red{background:var(--red);border-color:var(--red)}
+  .dd-btn.pink{background:var(--pink);border-color:var(--pink)}
+  .dd-btn:disabled{opacity:.6;cursor:default}
+  .dd-btn svg.ic{width:22px;height:22px;display:block}
+  .dd-btn svg.ic.candy{width:30px;height:30px}
+  .dd-btn .caret{position:absolute;right:4px;bottom:4px;width:8px;height:8px;opacity:.85;transition:transform .15s}
+  .dd.open .dd-main .caret{transform:rotate(180deg)}
+  .dd-list{position:absolute;top:calc(100% + 6px);left:0;z-index:20;display:none;flex-direction:column;gap:6px}
+  .dd.open .dd-list{display:flex}
+  .dd-list .dd-btn{box-shadow:0 6px 18px rgba(0,0,0,.22)}
+  .conv{margin-top:8px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .sb-submit-row .btn{min-width:120px}
   .btn.danger-outline{border-color:var(--red);color:var(--red)}
 
   #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;z-index:60;max-width:calc(100vw - 32px)}
@@ -163,28 +181,20 @@
 
     <div class="card sb">
       <h3>Конфеты 🍬</h3>
-      <p class="hint">Выдача и изъятие у пользователя бота. При выдаче ему придёт «Вы получили +N🍬», при изъятии уведомления нет.</p>
+      <p class="hint">Выдача и изъятие у пользователя бота. Знак слева — выдать или изъять, валюта справа — в чём вводится сумма (курс: 1🍬 = 0,8 ₽ = 0,01 $). Выдача в 🍬 придёт пользователю как «Вы получили +N🍬», в рублях или долларах — как «Вы купили N🍬 за …». При изъятии уведомления нет.</p>
       <label for="sb-user">Юзернейм или ID пользователя</label>
       <input id="sb-user" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
-      <label for="sb-amount">Количество</label>
-      <input id="sb-amount" type="number" inputmode="numeric" min="1" step="1" placeholder="100">
-      <div class="msg" id="sb-candy-msg"></div>
-      <div class="row">
-        <button type="button" class="btn red" id="sb-take">Изъять 🍬</button>
-        <button type="button" class="btn green" id="sb-give">Выдать 🍬</button>
+      <label for="sb-amount">Сумма</label>
+      <div class="amt">
+        <div class="dd" id="dd-sign"></div>
+        <input id="sb-amount" type="text" inputmode="numeric" placeholder="100" autocomplete="off" spellcheck="false">
+        <div class="dd" id="dd-cur"></div>
       </div>
-    </div>
-
-    <div class="card sb">
-      <h3>Рандомизация текстов</h3>
-      <p class="hint">Заново подбирает капчу и приветствие основного бота: синонимы, эмодзи, компоновку. Новый вариант сохраняется и дальше не меняется.</p>
-      <div class="tg-label">Приветствие сейчас</div>
-      <div class="tg" id="sb-prev-greeting">—</div>
-      <div class="tg-label">Капча сейчас</div>
-      <div class="tg" id="sb-prev-captcha">—</div>
-      <div class="tg-btns" id="sb-prev-buttons"></div>
-      <div class="msg" id="sb-rand-msg"></div>
-      <div class="row"><button type="button" class="btn" id="sb-reroll">Перерандомизировать</button></div>
+      <div class="conv" id="sb-conv">≈ 0🍬, ≈ 0₽, ≈ 0$</div>
+      <div class="msg" id="sb-candy-msg"></div>
+      <div class="row sb-submit-row">
+        <button type="button" class="btn green" id="sb-submit">Выдать</button>
+      </div>
     </div>
 
     <div class="card sb">
@@ -195,22 +205,43 @@
       <div class="msg" id="sb-del-msg"></div>
       <div class="row"><button type="button" class="btn red" id="sb-delete">Удалить из базы</button></div>
     </div>
+
+    <div class="card sb">
+      <h3>Уникальные текста</h3>
+      <p class="hint">Переписывает все текста в боте и делает их уникальными.</p>
+      <div class="msg" id="sb-rand-msg"></div>
+      <div class="row"><button type="button" class="btn" id="sb-reroll">Перенаписать текста</button></div>
+    </div>
   </section>
 </main>
 
 <dialog id="dlg-token">
   <form id="form-token" autocomplete="off">
     <h2 id="dlg-token-title">Новый токен</h2>
-    <div id="field-token">
+    <div class="field" id="field-token">
       <label for="f-token">Токен бота</label>
       <input id="f-token" name="token" placeholder="123456789:AAH...">
     </div>
-    <label for="f-name">Имя бота (до 64 символов)</label>
-    <input id="f-name" name="name" maxlength="64" required>
-    <label for="f-avatar">Ссылка на аватарку (JPG или PNG; уйдёт в Telegram при запуске бота)</label>
-    <input id="f-avatar" name="avatar_url" placeholder="https://...">
-    <label for="f-desc">Описание (до 512 символов)</label>
-    <textarea id="f-desc" name="description" maxlength="512"></textarea>
+    <div class="field">
+      <label for="f-name">Имя бота</label>
+      <input id="f-name" name="name" maxlength="64" required>
+      <div class="fhint">до 64 символов</div>
+    </div>
+    <div class="field">
+      <label for="f-desc">Описание</label>
+      <textarea id="f-desc" name="description" maxlength="512"></textarea>
+      <div class="fhint">до 512 символов</div>
+    </div>
+    <div class="field">
+      <label for="f-avatar">Ссылка на аватарку</label>
+      <input id="f-avatar" name="avatar_url" placeholder="https://...">
+      <div class="fhint">JPG или PNG; уйдёт в Telegram при запуске бота</div>
+    </div>
+    <div class="field">
+      <label for="f-image">Ссылка на картинку в сообщениях</label>
+      <input id="f-image" name="message_image_url" placeholder="https://...">
+      <div class="fhint">Показывается над текстом во всех сообщениях бота, кроме капчи. В идеале изображение 1680 × 940</div>
+    </div>
     <div class="err" id="token-err"></div>
     <div class="row">
       <button type="button" class="btn" data-close="dlg-token">Отмена</button>
@@ -297,7 +328,7 @@ function scheduleReload() {
 function avatarHtml(b) {
   // Картинку отдаёт наш сервер: актуальное фото бота из Telegram (или новая ссылка, пока она не ушла в Telegram)
   const letter = esc((b.name || '?').slice(0, 1).toUpperCase());
-  return `<img class="avatar" src="/api/bots/${b.id}/avatar" alt="" data-letter="${letter}" referrerpolicy="no-referrer">`;
+  return `<img class="avatar" src="/api/bots/${b.id}/avatar?v=${esc(b.avatar_v)}" alt="" data-letter="${letter}" referrerpolicy="no-referrer">`;
 }
 // Если картинки нет — вместо неё буква имени
 document.addEventListener('error', (e) => {
@@ -425,7 +456,6 @@ document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () 
   $('#tab-bot').hidden = tab !== 'bot';
   $('#tab-tokens').hidden = tab !== 'tokens';
   $('#tab-sandbox').hidden = tab !== 'sandbox';
-  if (tab === 'sandbox') loadPreview();
 }));
 
 $('#btn-edit').addEventListener('click', () => { editing = !editing; if (S) renderList(); });
@@ -487,6 +517,7 @@ function openTokenDialog(bot) {
   $('#f-token').value = '';
   $('#f-name').value = bot ? bot.name : '';
   $('#f-avatar').value = bot ? (bot.avatar_url || '') : '';
+  $('#f-image').value = bot ? (bot.message_image_url || '') : '';
   $('#f-desc').value = bot ? (bot.description || '') : '';
   $('#token-err').textContent = '';
   $('#dlg-token').showModal();
@@ -599,7 +630,6 @@ function setMsg(sel, text, bad) {
 }
 function sandboxReady() { return !!(S && S.current && S.current.running); }
 
-let previewBotId = null;
 function renderSandbox() {
   const note = $('#sb-note');
   const ready = sandboxReady();
@@ -610,69 +640,158 @@ function renderSandbox() {
     note.classList.add('off');
     note.textContent = S && S.current ? 'Основной бот сейчас не запущен — действия недоступны.' : 'Нет активного бота — действия недоступны.';
   }
-  ['#sb-give', '#sb-take', '#sb-reroll', '#sb-delete'].forEach((id) => { $(id).disabled = !ready; });
-  // при смене основного бота (ротация) обновляем показанные тексты
-  const id = ready ? S.current.id : null;
-  if (id !== previewBotId) { previewBotId = id; if (tab === 'sandbox') loadPreview(); }
+  ['#sb-submit', '#sb-reroll', '#sb-delete'].forEach((id) => { $(id).disabled = !ready; });
 }
 
-function showPreview(p) {
-  const ok = p && p.running;
-  // HTML приходит с нашего сервера: имя бота экранировано, остальное — наши шаблоны
-  $('#sb-prev-greeting').innerHTML = ok ? p.greeting_html : '—';
-  $('#sb-prev-captcha').innerHTML = ok ? p.captcha_html : '—';
-  $('#sb-prev-buttons').innerHTML = ok ? p.captcha_buttons.map((e) => `<span>${esc(e)}</span>`).join('') : '';
+/* ----- строка суммы: знак (+ / −) и валюта (🍬 / ₽ / $) ----- */
+const IC = {
+  plus: '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  minus: '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M5 12h14"/></svg>',
+  // конфетка в обёртке: белая на розовой кнопке, розовые полоски на «шарике»
+  candy: '<svg class="ic candy" viewBox="0 0 24 24" fill="none"><path d="M1.8 7.6 7.6 12l-5.8 4.4c-.5.4-1.2 0-1.2-.6V8.2c0-.6.7-1 1.2-.6z" fill="#fff"/><path d="M22.2 7.6 16.4 12l5.8 4.4c.5.4 1.2 0 1.2-.6V8.2c0-.6-.7-1-1.2-.6z" fill="#fff"/><circle cx="12" cy="12" r="6.4" fill="#fff"/><path d="M8.6 8.6c2.6.5 4.6 2.5 5.2 5.2M10.8 6.9c2.2.6 3.9 2.3 4.5 4.5" stroke="var(--pink)" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  rub: '<span aria-hidden="true">₽</span>',
+  usd: '<span aria-hidden="true">$</span>',
+  caret: '<svg class="caret" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1 2.6 4 5.6l3-3"/></svg>',
+};
+const DD = {
+  sign: {el: '#dd-sign', order: ['plus', 'minus'], color: {plus: 'green', minus: 'red'},
+         label: {plus: 'Выдать', minus: 'Изъять'}},
+  cur:  {el: '#dd-cur', order: ['candy', 'rub', 'usd'], color: {candy: 'pink', rub: 'green', usd: 'green'},
+         label: {candy: 'Конфеты', rub: 'Рубли', usd: 'Доллары'}},
+};
+const sb = {sign: 'plus', cur: 'candy'};
+
+function renderDd(name) {
+  const d = DD[name], cur = sb[name];
+  const opt = (k) => `<button type="button" class="dd-btn dd-opt ${d.color[k]}" data-dd="${name}" data-val="${k}" title="${d.label[k]}" aria-label="${d.label[k]}">${IC[k]}</button>`;
+  $(d.el).innerHTML =
+    `<button type="button" class="dd-btn dd-main ${d.color[cur]}" data-dd="${name}" data-toggle="1" aria-haspopup="true" aria-expanded="false" title="${d.label[cur]}" aria-label="${d.label[cur]}">${IC[cur]}${IC.caret}</button>` +
+    `<div class="dd-list">${d.order.filter((k) => k !== cur).map(opt).join('')}</div>`;
 }
-async function loadPreview() {
-  try { showPreview(await api('GET', '/api/sandbox/preview')); } catch (_) { showPreview(null); }
+function closeDd() {
+  document.querySelectorAll('.dd.open').forEach((el) => {
+    el.classList.remove('open');
+    const m = el.querySelector('.dd-main'); if (m) m.setAttribute('aria-expanded', 'false');
+  });
+}
+function applySbState() {
+  renderDd('sign'); renderDd('cur');
+  const give = sb.sign === 'plus';
+  const btn = $('#sb-submit');
+  btn.textContent = give ? 'Выдать' : 'Изъять';
+  btn.className = 'btn ' + (give ? 'green' : 'red');
+  $('#sb-amount').inputMode = sb.cur === 'candy' ? 'numeric' : 'decimal';
+  updateConv();
 }
 
-async function sbCandies(give) {
+/* Курс: 1🍬 = 0,8 ₽ = 0,01 $. Считаем в целых «копейках/центах», чтобы не ловить ошибки float.
+   Копейки: 1🍬 = 80 коп., 1🍬 = 1 цент. */
+function parseAmt(raw, cur) {
+  const t = String(raw || '').trim().replace(/\s/g, '').replace(',', '.');
+  if (cur === 'candy') return /^\d+$/.test(t) ? {n: Number(t)} : null;
+  return /^\d+(\.\d{1,2})?$/.test(t) ? {cents: Math.round(parseFloat(t) * 100)} : null;
+}
+function toCandies(a, cur) {       // то же округление, что на сервере (половина вверх)
+  if (cur === 'candy') return a.n;
+  if (cur === 'rub') return Math.floor((a.cents + 40) / 80);
+  return a.cents;
+}
+function convertAll(a, cur) {      // приблизительные значения во всех валютах бота
+  let candies, rubC, usdC;
+  if (cur === 'candy') { candies = a.n; rubC = a.n * 80; usdC = a.n; }
+  else if (cur === 'rub') { candies = a.cents / 80; rubC = a.cents; usdC = a.cents / 80; }
+  else { candies = a.cents; rubC = a.cents * 80; usdC = a.cents; }
+  return {candies: Math.floor(candies + 0.5), rub: rubC / 100, usd: usdC / 100};
+}
+const fmtMoney = (v) => Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 2}).replace(/\s/g, ' ');
+const SYM = {rub: '₽', usd: '$'};
+function updateConv() {
+  const a = parseAmt($('#sb-amount').value, sb.cur) || (sb.cur === 'candy' ? {n: 0} : {cents: 0});
+  const c = convertAll(a, sb.cur);
+  $('#sb-conv').textContent = `≈ ${fmtNum(c.candies)}🍬, ≈ ${fmtMoney(c.rub)}₽, ≈ ${fmtMoney(c.usd)}$`;
+}
+
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-dd]');
+  if (!t) { closeDd(); return; }
+  const name = t.dataset.dd, box = t.closest('.dd');
+  if (t.dataset.toggle) {                         // нажали на саму кнопку: раскрыть или скрыть список
+    const open = !box.classList.contains('open');
+    closeDd();
+    if (open) { box.classList.add('open'); t.setAttribute('aria-expanded', 'true'); }
+    return;
+  }
+  sb[name] = t.dataset.val;                       // выбрали вариант из списка: список скрывается, кнопка меняется
+  closeDd();
+  if (name === 'cur' && sb.cur === 'candy') $('#sb-amount').value = $('#sb-amount').value.replace(/[.,]\d*/, '');  // у конфет дроби нет
+  applySbState();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDd(); });
+$('#sb-amount').addEventListener('input', (e) => {
+  // только цифры и один разделитель (у конфет разделителя нет)
+  let v = e.target.value.replace(sb.cur === 'candy' ? /\D/g : /[^\d.,]/g, '');
+  if (sb.cur !== 'candy') { const i = v.search(/[.,]/); if (i >= 0) v = v.slice(0, i + 1) + v.slice(i + 1).replace(/[.,]/g, ''); }
+  if (v !== e.target.value) e.target.value = v;
+  updateConv();
+});
+applySbState();
+
+async function sbSubmit() {
+  const give = sb.sign === 'plus', cur = sb.cur;
   const target = $('#sb-user').value.trim();
   const raw = $('#sb-amount').value.trim();
   setMsg('#sb-candy-msg', '');
   if (!target) { setMsg('#sb-candy-msg', 'Укажите юзернейм или ID', true); return; }
-  if (!/^\d+$/.test(raw) || Number(raw) < 1) { setMsg('#sb-candy-msg', 'Количество — целое число больше нуля', true); return; }
-  const amount = Number(raw);
+  const a = parseAmt(raw, cur);
+  if (!a || (cur === 'candy' ? a.n < 1 : a.cents < 1)) {
+    setMsg('#sb-candy-msg', cur === 'candy' ? 'Количество — целое число больше нуля' : 'Сумма — число больше нуля, не больше двух знаков после запятой', true);
+    return;
+  }
+  const candies = toCandies(a, cur);
+  if (candies < 1) { setMsg('#sb-candy-msg', 'Сумма меньше одной конфеты', true); return; }
+  const paid = cur === 'candy' ? '' : fmtMoney(a.cents / 100) + SYM[cur];
   const ok = await askConfirm({
     title: give ? 'Выдать конфеты?' : 'Изъять конфеты?',
     text: give
-      ? `Выдать ${fmtNum(amount)}🍬 пользователю ${target}? Ему придёт уведомление.`
-      : `Изъять ${fmtNum(amount)}🍬 у пользователя ${target}? Он не получит уведомления.`,
+      ? (cur === 'candy'
+          ? `Выдать ${fmtNum(candies)}🍬 пользователю ${target}? Ему придёт уведомление.`
+          : `Выдать ${fmtNum(candies)}🍬 за ${paid} пользователю ${target}? Ему придёт сообщение «Вы купили ${fmtNum(candies)}🍬 за ${paid}».`)
+      : (cur === 'candy'
+          ? `Изъять ${fmtNum(candies)}🍬 у пользователя ${target}? Он не получит уведомления.`
+          : `Изъять ${fmtNum(candies)}🍬 (${paid}) у пользователя ${target}? Он не получит уведомления.`),
     ok: give ? 'Выдать' : 'Изъять',
     danger: !give,
   });
   if (!ok) return;
-  const btns = [$('#sb-give'), $('#sb-take')];
-  btns.forEach((b) => { b.disabled = true; });
+  $('#sb-submit').disabled = true;
   try {
-    const r = await api('POST', '/api/sandbox/candies', {target, amount, action: give ? 'give' : 'take', confirm: true});
+    const r = await api('POST', '/api/sandbox/candies', {target, amount: raw, currency: cur, action: give ? 'give' : 'take', confirm: true});
+    const what = `${fmtNum(r.candies)}🍬` + (r.paid ? ` (${r.paid}${SYM[r.currency]})` : '');
     if (give) {
-      setMsg('#sb-candy-msg', `Выдано ${fmtNum(amount)}🍬 · ${r.who}\nБаланс: ${fmtNum(r.balance)}🍬\n` +
+      setMsg('#sb-candy-msg', `Выдано ${what} · ${r.who}\nБаланс: ${fmtNum(r.balance)}🍬\n` +
         (r.notified ? 'Уведомление отправлено.' : 'Уведомление не доставлено: ' + (r.notify_error || 'ошибка Telegram')));
     } else {
       setMsg('#sb-candy-msg', `Изъято ${fmtNum(r.removed)}🍬 · ${r.who}\nБаланс: ${fmtNum(r.balance)}🍬` +
-        (r.removed < amount ? '\n(на балансе было меньше — ниже нуля он не уходит)' : ''));
+        (r.removed < r.candies ? '\n(на балансе было меньше — ниже нуля он не уходит)' : ''));
     }
   } catch (err) { setMsg('#sb-candy-msg', err.message, true); }
   renderSandbox();
 }
-$('#sb-give').addEventListener('click', () => sbCandies(true));
-$('#sb-take').addEventListener('click', () => sbCandies(false));
+$('#sb-submit').addEventListener('click', sbSubmit);
 
 $('#sb-reroll').addEventListener('click', async () => {
   setMsg('#sb-rand-msg', '');
   const ok = await askConfirm({
-    title: 'Перерандомизировать тексты?',
-    text: 'Капча и приветствие основного бота будут заменены новыми вариантами. Прежний вариант вернуть не получится.',
-    ok: 'Перерандомизировать',
+    title: 'Перенаписать текста?',
+    text: 'Все текста бота будут переписаны заново и станут уникальными. Прежний вариант вернуть не получится.',
+    ok: 'Перенаписать текста',
     danger: true,
   });
   if (!ok) return;
   $('#sb-reroll').disabled = true;
   try {
-    showPreview(await api('POST', '/api/sandbox/randomize', {confirm: true}));
-    setMsg('#sb-rand-msg', 'Готово: новые капча и приветствие сохранены и уже работают.');
+    await api('POST', '/api/sandbox/randomize', {confirm: true});
+    setMsg('#sb-rand-msg', 'Готово: текста переписаны и уже работают.');
   } catch (err) { setMsg('#sb-rand-msg', err.message, true); }
   renderSandbox();
 });

@@ -20,7 +20,7 @@
 Правила:
   * Вариант создаётся один раз для бота и не меняется, пока жив бот (меняется только кнопкой «Песочница»).
   * 🍬 в конце строки баланса — валюта бота, ни при каких условиях не заменяется (проверяется в validate()).
-  * Формат разметки — Telegram HTML (parse_mode="HTML"): <b> для жирного, <blockquote> для цитаты.
+  * Формат разметки — Telegram HTML (parse_mode="HTML"): <b> для жирного, <blockquote> для цитаты (только у пунктов).
   * Индексы в словарях только добавляются в конец, не переставляются и не удаляются.
 """
 import hashlib
@@ -119,8 +119,8 @@ PALETTES: tuple[tuple[str, str, str, str], ...] = (
 #   bullet_dot   — маркер «•» в начале строки
 #   bullet_dash  — маркер «—» в начале строки (разделитель внутри строки тогда «:»)
 #   quote_points — оба пункта в цитате, остальное обычным текстом
-#   quote_balance— баланс в цитате
 #   airy         — дополнительная пустая строка между пунктами
+# Баланс никогда не оформляется цитатой (владелец проекта убрал такой вариант: выглядит криво).
 @dataclass(frozen=True)
 class Layout:
     key: str
@@ -133,7 +133,7 @@ LAYOUTS: tuple[Layout, ...] = (
     Layout("classic", "Классический вертикальный вид", "anon_first", ("plain",)),
     Layout("swapped", "Пункты поменяны местами", "nolog_first", ("plain",)),
     Layout("emphasis", "Маркеры или жирные ключевые слова", "any", ("bold", "bullet_dot", "bullet_dash")),
-    Layout("calm", "Цитата или «воздух»", "any", ("quote_points", "quote_balance", "airy")),
+    Layout("calm", "Цитата или «воздух»", "any", ("quote_points", "airy")),
 )
 
 ORDERS = ("anon_first", "nolog_first")
@@ -253,8 +253,6 @@ def build_template(
     if variant == "quote_points":
         # рядом с цитатой пустые строки не нужны: она и так отделена визуально
         return f"{title}\n<blockquote>{points}</blockquote>\n{balance}"
-    if variant == "quote_balance":
-        return f"{title}\n\n{points}\n<blockquote>{balance}</blockquote>"
     return f"{title}\n\n{points}\n\n{balance}"
 
 
