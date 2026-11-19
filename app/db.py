@@ -49,6 +49,11 @@ async def init_db(database_url: str) -> None:
         # create_all не добавляет колонки в уже существующие таблицы — докидываем вручную
         await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS position integer NOT NULL DEFAULT 0"))
         await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS active_since timestamptz"))
+        await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS avatar_applied text"))
+        await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS captcha_config text"))
+        await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS texts_config text"))
+        await conn.execute(text("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS candies bigint NOT NULL DEFAULT 0"))
+        await conn.execute(text("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS username varchar(64)"))
         await conn.execute(text("UPDATE bot_profiles SET position = id WHERE position = 0"))
         await conn.execute(text("UPDATE bot_profiles SET active_since = now() WHERE is_active AND active_since IS NULL"))
 

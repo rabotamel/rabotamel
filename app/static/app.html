@@ -18,7 +18,7 @@
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
   [hidden]{display:none!important}
-  .wrap{max-width:720px;margin:0 auto;padding:0 16px}
+  .wrap{max-width:720px;margin:0 auto;padding-left:16px;padding-right:16px}
 
   /* предупреждения */
   .banner{position:sticky;top:0;z-index:30;background:var(--amber-bg);border-bottom:1px solid var(--amber-line);color:var(--amber-text)}
@@ -36,7 +36,7 @@
   .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-top:10px}
   .tab{background:none;border:0;padding:12px 14px;font:inherit;font-weight:550;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
   .tab.active{color:var(--text);border-bottom-color:var(--text)}
-  main{padding-top:20px;padding-bottom:64px}
+  main{padding-top:24px;padding-bottom:64px}
 
   /* общие элементы */
   .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius)}
@@ -56,7 +56,8 @@
   .hero .name{font-size:18px}
   .tokline{margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
   .token{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);word-break:break-all}
-  .pill{font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;white-space:nowrap;align-self:flex-start}
+  .pill{font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;white-space:nowrap}
+  .side{display:flex;flex-direction:column;align-items:flex-end;gap:10px;align-self:flex-start;flex:none}
   .pill.ok{background:rgba(22,163,74,.12);color:var(--green)}
   .pill.warn{background:rgba(245,158,11,.14);color:#b45309}
   @media(prefers-color-scheme:dark){.pill.warn{color:#f5d77a}}
@@ -67,28 +68,30 @@
   .stat .value.sm{font-size:19px;line-height:1.5;padding-top:6px}
   .empty{padding:32px 20px;text-align:center;color:var(--muted)}
   .empty p{margin:0 0 16px}
-  @media(max-width:420px){.hero{flex-wrap:wrap}.pill{order:-1}}
 
   /* вкладка «Токены» */
   .toolbar{display:flex;justify-content:space-between;gap:10px;margin-bottom:14px}
-  .item{position:relative;display:flex;align-items:center;gap:12px;padding:14px 46px 14px 14px;margin-bottom:10px}
-  .item.active{border:2px solid var(--green);padding:13px 45px 13px 13px}
+  .item{position:relative;display:flex;align-items:center;gap:10px;padding:14px 62px 14px 8px;margin-bottom:10px}
+  .item.active{border:2px solid var(--green);padding:13px 61px 13px 7px}
   .item.blocked{opacity:.8}
   .item .info{min-width:0;flex:1}
-  .badge{position:absolute;top:10px;right:10px;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700}
+  .badge{position:absolute;top:10px;right:10px;min-width:32px;height:24px;padding:0 8px;border-radius:999px;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}
   .badge.green{background:var(--green)}
   .badge.blue{background:var(--blue)}
   .badge.gray{background:var(--gray)}
   .ctrl{display:none;align-items:center;gap:2px;flex:none}
   .editing .ctrl{display:flex}
+  .editing .handle{display:none}
   .handle{width:28px;height:40px;display:grid;place-items:center;color:var(--muted);cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
   .handle.ph{visibility:hidden}
   .trash{width:34px;height:34px;border:0;background:none;color:var(--red);cursor:pointer;display:grid;place-items:center;border-radius:10px}
   .trash:active{background:rgba(220,38,38,.12)}
+  .gearbtn{width:34px;height:34px;border:0;background:none;color:var(--muted);cursor:pointer;display:grid;place-items:center;border-radius:10px}
+  .gearbtn:active{background:var(--bg)}
+  .icon-btn.denied{color:var(--red);border-color:var(--red)}
   .item.dragging{box-shadow:0 10px 28px rgba(0,0,0,.22);transform:scale(1.015);z-index:5}
   .mini{display:none;margin-top:4px}
   .editing .mini{display:block}
-  .editing .item{cursor:pointer}
   .bad{color:var(--red)}
   .note{padding:28px;text-align:center;color:var(--muted)}
 
@@ -103,6 +106,21 @@
   textarea{resize:vertical;min-height:70px}
   .err{color:var(--red);font-size:13px;min-height:18px;margin-top:12px}
   .row{display:flex;gap:10px;justify-content:flex-end;margin-top:14px}
+
+  /* вкладка «Песочница» */
+  .sb{padding:18px;margin-bottom:12px}
+  .sb h3{margin:0 0 4px;font-size:16px}
+  .sb .hint{margin:0 0 4px;color:var(--muted);font-size:13px}
+  .sb-note{font-size:14px}
+  .sb-note.off{color:var(--red)}
+  .msg{font-size:13px;min-height:18px;margin-top:12px;color:var(--green);white-space:pre-line}
+  .msg.bad{color:var(--red)}
+  .tg-label{font-size:12px;color:var(--muted);margin:14px 0 6px}
+  .tg{background:var(--bg);border:1px solid var(--line);border-radius:14px;padding:10px 12px;white-space:pre-wrap;word-break:break-word}
+  .tg blockquote{margin:4px 0;padding:2px 0 2px 10px;border-left:3px solid var(--blue);border-radius:2px}
+  .tg-btns{display:flex;gap:8px;margin-top:8px}
+  .tg-btns span{flex:1;text-align:center;padding:8px 0;border-radius:10px;border:1px solid var(--line);background:var(--card);font-size:20px}
+  .btn.danger-outline{border-color:var(--red);color:var(--red)}
 
   #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;z-index:60;max-width:calc(100vw - 32px)}
 </style>
@@ -126,6 +144,7 @@
 <nav class="wrap tabs">
   <button class="tab active" data-tab="bot">Бот</button>
   <button class="tab" data-tab="tokens">Токены</button>
+  <button class="tab" data-tab="sandbox">Песочница</button>
 </nav>
 
 <main class="wrap">
@@ -138,6 +157,45 @@
     </div>
     <div id="list"></div>
   </section>
+
+  <section id="tab-sandbox" hidden>
+    <div class="card sb"><div class="sb-note" id="sb-note">—</div></div>
+
+    <div class="card sb">
+      <h3>Конфеты 🍬</h3>
+      <p class="hint">Выдача и изъятие у пользователя бота. При выдаче ему придёт «Вы получили +N🍬», при изъятии уведомления нет.</p>
+      <label for="sb-user">Юзернейм или ID пользователя</label>
+      <input id="sb-user" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label for="sb-amount">Количество</label>
+      <input id="sb-amount" type="number" inputmode="numeric" min="1" step="1" placeholder="100">
+      <div class="msg" id="sb-candy-msg"></div>
+      <div class="row">
+        <button type="button" class="btn red" id="sb-take">Изъять 🍬</button>
+        <button type="button" class="btn green" id="sb-give">Выдать 🍬</button>
+      </div>
+    </div>
+
+    <div class="card sb">
+      <h3>Рандомизация текстов</h3>
+      <p class="hint">Заново подбирает капчу и приветствие основного бота: синонимы, эмодзи, компоновку. Новый вариант сохраняется и дальше не меняется.</p>
+      <div class="tg-label">Приветствие сейчас</div>
+      <div class="tg" id="sb-prev-greeting">—</div>
+      <div class="tg-label">Капча сейчас</div>
+      <div class="tg" id="sb-prev-captcha">—</div>
+      <div class="tg-btns" id="sb-prev-buttons"></div>
+      <div class="msg" id="sb-rand-msg"></div>
+      <div class="row"><button type="button" class="btn" id="sb-reroll">Перерандомизировать</button></div>
+    </div>
+
+    <div class="card sb">
+      <h3>Удалить пользователя из базы</h3>
+      <p class="hint">Вместе с балансом. При следующем заходе бот снова покажет ему капчу, и он будет считаться новым.</p>
+      <label for="sb-del-user">Юзернейм или ID пользователя</label>
+      <input id="sb-del-user" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="msg" id="sb-del-msg"></div>
+      <div class="row"><button type="button" class="btn red" id="sb-delete">Удалить из базы</button></div>
+    </div>
+  </section>
 </main>
 
 <dialog id="dlg-token">
@@ -149,7 +207,7 @@
     </div>
     <label for="f-name">Имя бота (до 64 символов)</label>
     <input id="f-name" name="name" maxlength="64" required>
-    <label for="f-avatar">Ссылка на аватарку</label>
+    <label for="f-avatar">Ссылка на аватарку (JPG или PNG; уйдёт в Telegram при запуске бота)</label>
     <input id="f-avatar" name="avatar_url" placeholder="https://...">
     <label for="f-desc">Описание (до 512 символов)</label>
     <textarea id="f-desc" name="description" maxlength="512"></textarea>
@@ -168,6 +226,21 @@
     <button type="button" class="btn" data-close="dlg-delete">Отмена</button>
     <button type="button" class="btn red" id="delete-confirm">Удалить</button>
   </div>
+</dialog>
+
+<dialog id="dlg-confirm">
+  <h2 id="confirm-title"></h2>
+  <p id="confirm-text"></p>
+  <div class="row">
+    <button type="button" class="btn" id="confirm-cancel">Отмена</button>
+    <button type="button" class="btn" id="confirm-ok">Подтвердить</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-push">
+  <h2 id="push-title"></h2>
+  <p id="push-text"></p>
+  <div class="row" id="push-actions"></div>
 </dialog>
 
 <div id="toast" hidden></div>
@@ -222,14 +295,26 @@ function scheduleReload() {
 
 /* ---------- отрисовка ---------- */
 function avatarHtml(b) {
-  if (b.avatar_url) return `<img class="avatar" src="${esc(b.avatar_url)}" alt="" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'avatar',textContent:'${esc((b.name||'?').slice(0,1).toUpperCase())}'}))">`;
-  return `<span class="avatar">${esc((b.name || '?').slice(0, 1).toUpperCase())}</span>`;
+  // Картинку отдаёт наш сервер: актуальное фото бота из Telegram (или новая ссылка, пока она не ушла в Telegram)
+  const letter = esc((b.name || '?').slice(0, 1).toUpperCase());
+  return `<img class="avatar" src="/api/bots/${b.id}/avatar" alt="" data-letter="${letter}" referrerpolicy="no-referrer">`;
 }
+// Если картинки нет — вместо неё буква имени
+document.addEventListener('error', (e) => {
+  const el = e.target;
+  if (el && el.tagName === 'IMG' && el.classList.contains('avatar')) {
+    const span = document.createElement('span');
+    span.className = 'avatar';
+    span.textContent = el.dataset.letter || '?';
+    el.replaceWith(span);
+  }
+}, true);
 
 function render() {
   renderBanners();
   renderBot();
   renderList();
+  renderSandbox();
 }
 
 function renderBanners() {
@@ -264,7 +349,12 @@ function renderBot() {
           <button class="link" id="reveal">Показать</button>
         </div>
       </div>
-      <span class="pill ${c.running ? 'ok' : 'warn'}">${esc(c.running ? 'работает' : c.note)}</span>
+      <div class="side">
+        <span class="pill ${c.running ? 'ok' : 'warn'}">${esc(c.running ? 'работает' : c.note)}</span>
+        <button class="icon-btn" data-act="edit-current" title="Редактировать бота" aria-label="Редактировать бота">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
     </div>
     <div class="stats">
       <div class="card stat"><div class="label">Пользователей в боте</div><div class="value" id="users">${c.users ?? '—'}</div></div>
@@ -298,7 +388,7 @@ function renderList() {
 
   el.innerHTML = S.bots.map((b) => {
     const badgeColor = b.status === 'active' ? 'green' : 'blue';
-    const badge = b.queue ? `<span class="badge ${badgeColor}">${b.queue}</span>` : `<span class="badge gray">!</span>`;
+    const badge = b.queue ? `<span class="badge ${badgeColor}">#${b.queue}</span>` : `<span class="badge gray">!</span>`;
     const statusLine = b.status === 'blocked'
       ? `<span class="bad" title="${esc(b.last_error || '')}">заблокирован</span>`
       : (b.status === 'active' ? 'основной' : 'в очереди');
@@ -308,10 +398,11 @@ function renderList() {
     return `
     <div class="card item ${b.status}" data-id="${b.id}" data-kind="${b.status}">
       ${badge}
+      <span class="handle ${b.status === 'queued' ? '' : 'ph'}" title="Перетащить, чтобы изменить очередь">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </span>
       <div class="ctrl">
-        <span class="handle ${b.status === 'queued' ? '' : 'ph'}" title="Перетащить">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-        </span>
+        <button class="gearbtn" data-act="edit" aria-label="Редактировать"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
         <button class="trash" data-act="trash" aria-label="Удалить">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
         </button>
@@ -333,6 +424,8 @@ document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () 
   document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
   $('#tab-bot').hidden = tab !== 'bot';
   $('#tab-tokens').hidden = tab !== 'tokens';
+  $('#tab-sandbox').hidden = tab !== 'sandbox';
+  if (tab === 'sandbox') loadPreview();
 }));
 
 $('#btn-edit').addEventListener('click', () => { editing = !editing; if (S) renderList(); });
@@ -346,6 +439,11 @@ document.addEventListener('click', async (e) => {
     d.push(dismiss.dataset.dismiss);
     try { localStorage.setItem('dismissed', JSON.stringify(d.slice(-50))); } catch (_) {}
     renderBanners();
+    return;
+  }
+  if (t.closest('[data-act="edit-current"]')) {
+    const cur = S && S.current && S.bots.find((x) => x.id === S.current.id);
+    if (cur) openTokenDialog(cur);
     return;
   }
   if (t.closest('[data-act="add"]')) { openTokenDialog(null); return; }
@@ -372,11 +470,11 @@ $('#list').addEventListener('click', async (e) => {
   const id = Number(item.dataset.id);
   const bot = S.bots.find((b) => b.id === id);
   if (e.target.closest('[data-act="trash"]')) { askDelete(bot); return; }
+  if (e.target.closest('[data-act="edit"]')) { openTokenDialog(bot); return; }
   try {
     if (e.target.closest('[data-act="make-main"]')) { await api('POST', `/api/bots/${id}/activate`); await loadState(); return; }
     if (e.target.closest('[data-act="requeue"]')) { await api('POST', `/api/bots/${id}/requeue`); await loadState(); return; }
   } catch (err) { toast(err.message); return; }
-  if (editing && !e.target.closest('.handle')) openTokenDialog(bot);
 });
 
 /* ---------- окна ---------- */
@@ -430,12 +528,12 @@ $('#delete-confirm').addEventListener('click', async () => {
   function queuedCards() { return [...list.querySelectorAll('.item[data-kind="queued"]')]; }
   function renumber() {
     const hasActive = !!list.querySelector('.item[data-kind="active"]');
-    queuedCards().forEach((c, i) => { c.querySelector('.badge').textContent = i + (hasActive ? 2 : 1); });
+    queuedCards().forEach((c, i) => { c.querySelector('.badge').textContent = '#' + (i + (hasActive ? 2 : 1)); });
   }
 
   list.addEventListener('pointerdown', (e) => {
     const handle = e.target.closest('.handle');
-    if (!handle || handle.classList.contains('ph') || !editing) return;
+    if (!handle || handle.classList.contains('ph')) return;
     card = handle.closest('.item');
     dragging = true;
     card.classList.add('dragging');
@@ -474,6 +572,131 @@ $('#delete-confirm').addEventListener('click', async () => {
   list.addEventListener('pointercancel', finish);
 })();
 
+/* ---------- подтверждение действий ---------- */
+function askConfirm({title, text, ok, danger}) {
+  return new Promise((resolve) => {
+    const dlg = $('#dlg-confirm');
+    $('#confirm-title').textContent = title;
+    $('#confirm-text').textContent = text;
+    const okBtn = $('#confirm-ok');
+    okBtn.textContent = ok || 'Подтвердить';
+    okBtn.className = 'btn ' + (danger ? 'red' : 'green');
+    dlg.returnValue = '';   // закрытие по фону/Esc не должно считаться подтверждением
+    const done = () => { dlg.removeEventListener('close', done); resolve(dlg.returnValue === 'ok'); };
+    dlg.addEventListener('close', done);
+    dlg.showModal();
+  });
+}
+$('#confirm-ok').addEventListener('click', () => $('#dlg-confirm').close('ok'));
+$('#confirm-cancel').addEventListener('click', () => $('#dlg-confirm').close('cancel'));
+
+/* ---------- вкладка «Песочница» ---------- */
+const fmtNum = (n) => Number(n).toLocaleString('ru-RU').replace(/\s/g, '\u00a0');
+function setMsg(sel, text, bad) {
+  const el = $(sel);
+  el.textContent = text || '';
+  el.classList.toggle('bad', !!bad);
+}
+function sandboxReady() { return !!(S && S.current && S.current.running); }
+
+let previewBotId = null;
+function renderSandbox() {
+  const note = $('#sb-note');
+  const ready = sandboxReady();
+  if (ready) {
+    note.classList.remove('off');
+    note.textContent = 'Действует на основного бота: ' + (S.current.username ? '@' + S.current.username : S.current.name);
+  } else {
+    note.classList.add('off');
+    note.textContent = S && S.current ? 'Основной бот сейчас не запущен — действия недоступны.' : 'Нет активного бота — действия недоступны.';
+  }
+  ['#sb-give', '#sb-take', '#sb-reroll', '#sb-delete'].forEach((id) => { $(id).disabled = !ready; });
+  // при смене основного бота (ротация) обновляем показанные тексты
+  const id = ready ? S.current.id : null;
+  if (id !== previewBotId) { previewBotId = id; if (tab === 'sandbox') loadPreview(); }
+}
+
+function showPreview(p) {
+  const ok = p && p.running;
+  // HTML приходит с нашего сервера: имя бота экранировано, остальное — наши шаблоны
+  $('#sb-prev-greeting').innerHTML = ok ? p.greeting_html : '—';
+  $('#sb-prev-captcha').innerHTML = ok ? p.captcha_html : '—';
+  $('#sb-prev-buttons').innerHTML = ok ? p.captcha_buttons.map((e) => `<span>${esc(e)}</span>`).join('') : '';
+}
+async function loadPreview() {
+  try { showPreview(await api('GET', '/api/sandbox/preview')); } catch (_) { showPreview(null); }
+}
+
+async function sbCandies(give) {
+  const target = $('#sb-user').value.trim();
+  const raw = $('#sb-amount').value.trim();
+  setMsg('#sb-candy-msg', '');
+  if (!target) { setMsg('#sb-candy-msg', 'Укажите юзернейм или ID', true); return; }
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) { setMsg('#sb-candy-msg', 'Количество — целое число больше нуля', true); return; }
+  const amount = Number(raw);
+  const ok = await askConfirm({
+    title: give ? 'Выдать конфеты?' : 'Изъять конфеты?',
+    text: give
+      ? `Выдать ${fmtNum(amount)}🍬 пользователю ${target}? Ему придёт уведомление.`
+      : `Изъять ${fmtNum(amount)}🍬 у пользователя ${target}? Он не получит уведомления.`,
+    ok: give ? 'Выдать' : 'Изъять',
+    danger: !give,
+  });
+  if (!ok) return;
+  const btns = [$('#sb-give'), $('#sb-take')];
+  btns.forEach((b) => { b.disabled = true; });
+  try {
+    const r = await api('POST', '/api/sandbox/candies', {target, amount, action: give ? 'give' : 'take', confirm: true});
+    if (give) {
+      setMsg('#sb-candy-msg', `Выдано ${fmtNum(amount)}🍬 · ${r.who}\nБаланс: ${fmtNum(r.balance)}🍬\n` +
+        (r.notified ? 'Уведомление отправлено.' : 'Уведомление не доставлено: ' + (r.notify_error || 'ошибка Telegram')));
+    } else {
+      setMsg('#sb-candy-msg', `Изъято ${fmtNum(r.removed)}🍬 · ${r.who}\nБаланс: ${fmtNum(r.balance)}🍬` +
+        (r.removed < amount ? '\n(на балансе было меньше — ниже нуля он не уходит)' : ''));
+    }
+  } catch (err) { setMsg('#sb-candy-msg', err.message, true); }
+  renderSandbox();
+}
+$('#sb-give').addEventListener('click', () => sbCandies(true));
+$('#sb-take').addEventListener('click', () => sbCandies(false));
+
+$('#sb-reroll').addEventListener('click', async () => {
+  setMsg('#sb-rand-msg', '');
+  const ok = await askConfirm({
+    title: 'Перерандомизировать тексты?',
+    text: 'Капча и приветствие основного бота будут заменены новыми вариантами. Прежний вариант вернуть не получится.',
+    ok: 'Перерандомизировать',
+    danger: true,
+  });
+  if (!ok) return;
+  $('#sb-reroll').disabled = true;
+  try {
+    showPreview(await api('POST', '/api/sandbox/randomize', {confirm: true}));
+    setMsg('#sb-rand-msg', 'Готово: новые капча и приветствие сохранены и уже работают.');
+  } catch (err) { setMsg('#sb-rand-msg', err.message, true); }
+  renderSandbox();
+});
+
+$('#sb-delete').addEventListener('click', async () => {
+  const target = $('#sb-del-user').value.trim();
+  setMsg('#sb-del-msg', '');
+  if (!target) { setMsg('#sb-del-msg', 'Укажите юзернейм или ID', true); return; }
+  const ok = await askConfirm({
+    title: 'Удалить пользователя?',
+    text: `Пользователь ${target} будет удалён из базы вместе с балансом. При следующем заходе ему снова покажут капчу.`,
+    ok: 'Удалить',
+    danger: true,
+  });
+  if (!ok) return;
+  $('#sb-delete').disabled = true;
+  try {
+    const r = await api('POST', '/api/sandbox/delete-user', {target, confirm: true});
+    setMsg('#sb-del-msg', `Удалён: ${r.who}\nПользователей в боте: ${fmtNum(r.users)}`);
+    $('#sb-del-user').value = '';
+  } catch (err) { setMsg('#sb-del-msg', err.message, true); }
+  renderSandbox();
+});
+
 /* ---------- Web Push ---------- */
 const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 let swReg = null;
@@ -483,38 +706,137 @@ function b64ToUint8(b64) {
   const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
   return Uint8Array.from(raw, (c) => c.charCodeAt(0));
 }
-function setBell(on) {
-  const b = $('#bell');
-  b.classList.toggle('on', on);
-  b.title = on ? 'Уведомления включены — нажмите, чтобы отключить' : 'Включить уведомления в браузере';
+async function getReg() {
+  if (!swReg) swReg = await navigator.serviceWorker.register('/sw.js');
+  return swReg;
 }
+function setBell(state) {   // 'on' | 'off' | 'denied'
+  const b = $('#bell');
+  b.classList.toggle('on', state === 'on');
+  b.classList.toggle('denied', state === 'denied');
+  b.title = {
+    on: 'Уведомления включены',
+    off: 'Включить уведомления в браузере',
+    denied: 'Уведомления заблокированы в браузере',
+  }[state];
+}
+
+// Реальное состояние: «включены» только если браузер разрешает показ И подписка существует.
+// Если разрешение сняли вручную, а подписка осталась — считаем выключенными и чистим подписку.
+async function pushState() {
+  if (Notification.permission === 'denied') return 'denied';
+  const sub = await (await getReg()).pushManager.getSubscription();
+  if (Notification.permission === 'granted' && sub) return 'on';
+  if (sub) {
+    try { await api('POST', '/api/push/unsubscribe', {endpoint: sub.endpoint}); } catch (_) {}
+    try { await sub.unsubscribe(); } catch (_) {}
+  }
+  return 'off';
+}
+async function refreshBell() {
+  if (!pushSupported || !S || !S.push_key) return 'off';
+  try {
+    const st = await pushState();
+    setBell(st);
+    if (st === 'on') {   // заново сообщаем серверу подписку: вдруг он её потерял
+      const sub = await (await getReg()).pushManager.getSubscription();
+      if (sub) api('POST', '/api/push/subscribe', sub.toJSON()).catch(() => {});
+    }
+    return st;
+  } catch (err) {
+    console.warn('Push:', err);
+    return 'off';
+  }
+}
+
+function pushDialog(title, text, buttons) {
+  $('#push-title').textContent = title;
+  $('#push-text').textContent = text;
+  const box = $('#push-actions');
+  box.innerHTML = '';
+  for (const b of buttons) {
+    const el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'btn ' + (b.cls || '');
+    el.textContent = b.label;
+    el.addEventListener('click', async () => { $('#dlg-push').close(); if (b.run) await b.run(); });
+    box.appendChild(el);
+  }
+  $('#dlg-push').showModal();
+}
+
+async function enablePush() {
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') {
+    setBell(perm === 'denied' ? 'denied' : 'off');
+    toast('Разрешите уведомления для этого сайта');
+    return;
+  }
+  const reg = await getReg();
+  const sub = await reg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: b64ToUint8(S.push_key)});
+  await api('POST', '/api/push/subscribe', sub.toJSON());
+  setBell('on');
+  toast('Уведомления включены');
+}
+
+async function disablePush() {
+  try {
+    const sub = await (await getReg()).pushManager.getSubscription();
+    if (sub) {
+      await api('POST', '/api/push/unsubscribe', {endpoint: sub.endpoint});
+      await sub.unsubscribe();
+    }
+    setBell('off');
+    toast('Уведомления отключены');
+  } catch (err) { toast(err.message); }
+}
+
+async function sendTestPush() {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const sub = await (await getReg()).pushManager.getSubscription();
+      if (!sub) throw new Error('подписка не найдена');
+      await api('POST', '/api/push/test', {endpoint: sub.endpoint});
+      toast('Тестовое уведомление придёт через 10 секунд');
+      return;
+    } catch (err) {
+      if (attempt === 0) { await refreshBell(); continue; }   // перерегистрируем подписку и пробуем ещё раз
+      toast('Не получилось отправить тест: ' + err.message);
+    }
+  }
+}
+
+$('#bell').addEventListener('click', async () => {
+  try {
+    // requestPermission нужно вызывать сразу из клика, поэтому этот случай обрабатываем первым
+    if (Notification.permission === 'default') { await enablePush(); return; }
+    const st = await refreshBell();
+    if (st === 'denied') {
+      toast('Уведомления заблокированы. Разрешите их для этого сайта в настройках браузера');
+    } else if (st === 'on') {
+      pushDialog('Уведомления включены', 'Отправить тестовое уведомление на это устройство? Оно придёт через 10 секунд.', [
+        {label: 'Отправить тест', cls: 'green', run: sendTestPush},
+        {label: 'Отключить', run: disablePush},
+        {label: 'Закрыть'},
+      ]);
+    } else {
+      await enablePush();
+    }
+  } catch (err) { toast('Не удалось: ' + err.message); }
+});
+
 async function initPush() {
   if (!pushSupported || !S.push_key) return;
   $('#bell').hidden = false;
+  await refreshBell();
+  // Состояние могло измениться вне сайта (человек выключил уведомления в настройках браузера)
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshBell(); });
+  window.addEventListener('focus', () => refreshBell());
   try {
-    swReg = await navigator.serviceWorker.register('/sw.js');
-    const sub = await swReg.pushManager.getSubscription();
-    const on = !!sub && Notification.permission === 'granted';
-    setBell(on);
-    if (on) api('POST', '/api/push/subscribe', sub.toJSON()).catch(() => {});
-  } catch (err) { console.warn('Service worker:', err); }
+    const perm = await navigator.permissions.query({name: 'notifications'});
+    perm.onchange = () => refreshBell();
+  } catch (_) {}
 }
-$('#bell').addEventListener('click', async () => {
-  try {
-    if (!swReg) swReg = await navigator.serviceWorker.register('/sw.js');
-    const existing = await swReg.pushManager.getSubscription();
-    if (existing) {
-      await api('POST', '/api/push/unsubscribe', {endpoint: existing.endpoint});
-      await existing.unsubscribe();
-      setBell(false); toast('Уведомления отключены'); return;
-    }
-    const perm = await Notification.requestPermission();
-    if (perm !== 'granted') { toast('Разрешите уведомления для этого сайта в настройках браузера'); return; }
-    const sub = await swReg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: b64ToUint8(S.push_key)});
-    await api('POST', '/api/push/subscribe', sub.toJSON());
-    setBell(true); toast('Уведомления включены');
-  } catch (err) { toast('Не удалось включить уведомления: ' + err.message); }
-});
 
 /* ---------- выход ---------- */
 $('#logout').addEventListener('click', async () => {
@@ -548,7 +870,11 @@ function connect() {
 }
 
 /* ---------- старт ---------- */
-loadState().then(() => { connect(); initPush(); }).catch((err) => toast(err.message));
+loadState().then(() => {
+  connect();
+  initPush();
+  setInterval(() => { if (!document.hidden && !dragging) loadState().catch(() => {}); }, 120000);
+}).catch((err) => toast(err.message));
 </script>
 </body>
 </html>

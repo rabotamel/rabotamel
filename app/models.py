@@ -30,6 +30,13 @@ class BotProfile(Base):
     # с какого момента бот стал основным
     active_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # какая ссылка на аватарку уже отправлена в Telegram (чтобы не загружать одно и то же при каждом старте)
+    avatar_applied: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # конфигурация капчи этого бота (JSON), создаётся один раз и больше не меняется
+    captcha_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # остальные рандомизируемые сообщения бота (JSON {"greeting": "<json>", ...}); см. app/texts.py и NOTES.md
+    texts_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # служебные поля
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -52,6 +59,10 @@ class BotUser(Base):
 
     bot_id: Mapped[int] = mapped_column(ForeignKey("bot_profiles.id", ondelete="CASCADE"), primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # валюта бота 🍬: у каждого прошедшего капчу пользователя свой счётчик
+    candies: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
+    # юзернейм в нижнем регистре (нужен, чтобы находить пользователя в «Песочнице» по @username); может отсутствовать
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class PushSubscription(Base):

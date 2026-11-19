@@ -13,12 +13,13 @@ from aiogram.exceptions import (
     TelegramUnauthorizedError,
 )
 
-from . import push, repo
+from . import avatars, push, repo
 from .config import Settings
 from .events import bus
 from .handlers import build_router
 from .models import BotProfile
 from .stats import UserStats
+from .texts import BotTexts
 
 log = logging.getLogger("bot.manager")
 
@@ -73,6 +74,10 @@ class BotManager:
         self._bg: set[asyncio.Task] = set()
         self._last_transient_alert = 0.0
         self.stats: UserStats | None = None
+        # то, что нужно «Песочнице»: работающий бот, его профиль и актуальные варианты сообщений
+        self.bot: Bot | None = None
+        self.profile: BotProfile | None = None
+        self.texts: BotTexts | None = None
         self.state: dict = {"running": False, "bot_id": None, "username": None, "since": None, "note": "запуск…"}
 
     # ---------- управление из веба / lifespan ----------
@@ -99,6 +104,17 @@ class BotManager:
 
     def users_count(self) -> int | None:
         return self.stats.count if self.stats else None
+
+    def is_running(self) -> bool:
+        return bool(self.state["running"] and self.bot and self.stats and self.texts and self.profile)
+
+    async def reroll_texts(self) -> None:
+        """Заново подбирает ВСЕ рандомизируемые сообщения работающего бота (капча, приветствие, ...),
+        сохраняет в БД и применяет «на горячую» — перезапуск бота не нужен."""
+        if not self.is_running():
+            raise RuntimeError("бот не запущен")
+        raw = await repo.get_or_create_texts(self.profile.id, self.profile.token, reroll=True)
+        self.texts.replace(raw)
 
     # ---------- основной цикл ----------
 
@@ -244,11 +260,17 @@ class BotManager:
             self.stats = stats
             stats_task = asyncio.create_task(self._stats_loop(stats, stop))
 
+            # варианты капчи, приветствия и других рандомизируемых сообщений: создаются один раз при первом
+            # запуске бота и больше не меняются (кроме кнопки «Перерандомизировать» в «Песочнице»)
+            texts = BotTexts(await repo.get_or_create_texts(profile.id, profile.token))
+
             await self._apply_profile(bot, profile)
+            await self._apply_avatar(profile)
             if stop.is_set():
                 return outcome()
             await self._greet(bot, me.username)
 
+            self.bot, self.profile, self.texts = bot, profile, texts
             self._set_state(True, profile.id, me.username, "работает")
 
             # 3. polling с защитой от «падений»
@@ -256,7 +278,7 @@ class BotManager:
             loop = asyncio.get_running_loop()
             while not stop.is_set():
                 dp = Dispatcher()
-                dp.include_router(build_router(self.settings.greeting, stats))
+                dp.include_router(build_router(stats, texts, profile.name))
                 polling = asyncio.create_task(
                     dp.start_polling(
                         bot,
@@ -283,6 +305,7 @@ class BotManager:
             return outcome()
 
         finally:
+            self.bot = self.profile = self.texts = None
             forwarder.cancel()
             stopper.cancel()
             if polling is not None and not polling.done():
@@ -339,6 +362,23 @@ class BotManager:
             log.warning("Лимит Telegram на смену профиля, повторю при следующем старте: %s с", e.retry_after)
         except Exception as e:
             log.warning("Не удалось обновить профиль бота: %s", e)
+
+    async def _apply_avatar(self, profile: BotProfile) -> None:
+        """Отправляет аватарку с сайта в Telegram, если ссылка новая (или изменилась с прошлого раза)."""
+        url = (profile.avatar_url or "").strip()
+        if not url or url == profile.avatar_applied:
+            return
+        try:
+            await avatars.push_avatar(profile.token, url)
+        except avatars.AvatarError as e:
+            log.warning("Аватарка бота id=%s не обновлена: %s", profile.id, e)
+            self._alert("Аватарка не загружена", f"Бот «{profile.name}»: {e}.", push_it=False)
+            return
+        await repo.set_avatar_applied(profile.id, url)
+        profile.avatar_applied = url
+        avatars.invalidate(profile.id)
+        bus.publish({"type": "changed"})
+        log.info("Аватарка бота id=%s обновлена в Telegram", profile.id)
 
     async def _greet(self, bot: Bot, username: str | None) -> None:
         greeting = self.settings.greeting

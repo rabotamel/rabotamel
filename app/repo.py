@@ -1,7 +1,9 @@
 """Все операции с базой данных."""
+import json
+import secrets
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import bindparam, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from . import db
@@ -179,29 +181,171 @@ async def set_username(bot_id: int, username: str | None) -> None:
 
 # ---------- пользователи бота ----------
 
-async def load_user_ids(bot_id: int) -> set[int]:
+async def load_users(bot_id: int) -> dict[int, str | None]:
+    """user_id -> username (нижний регистр) всех, кто прошёл капчу у этого бота."""
     async with db.SessionLocal() as s:
-        res = await s.execute(select(BotUser.user_id).where(BotUser.bot_id == bot_id))
-        return set(res.scalars())
+        res = await s.execute(select(BotUser.user_id, BotUser.username).where(BotUser.bot_id == bot_id))
+        return {uid: name for uid, name in res.all()}
 
 
-async def save_users(bot_id: int, add: set[int], remove: set[int]) -> None:
+async def save_users(
+    bot_id: int, add: dict[int, str | None], rename: dict[int, str | None], remove: set[int]
+) -> None:
+    """Одна транзакция на пачку: сначала удаления, затем вставки, затем смена юзернеймов.
+    Порядок важен: удалённый и снова прошедший капчу пользователь начинает с чистого баланса."""
     async with db.SessionLocal() as s, s.begin():
-        add_list = list(add)
-        for i in range(0, len(add_list), 5000):
-            chunk = add_list[i : i + 5000]
-            await s.execute(
-                pg_insert(BotUser)
-                .values([{"bot_id": bot_id, "user_id": u} for u in chunk])
-                .on_conflict_do_nothing()
-            )
         rem_list = list(remove)
         for i in range(0, len(rem_list), 5000):
             chunk = rem_list[i : i + 5000]
             await s.execute(delete(BotUser).where(BotUser.bot_id == bot_id, BotUser.user_id.in_(chunk)))
 
+        add_list = list(add.items())
+        for i in range(0, len(add_list), 5000):
+            chunk = add_list[i : i + 5000]
+            await s.execute(
+                pg_insert(BotUser)
+                .values([{"bot_id": bot_id, "user_id": u, "username": n} for u, n in chunk])
+                .on_conflict_do_nothing()
+            )
+
+        if rename:
+            # executemany одной командой; имена параметров не совпадают с колонками (иначе SQLAlchemy ругнётся)
+            table = BotUser.__table__
+            await s.execute(
+                update(table)
+                .where(table.c.bot_id == bindparam("b_bot"), table.c.user_id == bindparam("b_uid"))
+                .values(username=bindparam("b_name")),
+                [{"b_bot": bot_id, "b_uid": u, "b_name": n} for u, n in rename.items()],
+            )
+
+
+async def get_candies(bot_id: int, user_id: int) -> int:
+    async with db.SessionLocal() as s:
+        res = await s.execute(
+            select(BotUser.candies).where(BotUser.bot_id == bot_id, BotUser.user_id == user_id)
+        )
+        return res.scalar_one_or_none() or 0
+
+
+async def add_candies(bot_id: int, user_id: int, delta: int) -> int | None:
+    """Атомарно меняет счётчик 🍬 (delta может быть отрицательной, но ниже нуля не уходит).
+    Возвращает новое значение или None, если пользователя нет в базе (не прошёл капчу)."""
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(
+            update(BotUser)
+            .where(BotUser.bot_id == bot_id, BotUser.user_id == user_id)
+            .values(candies=func.greatest(BotUser.candies + delta, 0))
+            .returning(BotUser.candies)
+        )
+        return res.scalar_one_or_none()
+
+
+# ---------- рандомизируемые сообщения и аватарки ----------
+
+def _read_texts(row: BotProfile) -> dict[str, str]:
+    """Сырые JSON-конфиги всех видов сообщений из строки бота (отсутствующие пропускаются)."""
+    from . import texts
+
+    try:
+        extra = json.loads(row.texts_config) if row.texts_config else {}
+        if not isinstance(extra, dict):
+            extra = {}
+    except ValueError:
+        extra = {}
+    raw: dict[str, str] = {}
+    for kind in texts.KINDS:
+        col = texts.LEGACY_COLUMNS.get(kind.key)
+        val = getattr(row, col) if col else extra.get(kind.key)
+        if val:
+            raw[kind.key] = val
+    return raw
+
+
+def _write_texts(row: BotProfile, raw: dict[str, str]) -> None:
+    from . import texts
+
+    extra: dict[str, str] = {}
+    for kind in texts.KINDS:
+        col = texts.LEGACY_COLUMNS.get(kind.key)
+        if col:
+            if getattr(row, col) != raw[kind.key]:
+                setattr(row, col, raw[kind.key])
+        else:
+            extra[kind.key] = raw[kind.key]
+    dumped = json.dumps(extra, ensure_ascii=False)
+    if (row.texts_config or "") != dumped:
+        row.texts_config = dumped
+
+
+async def get_or_create_texts(bot_id: int, token: str, reroll: bool = False) -> dict[str, str]:
+    """Варианты всех рандомизируемых сообщений бота (kind -> JSON).
+
+    * Обычный вызов: существующие корректные варианты возвращаются как есть (запись в БД не делается),
+      недостающие или повреждённые создаются детерминированно по токену бота.
+    * reroll=True: все варианты создаются заново со случайным seed и отличаются от текущих.
+    В обоих случаях новый вариант подбирается так, чтобы не совпасть с вариантами других ботов."""
+    from . import texts
+
+    async with db.SessionLocal() as s, s.begin():
+        row = (
+            await s.execute(select(BotProfile).where(BotProfile.id == bot_id).with_for_update())
+        ).scalar_one()
+
+        current = _read_texts(row)
+        valid: dict[str, str] = {}
+        for kind in texts.KINDS:
+            raw = current.get(kind.key)
+            if raw is None:
+                continue
+            try:
+                kind.from_json(raw)
+                valid[kind.key] = raw
+            except Exception:
+                pass  # повреждён или устарел — создадим заново
+
+        todo = [k for k in texts.KINDS if reroll or k.key not in valid]
+        if not todo:
+            return valid
+
+        # signature чужих вариантов (одним запросом на все виды)
+        others = (
+            await s.execute(select(BotProfile).where(BotProfile.id != bot_id))
+        ).scalars()
+        taken: dict[str, set] = {k.key: set() for k in todo}
+        for other in others:
+            for key, raw in _read_texts(other).items():
+                if key in taken:
+                    try:
+                        kind = next(k for k in todo if k.key == key)
+                        taken[key].add(kind.from_json(raw).signature())
+                    except Exception:
+                        continue
+
+        result = dict(valid)
+        nonce = secrets.token_hex(8) if reroll else ""
+        for kind in todo:
+            if reroll and kind.key in valid:
+                taken[kind.key].add(kind.from_json(valid[kind.key]).signature())  # новый вариант ≠ текущему
+            seed = f"{token}:{nonce}" if reroll else token
+            result[kind.key] = kind.generate(seed, taken[kind.key]).to_json()
+
+        _write_texts(row, result)
+        return result
+
+
+async def set_avatar_applied(bot_id: int, url: str | None) -> None:
+    async with db.SessionLocal() as s, s.begin():
+        await s.execute(update(BotProfile).where(BotProfile.id == bot_id).values(avatar_applied=url))
+
 
 # ---------- push-подписки ----------
+
+async def get_push_sub(endpoint: str) -> PushSubscription | None:
+    async with db.SessionLocal() as s:
+        res = await s.execute(select(PushSubscription).where(PushSubscription.endpoint == endpoint))
+        return res.scalar_one_or_none()
+
+
 
 async def list_push_subs() -> list[PushSubscription]:
     async with db.SessionLocal() as s:

@@ -2,16 +2,17 @@ import asyncio
 import json
 import re
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramNotFound, TelegramUnauthorizedError
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import auth, push, repo
+from . import auth, avatars, push, repo, sandbox
 from .events import bus
 from .models import STATUS_ACTIVE, STATUS_QUEUED
 
@@ -72,6 +73,26 @@ class PushSubIn(BaseModel):
 
 class PushUnsubIn(BaseModel):
     endpoint: str
+
+
+class PushTestIn(BaseModel):
+    endpoint: str
+
+
+class CandiesIn(BaseModel):
+    target: str = ""
+    amount: int = 0
+    action: Literal["give", "take"]
+    confirm: bool = False
+
+
+class UserTargetIn(BaseModel):
+    target: str = ""
+    confirm: bool = False
+
+
+class ConfirmIn(BaseModel):
+    confirm: bool = False
 
 
 # ---------- хелперы ----------
@@ -267,6 +288,7 @@ async def reorder(body: ReorderIn):
 async def edit_bot(bot_id: int, body: BotIn, request: Request):
     name, description, avatar = clean_profile(body.name, body.description, body.avatar_url)
     await repo.update_profile(bot_id, name, description, avatar)
+    avatars.invalidate(bot_id)
     # если бот сейчас активен — перезапускаем его, чтобы новые имя/описание ушли в Telegram
     request.app.state.manager.poke(switch=await repo.is_active(bot_id))
     bus.publish({"type": "changed"})
@@ -299,12 +321,75 @@ async def delete_bot(bot_id: int, request: Request):
     return {"ok": True}
 
 
+@api.get("/bots/{bot_id}/avatar")
+async def bot_avatar(bot_id: int, request: Request):
+    """Картинка бота для панели.
+    Если на сайте задана новая ссылка, которая ещё не ушла в Telegram, показываем её.
+    Иначе показываем актуальное фото бота из Telegram (так видно и то, что поменяли через BotFather)."""
+    bot = await repo.get_bot(bot_id)
+    if bot is None:
+        raise HTTPException(404, "Бот не найден")
+    no_store = {"Cache-Control": "no-store"}
+
+    if bot.avatar_url and bot.avatar_url != bot.avatar_applied:
+        return RedirectResponse(bot.avatar_url, status_code=302, headers=no_store)
+
+    tg = await avatars.get_tg_avatar(bot.id, bot.token)
+    if tg:
+        data, ctype, etag = tg
+        headers = {"ETag": etag, "Cache-Control": "no-cache"}
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers=headers)
+        return Response(content=data, media_type=ctype, headers=headers)
+
+    if bot.avatar_url:
+        return RedirectResponse(bot.avatar_url, status_code=302, headers=no_store)
+    raise HTTPException(404, "Аватарки нет")
+
+
 @api.get("/bots/{bot_id}/token")
 async def reveal_token(bot_id: int):
     bot = await repo.get_bot(bot_id)
     if bot is None:
         raise HTTPException(404, "Бот не найден")
     return {"token": bot.token}
+
+
+# ---------- «Песочница» ----------
+
+@api.get("/sandbox/preview")
+async def sandbox_preview(request: Request):
+    return sandbox.preview(request.app.state.manager)
+
+
+@api.post("/sandbox/candies")
+async def sandbox_candies(body: CandiesIn, request: Request):
+    try:
+        return await sandbox.change_candies(
+            request.app.state.manager, body.target, body.amount, body.action == "give", body.confirm
+        )
+    except sandbox.SandboxError as e:
+        raise HTTPException(e.status, e.message)
+
+
+@api.post("/sandbox/randomize")
+async def sandbox_randomize(body: ConfirmIn, request: Request):
+    try:
+        return await sandbox.reroll(request.app.state.manager, body.confirm)
+    except sandbox.SandboxError as e:
+        raise HTTPException(e.status, e.message)
+
+
+@api.post("/sandbox/delete-user")
+async def sandbox_delete_user(body: UserTargetIn, request: Request):
+    try:
+        res = await sandbox.remove_user(request.app.state.manager, body.target, body.confirm)
+    except sandbox.SandboxError as e:
+        raise HTTPException(e.status, e.message)
+    st = request.app.state.manager.stats
+    if st:
+        bus.publish({"type": "stats", "bot_id": st.bot_id, "users": res["users"]})
+    return res
 
 
 @api.post("/push/subscribe")
@@ -314,6 +399,14 @@ async def push_subscribe(body: PushSubIn):
         raise HTTPException(400, "Некорректная подписка")
     await repo.add_push_sub(body.endpoint, p256dh, auth_key)
     return {"ok": True}
+
+
+@api.post("/push/test")
+async def push_test(body: PushTestIn):
+    """Тестовое уведомление на это устройство через 10 секунд."""
+    if not await push.schedule_test(body.endpoint, delay=10):
+        raise HTTPException(404, "Это устройство не подписано на уведомления")
+    return {"ok": True, "delay": 10}
 
 
 @api.post("/push/unsubscribe")
