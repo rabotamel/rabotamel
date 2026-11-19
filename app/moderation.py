@@ -19,6 +19,7 @@ import time
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 
 from . import repo, suggest, video_pool
+from .metrics import metrics
 
 log = logging.getLogger("bot.moderation")
 
@@ -40,11 +41,11 @@ def _norm(username: str | None) -> str | None:
 class ModeratorCache:
     def __init__(self) -> None:
         self._rows: list[tuple[int | None, str | None]] = []   # (user_id или None, юзернейм)
-        self._at = 0.0
+        self._at = float("-inf")  # не 0.0: у time.monotonic() на только что запущенной машине значение может быть < CACHE_TTL
         self._lock = asyncio.Lock()
 
     def invalidate(self) -> None:
-        self._at = 0.0
+        self._at = float("-inf")
 
     async def rows(self) -> list[tuple[int | None, str | None]]:
         if time.monotonic() - self._at > CACHE_TTL:
@@ -213,6 +214,16 @@ async def deliver(bot, sub: repo.Submission) -> int:
     return delivered
 
 
+async def _publish_gallery_count(bot_id: int) -> None:
+    """Сообщает открытым вкладкам сайта новое число видео в галерее (вкладка «Бот»)."""
+    try:
+        from .events import bus
+
+        bus.publish({"type": "gallery", "bot_id": bot_id, "videos": await repo.count_gallery_videos(bot_id)})
+    except Exception as e:  # счётчик на сайте — не повод ронять модерацию
+        log.debug("Не удалось обновить счётчик видео: %s", e)
+
+
 async def handle_action(bot, bot_id: int, sub_id: int, action: str, user) -> bool:
     """Решение модератора. False — заявка уже обработана (у этого модератора кнопки всё равно уберутся)."""
     decision = await repo.decide_submission(
@@ -222,7 +233,9 @@ async def handle_action(bot, bot_id: int, sub_id: int, action: str, user) -> boo
     if decision is None:
         await sync_messages(bot, [sub_id])
         return False
+    metrics.add("decisions")
     if action == "approve":
         video_pool.pool.add(bot_id, decision.sub.id, decision.sub.file_id)
+        await _publish_gallery_count(bot_id)
     await sync_messages(bot, [sub_id, *decision.auto_rejected])
     return True

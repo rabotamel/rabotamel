@@ -29,6 +29,12 @@ class VideoPool:
         else:
             self._pools.pop(bot_id, None)
 
+    def reset(self) -> None:
+        """Полностью забывает пул, «недавние» и «плохие» видео (галерея очищена или бот сменился)."""
+        self._pools.clear()
+        self._recent.clear()
+        self._bad.clear()
+
     def add(self, bot_id: int, sub_id: int, file_id: str) -> None:
         """Только что одобренное видео сразу попадает в уже загруженный пул (если он не загружен — прочитается при покупке)."""
         entry = self._pools.get(bot_id)

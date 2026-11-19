@@ -43,6 +43,12 @@ async def init_db(database_url: str) -> None:
     from . import models  # noqa: F401  (регистрирует таблицы в Base.metadata)
 
     engine = build_engine(database_url)
+    from sqlalchemy import event
+
+    from .metrics import metrics
+
+    # счётчик операций БД для подвала сайта: одна выполненная SQL-команда = одна операция (в памяти, без записи в БД)
+    event.listen(engine.sync_engine, "after_cursor_execute", lambda *a, **k: metrics.db_op())
     SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

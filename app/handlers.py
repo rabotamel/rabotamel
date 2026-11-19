@@ -7,6 +7,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from . import captcha, gallery, greeting, messaging, moderation, repo, shop_buttons, suggest, video_pool
+from .metrics import metrics
 from .models import BotProfile
 from .stats import UserStats
 from .texts import BotTexts
@@ -99,12 +100,31 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         except TelegramAPIError:
             pass  # запрос устарел — не страшно
 
-    async def reply(bot: Bot, user_id: int, text: str) -> None:
-        """Ответ пользователю: как любое сообщение бота (с картинкой бота, если она задана)."""
+    async def forget_user(user_id: int) -> None:
+        """Пользователь сам заблокировал бота: убираем его из БД (вместе с балансом) и забываем состояние в памяти.
+        Если он потом разблокирует бота и напишет /start, пройдёт капчу заново, как новый."""
+        last_greeting.pop(user_id, None)
+        last_gallery.pop(user_id, None)
+        suggest_menu.pop(user_id, None)
+        shown.pop(user_id, None)
+        if stats.remove(user_id):
+            log.info("Пользователь %s заблокировал бота %s — удалён из базы", user_id, stats.bot_id)
         try:
-            await messaging.send_message(bot, user_id, text, profile.message_image_url)
-        except TelegramForbiddenError:
-            pass
+            await stats.flush()
+        except Exception:
+            log.exception("Не удалось удалить из базы пользователя %s", user_id)
+
+    async def on_forbidden(e: TelegramForbiddenError, user_id: int) -> None:
+        """Любой 403 при отправке. Удаляем из базы только если пользователь точно сам заблокировал бота."""
+        if messaging.is_blocked_by_user(e):
+            await forget_user(user_id)
+
+    async def reply(bot: Bot, user_id: int, text: str) -> None:
+        """Короткое уведомление пользователю (результат проверки видео и т. п.): БЕЗ картинки бота."""
+        try:
+            await messaging.send_message(bot, user_id, text)
+        except TelegramForbiddenError as e:
+            await on_forbidden(e, user_id)
         except TelegramAPIError as e:
             log.warning("Сообщение пользователю %s не доставлено: %s", user_id, e)
 
@@ -138,8 +158,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             last_greeting[user_id] = msg.message_id
             if old_id is not None and old_id != msg.message_id:
                 await safe_delete(bot, user_id, old_id)
-        except TelegramForbiddenError:
-            pass  # пользователь заблокировал бота
+        except TelegramForbiddenError as e:
+            await on_forbidden(e, user_id)  # пользователь заблокировал бота
         except TelegramAPIError as e:
             log.warning("Приветствие пользователю %s не доставлено: %s", user_id, e)
 
@@ -159,6 +179,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
                 stats.bot_id, user.id, stats_username(user), video.file_id,
                 getattr(video, "file_unique_id", "") or "", int(video.duration or 0),
             )
+            metrics.add("submissions")
+            await reply(bot, user.id, suggest.MSG_ACCEPTED)  # без картинки
             await moderation.deliver(bot, sub)
         except Exception:
             log.exception("Не удалось обработать предложку от %s", user.id)
@@ -167,7 +189,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         return (user.username or "").strip().lstrip("@").lower() or None
 
     async def send_suggest_menu(bot: Bot, user_id: int) -> None:
-        text = suggest.render_menu(texts.deco)
+        text = texts.suggest.render_menu()
         try:
             msg = await messaging.send_message(
                 bot, user_id, text, profile.message_image_url, reply_markup=gallery.build_suggest_keyboard(texts.gallery)
@@ -175,8 +197,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             if len(suggest_menu) > 5000:
                 suggest_menu.clear()
             suggest_menu[user_id] = msg.message_id
-        except TelegramForbiddenError:
-            pass
+        except TelegramForbiddenError as e:
+            await on_forbidden(e, user_id)
         except TelegramAPIError as e:
             log.warning("Меню предложки пользователю %s не доставлено: %s", user_id, e)
 
@@ -203,7 +225,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
                         user_id, file_id, reply_markup=gallery.build_video_keyboard(texts.gallery),
                         protect_content=True,
                     )
-                except TelegramForbiddenError:
+                except TelegramForbiddenError as e:
+                    await on_forbidden(e, user_id)
                     break  # пользователь заблокировал бота
                 except TelegramBadRequest as e:
                     log.warning("Видео %s не отправилось (%s), беру другое", sub_id, e)
@@ -214,6 +237,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
                     problem = "Не удалось отправить видео, конфеты не списаны"
                     break
                 video_pool.pool.mark_shown(bot_id, user_id, sub_id)
+                metrics.add("videos_sent")
                 sent = True
                 break
             else:
@@ -295,16 +319,17 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
     async def send_gallery(bot: Bot, user_id: int) -> None:
         """Сообщение раздела «Галерея»: заголовок = название кнопки этого бота, маркер бота, баланс как в приветствии."""
         balance = await repo.get_candies(stats.bot_id, user_id)
-        text = gallery.render(texts.gallery, texts.deco, texts.shop_buttons.gallery_heading, texts.greeting.template, balance)
+        text = gallery.render(texts.gallery, texts.deco, texts.shop_buttons.gallery_heading, texts.greeting.template, balance,
+                              texts.suggest.name)
         try:
             msg = await messaging.send_message(
-                bot, user_id, text, profile.message_image_url, reply_markup=gallery.build_keyboard(texts.gallery)
+                bot, user_id, text, profile.message_image_url, reply_markup=gallery.build_keyboard(texts.gallery, texts.suggest.label)
             )
             if len(last_gallery) > 5000:
                 last_gallery.clear()
             last_gallery[user_id] = msg.message_id
-        except TelegramForbiddenError:
-            pass
+        except TelegramForbiddenError as e:
+            await on_forbidden(e, user_id)
         except TelegramAPIError as e:
             log.warning("Раздел галереи пользователю %s не доставлен: %s", user_id, e)
 
@@ -368,6 +393,12 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             await drop_last_gallery(bot, user_id)
             await send_gallery(bot, user_id)
         # TODO: "premium" — премиум-подписка
+
+    @router.my_chat_member(F.chat.type == "private", F.new_chat_member.status == "kicked")
+    async def on_blocked_by_user(event) -> None:
+        """Telegram присылает это, когда пользователь в личке заблокировал бота (статус «kicked») — самый надёжный
+        сигнал: сообщение отправлять не нужно. Человек удаляется из базы."""
+        await forget_user(event.chat.id)
 
     @router.callback_query(F.data.startswith(moderation.PREFIX))
     async def on_moderation(call: CallbackQuery, bot: Bot) -> None:

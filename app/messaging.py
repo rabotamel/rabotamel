@@ -43,6 +43,14 @@ def plain(text: str) -> str:
     return unescape(_TAG_RE.sub("", text))
 
 
+def is_blocked_by_user(e: BaseException) -> bool:
+    """True, только если Telegram прямо говорит, что ПОЛЬЗОВАТЕЛЬ сам заблокировал бота («bot was blocked by the user»).
+    Другие 403 (пользователь удалил аккаунт, не запускал бота, бота выгнали из чата) сюда не относятся."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    return isinstance(e, TelegramForbiddenError) and "bot was blocked by the user" in str(e).lower()
+
+
 def _is_parse_error(e: TelegramBadRequest) -> bool:
     return "parse entities" in str(e).lower()
 

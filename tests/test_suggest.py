@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import test_handlers as th  # noqa: E402  (ставит заглушки aiogram и даёт импорт app.handlers)
 from test_gallery import _FakeAiogramTypes  # noqa: E402
 
-from app import deco, gallery, greeting, messaging, moderation, shop_buttons, suggest, video_pool  # noqa: E402
+from app import deco, gallery, greeting, messaging, moderation, shop_buttons, suggest, suggest_ui, video_pool  # noqa: E402
 
 handlers = th.handlers
 repo = handlers.repo
@@ -46,11 +46,104 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(suggest.check(NS(video=video(3601))), suggest.MSG_TOO_LONG)
 
     def test_menu_text(self):
-        for i in range(50):
-            text = suggest.render_menu(deco.generate_config(f"d{i}"))
-            self.assertIn("📩 Предложка 🤍", text)
-            self.assertIn("+2🍬", text)
-            self.assertIn("за каждое принятое видео", text)
+        for i in range(200):
+            cfg = suggest_ui.generate_config(f"d{i}")
+            text = cfg.render_menu()
+            self.assertTrue(text.startswith(f"<b>{cfg.label}</b>\n\n{cfg.mark} "))
+            self.assertTrue(text.endswith(f" {cfg.mark}"))
+            self.assertIn("+2🍬", text)  # ключевое условие есть в каждом варианте
+
+
+class GalleryHintTests(unittest.TestCase):
+    def test_hint_is_between_description_and_balance_with_current_title(self):
+        for i in range(300):
+            g, c, d = gallery.generate_config(f"h{i}"), suggest_ui.generate_config(f"h{i}"), deco.generate_config(f"h{i}")
+            text = gallery.render(g, d, "Галерея", "Привет\n🍫 Баланс: {balance}🍬", 90, c.name)
+            parts = text.split("\n\n")
+            self.assertEqual(len(parts), 4)
+            self.assertEqual(parts[0], "<b>Галерея</b>")
+            self.assertEqual(parts[1], d.wrap(g.description))                   # описание на своём месте
+            self.assertIn(f"«{c.name}»", parts[2])                               # актуальное название предложки
+            self.assertNotIn("{proposal_title}", parts[2])
+            self.assertFalse(any(ch.isdigit() for ch in parts[2]))               # без количества конфет
+            self.assertEqual(parts[3], "🍫 Баланс: 90🍬")                        # баланс внизу
+
+    def test_name_matches_the_button_on_screen(self):
+        for i in range(300):
+            c = suggest_ui.generate_config(f"n{i}")
+            self.assertEqual(c.label, f"{suggest_ui.LEFT_EMOJI[c.left]} {c.name} {suggest_ui.RIGHT_EMOJI[c.right]}")
+            self.assertEqual(c.name, suggest_ui.TITLES[c.title])
+
+    def test_hint_pool_is_deterministic_and_varies_between_bots(self):
+        gs = [gallery.generate_config(f"x{i}") for i in range(300)]
+        self.assertEqual(gs[7], gallery.generate_config("x7"))
+        self.assertEqual({g.hint for g in gs}, set(gallery.HINTS))
+        for g in gs[:50]:
+            self.assertEqual(gallery.GalleryConfig.from_json(g.to_json()), g)
+
+    def test_old_saved_config_without_hint_gets_stable_variant(self):
+        g = gallery.generate_config("old")
+        raw = json.loads(g.to_json())
+        del raw["hint"]
+        a = gallery.GalleryConfig.from_json(json.dumps(raw, ensure_ascii=False))
+        b = gallery.GalleryConfig.from_json(json.dumps(raw, ensure_ascii=False))
+        self.assertEqual(a.hint_template, b.hint_template)
+        self.assertIn(a.hint_template, gallery.HINTS)
+        self.assertEqual(a.buy_label, g.buy_label)  # остальное не тронуто
+
+    def test_title_is_html_escaped(self):
+        g = gallery.generate_config("e")
+        self.assertIn("&lt;b&gt;", gallery.hint_line(g, "<b>"))
+
+
+class SuggestUiTests(unittest.TestCase):
+    def test_pools_match_the_spec(self):
+        self.assertEqual(suggest_ui.TITLES, ("Предложка", "Предложить видео", "Прислать видео", "Предложить контент", "Поделиться видео"))
+        self.assertEqual(suggest_ui.LEFT_EMOJI, ("📩", "📥", "💌", "📤"))
+        self.assertEqual(suggest_ui.RIGHT_EMOJI, ("🤍", "✨", "💫", "🫧", "🌸", "💎", "🕊️"))
+        self.assertEqual(suggest_ui.DECO_EMOJI, ("💫", "✨", "🌟", "💎", "🤍", "🫧"))
+        self.assertEqual(len(suggest_ui.BODIES), 5)
+
+    def test_deterministic_per_seed_and_json_roundtrip(self):
+        for i in range(100):
+            a, b = suggest_ui.generate_config(f"tok{i}"), suggest_ui.generate_config(f"tok{i}")
+            self.assertEqual(a, b)  # один бот — один вариант при любом числе перезапусков
+            self.assertEqual(suggest_ui.SuggestConfig.from_json(a.to_json()), a)
+
+    def test_every_pool_value_is_reachable_and_independent(self):
+        cfgs = [suggest_ui.generate_config(f"s{i}") for i in range(600)]
+        self.assertEqual({c.title for c in cfgs}, set(range(5)))
+        self.assertEqual({c.left for c in cfgs}, set(range(4)))
+        self.assertEqual({c.right for c in cfgs}, set(range(7)))
+        self.assertEqual({c.body for c in cfgs}, set(range(5)))
+        self.assertEqual({c.deco for c in cfgs}, set(range(6)))
+        self.assertGreater(len({(c.title, c.left, c.right) for c in cfgs}), 100)  # выбор независимый
+
+    def test_label_shape_and_candy_untouched(self):
+        for i in range(300):
+            c = suggest_ui.generate_config(f"l{i}")
+            self.assertEqual(c.label, f"{suggest_ui.LEFT_EMOJI[c.left]} {suggest_ui.TITLES[c.title]} {suggest_ui.RIGHT_EMOJI[c.right]}")
+            self.assertNotIn("🍬", c.label + c.mark)
+            self.assertNotIn("---", c.label + c.text)
+
+    def test_new_bot_avoids_taken_combinations(self):
+        taken = set()
+        for i in range(300):
+            c = suggest_ui.generate_config(f"bot{i}", taken)
+            self.assertNotIn(c.signature(), taken)
+            taken.add(c.signature())
+
+    def test_registered_in_texts_and_gallery_uses_its_label(self):
+        from app import texts
+        self.assertIn("suggest", [k.key for k in texts.KINDS])
+        c, g = suggest_ui.generate_config("z"), gallery.generate_config("z")
+        rows = gallery.layout_rows(g, c.label)
+        self.assertEqual([r[0][0] for r in rows][-2:], [c.label, "⬅️ Назад"])
+        with _FakeAiogramTypes():
+            kb = gallery.build_keyboard(g, c.label)
+        self.assertEqual(kb.inline_keyboard[2][0].text, c.label)
+        self.assertEqual(kb.inline_keyboard[2][0].callback_data, g.suggest_cb)
+        self.assertEqual(getattr(kb.inline_keyboard[2][0], "style", None), "primary")
 
 
 class GalleryButtonsTests(unittest.TestCase):
@@ -188,6 +281,21 @@ class VideoPoolTests(unittest.TestCase):
 
 # ---------------------------------------------------------------- сценарии бота
 
+class _RemovableStats(th.FakeStats):
+    def __init__(self, known):
+        super().__init__(known)
+        self.removed, self.flushed = [], False
+
+    def remove(self, uid):
+        self.removed.append(uid)
+        existed = uid in self.known
+        self.known.discard(uid)
+        return existed
+
+    async def flush(self):
+        self.flushed = True
+
+
 class FakeDB:
     """Память вместо БД; decide_submission между проверкой статуса и записью не ждёт — как один UPDATE."""
 
@@ -320,19 +428,26 @@ class Flow(unittest.TestCase):
         video_pool.pool._bad.clear()
         self.bot = Bot()
         self.sent = []   # сообщения бота пользователю: (id, chat, text, markup)
+        self.images = []  # картинка, с которой ушло каждое сообщение из self.sent (None — без картинки)
+        self.send_error = None  # если задано — отправка падает с этой ошибкой
 
         async def fake_send(b, chat_id, text, image=None, reply_markup=None):
+            if self.send_error is not None:
+                raise self.send_error
             b.next_id += 1
+            self.images.append(image)
             self.sent.append((b.next_id, chat_id, text, reply_markup))
             return NS(message_id=b.next_id)
 
         self._orig_send = messaging.send_message
         messaging.send_message = fake_send
-        profile = NS(name="Бот", message_image_url=None, token="1:SECRET")
+        profile = NS(name="Бот", message_image_url="https://img.example/pic.jpg", token="1:SECRET")
         self.texts = NS(
             greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
-            deco=deco.generate_config("t"), gallery=gallery.generate_config("t"), version=1)
-        self.router = handlers.build_router(th.FakeStats({5, 6, 777}), self.texts, profile)
+            deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
+            suggest=suggest_ui.generate_config("t"), version=1)
+        self.stats = _RemovableStats({5, 6, 777})
+        self.router = handlers.build_router(self.stats, self.texts, profile)
         self.h = self.router.handlers if hasattr(self.router, "handlers") else {
             c.callback.__name__: c.callback
             for ev in (self.router.message, self.router.callback_query) for c in ev.handlers}
@@ -371,12 +486,15 @@ class Flow(unittest.TestCase):
             await self.h["on_gallery_button"](self.call(self.texts.gallery.suggest_cb, msg_id=10), self.bot)
             self.assertEqual(self.bot.deleted, [10])
             mid, _chat, text, markup = self.sent[-1]
+            self.assertEqual(text, self.texts.suggest.render_menu())  # текст меню — вариант этого бота
             self.assertIn("+2🍬", text)
             self.assertEqual([[b.callback_data for b in r] for r in markup.inline_keyboard],
                              [[self.texts.gallery.suggest_back_cb]])
             await self.h["on_gallery_button"](self.call(self.texts.gallery.suggest_back_cb, msg_id=mid), self.bot)
             self.assertEqual(self.bot.deleted, [10, mid])
             self.assertIn(f"<b>{self.texts.shop_buttons.gallery_heading}</b>", self.sent[-1][2])  # снова меню галереи
+            self.assertEqual(self.sent[-1][3].inline_keyboard[2][0].text, self.texts.suggest.label)  # кнопка этого бота
+            self.assertIn(f"«{self.texts.suggest.name}»", self.sent[-1][2])  # и подсказка с тем же названием
             n = len(self.sent)
             await self.h["on_private_message"](self.msg(video=video(60)), self.bot)  # меню закрыто — не предложка
             self.assertEqual(len(self.sent), n)
@@ -399,6 +517,59 @@ class Flow(unittest.TestCase):
                 await self.h["on_private_message"](self.msg(video=video(30 + i, f"F{i}")), self.bot)
             self.assertEqual(len(self.db.subs), 5)
             self.assertEqual(len(self.bot.videos), 5 * 2)  # каждая заявка ушла обоим модераторам
+
+        self.arun(go())
+
+    def test_replies_have_no_picture_and_valid_video_is_acknowledged(self):
+        async def go():
+            await self.open_suggest()
+            n = len(self.sent)
+            self.assertIsNotNone(self.images[n - 1])  # само меню предложки — с картинкой бота
+            await self.h["on_private_message"](self.msg(video=None, text="привет"), self.bot)
+            await self.h["on_private_message"](self.msg(video=video(29)), self.bot)
+            await self.h["on_private_message"](self.msg(video=video(75)), self.bot)
+            self.assertEqual([m[2] for m in self.sent[n:]],
+                             [suggest.MSG_NOT_VIDEO, suggest.MSG_TOO_SHORT, "✅ Ваше видео принято на рассмотрение."])
+            self.assertEqual(self.images[n:], [None, None, None])
+            self.assertEqual(len(self.db.subs), 1)
+
+        self.arun(go())
+
+    def test_blocked_author_gets_no_acknowledgement(self):
+        async def go():
+            await self.open_suggest()
+            self.db.blocked.add(5)
+            n = len(self.sent)
+            await self.h["on_private_message"](self.msg(video=video(75)), self.bot)
+            self.assertEqual(len(self.sent), n)
+
+        self.arun(go())
+
+    def test_user_who_blocked_bot_is_removed_from_db(self):
+        async def go():
+            self.send_error = Forbidden("Forbidden: bot was blocked by the user")
+            await self.h["on_start"](NS(from_user=NS(id=5, username="u")), self.bot)
+            self.assertEqual(self.stats.removed, [5])
+            self.assertTrue(self.stats.flushed)
+            self.assertFalse(self.stats.has(5))
+
+        self.arun(go())
+
+    def test_other_forbidden_errors_keep_user(self):
+        async def go():
+            for text in ("Forbidden: user is deactivated", "Forbidden: bot can't initiate conversation with a user"):
+                self.send_error = Forbidden(text)
+                await self.h["on_start"](NS(from_user=NS(id=6, username="u")), self.bot)
+            self.assertEqual(self.stats.removed, [])
+            self.assertTrue(self.stats.has(6))
+
+        self.arun(go())
+
+    def test_blocking_event_removes_user(self):
+        async def go():
+            await self.h["on_blocked_by_user"](NS(chat=NS(id=777, type="private")))
+            self.assertEqual(self.stats.removed, [777])
+            self.assertTrue(self.stats.flushed)
 
         self.arun(go())
 

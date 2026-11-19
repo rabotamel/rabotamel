@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from . import auth, avatars, moderation, push, repo, sandbox
+from .metrics import metrics
 from .events import bus
 from .models import STATUS_ACTIVE, STATUS_QUEUED
 
@@ -208,6 +209,8 @@ async def build_state(request: Request) -> dict:
             "running": running,
             "note": st["note"] if not running else "работает",
             "users": manager.users_count() if running else None,
+            # сколько видео сейчас в галерее этого бота (одобренные заявки)
+            "videos": await repo.count_gallery_videos(active.id) if running else None,
             "since": active.active_since.isoformat() if active.active_since else None,
         }
 
@@ -275,6 +278,12 @@ async def index(request: Request):
 @api.get("/state")
 async def get_state(request: Request):
     return await build_state(request)
+
+
+@api.get("/metrics")
+async def get_metrics():
+    """Лёгкий опрос для подвала сайта: значения только из памяти, БД не трогаем."""
+    return JSONResponse(metrics.snapshot(), headers={"Cache-Control": "no-store"})
 
 
 @api.get("/events")
@@ -437,6 +446,16 @@ async def sandbox_randomize(body: ConfirmIn, request: Request):
         return await sandbox.reroll(request.app.state.manager, body.confirm)
     except sandbox.SandboxError as e:
         raise HTTPException(e.status, e.message)
+
+
+@api.post("/sandbox/delete-videos")
+async def sandbox_delete_videos(body: ConfirmIn, request: Request):
+    try:
+        res = await sandbox.delete_all_videos(request.app.state.manager, body.confirm)
+    except sandbox.SandboxError as e:
+        raise HTTPException(e.status, e.message)
+    bus.publish({"type": "gallery", "bot_id": res["bot_id"], "videos": 0})
+    return res
 
 
 @api.post("/sandbox/delete-user")

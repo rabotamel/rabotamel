@@ -11,7 +11,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import captcha, deco, gallery, greeting, shop_buttons
+from . import captcha, deco, gallery, greeting, shop_buttons, suggest_ui
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,9 @@ KINDS: tuple[TextKind, ...] = (
     ),
     TextKind("deco", "Декоративный маркер", deco.generate_config, deco.DecoConfig.from_json),
     TextKind("gallery", "Раздел «Галерея»", gallery.generate_config, gallery.GalleryConfig.from_json),
+    TextKind(
+        "suggest", "Кнопка и меню «Предложка»", suggest_ui.generate_config, suggest_ui.SuggestConfig.from_json,
+    ),
 )
 
 # Где лежит JSON вида в БД. captcha — историческая отдельная колонка; всё новое хранится в texts_config
@@ -68,6 +71,10 @@ class BotTexts:
     @property
     def deco(self) -> deco.DecoConfig:
         return self.configs["deco"]
+
+    @property
+    def suggest(self) -> suggest_ui.SuggestConfig:
+        return self.configs["suggest"]
 
     @property
     def gallery(self) -> gallery.GalleryConfig:

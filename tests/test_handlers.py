@@ -53,7 +53,7 @@ def _install_stubs():
             return deco
 
         def __getattr__(self, name):
-            if name in ("message", "callback_query"):
+            if name in ("message", "callback_query", "my_chat_member"):
                 return self._reg(name)
             raise AttributeError(name)
 
@@ -120,7 +120,7 @@ def _import_handlers():
 
 
 handlers = _import_handlers()
-from app import deco, gallery, messaging, shop_buttons  # noqa: E402
+from app import deco, gallery, messaging, shop_buttons, suggest_ui  # noqa: E402
 
 
 class FakeBot:
@@ -166,7 +166,8 @@ class StartDeletesPreviousTests(unittest.TestCase):
             from app import greeting
             texts = types.SimpleNamespace(
                 greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
-                deco=deco.generate_config("t"), gallery=gallery.generate_config("t"), version=1)
+                deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
+                suggest=suggest_ui.generate_config("t"), version=1)
             router = handlers.build_router(FakeStats({5}), texts, profile)
             on_start = router.handlers["on_start"]
             msg = types.SimpleNamespace(from_user=types.SimpleNamespace(id=5, username="u"))
@@ -208,7 +209,8 @@ class GalleryNavigationTests(unittest.TestCase):
             profile = types.SimpleNamespace(name="Бот", message_image_url=None)
             texts = types.SimpleNamespace(
                 greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
-                deco=deco.generate_config("t"), gallery=gallery.generate_config("t"), version=1)
+                deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
+                suggest=suggest_ui.generate_config("t"), version=1)
             router = handlers.build_router(FakeStats({5}), texts, profile)
 
             def call(data, msg_id):
@@ -256,7 +258,8 @@ class CaptchaTargetChangesTests(unittest.TestCase):
         texts = types.SimpleNamespace(
             captcha=cfg, greeting=greeting.generate_config("t"),
             shop_buttons=shop_buttons.generate_config("t"),
-            deco=deco.generate_config("t"), gallery=gallery.generate_config("t"), version=1)
+            deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
+                suggest=suggest_ui.generate_config("t"), version=1)
         stats = FakeStats(set())
         stats.add = lambda uid, name=None: stats.known.add(uid) or True
 

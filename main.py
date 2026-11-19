@@ -13,6 +13,7 @@ from app import db, push
 from app.config import get_settings
 from app.events import bus
 from app.manager import BotManager
+from app.metrics import MetricsMiddleware, metrics
 from app.web import router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -47,6 +48,12 @@ async def _startup(app: FastAPI) -> None:
     except Exception:
         log.exception("Не удалось подготовить ключи Web Push — уведомления будут недоступны")
 
+    try:
+        await metrics.load()  # накопленное «за всё время» из БД; дальше счётчики в памяти, в БД — пачкой раз в ~45 с
+    except Exception:
+        log.exception("Не удалось загрузить счётчики статистики — продолжаю с нуля")
+    app.state.metrics_task = asyncio.create_task(metrics.run(), name="metrics-saver")
+
     manager = BotManager(settings)
     app.state.manager = manager
     app.state.error = None
@@ -65,8 +72,14 @@ async def lifespan(app: FastAPI):
         bus.close()  # закрывает открытые SSE-соединения, чтобы остановка не зависала
         startup.cancel()
         await asyncio.gather(startup, return_exceptions=True)
+        task = getattr(app.state, "metrics_task", None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         if app.state.manager is not None:
             await app.state.manager.stop()
+        if db.engine is not None:
+            await metrics.flush()  # штатная остановка: сохраняем последние счётчики
         await db.close_db()
 
 
@@ -74,6 +87,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 # За прокси Render берём реальный IP и схему (https) из X-Forwarded-* — нужно для cookie и защиты от перебора пароля
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+app.add_middleware(MetricsMiddleware)  # счётчики HTTP-запросов и трафика (в памяти)
 app.include_router(router)
 
 

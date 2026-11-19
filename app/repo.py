@@ -528,6 +528,45 @@ async def load_approved_pool(bot_id: int) -> list[tuple[int, str]]:
         return [(i, f) for i, f in res.all()]
 
 
+async def count_gallery_videos(bot_id: int) -> int:
+    """Сколько видео сейчас в галерее бота (одобренные заявки; именно из них выдаёт «Купить видео»)."""
+    async with db.SessionLocal() as s:
+        res = await s.execute(
+            select(func.count()).select_from(VideoSubmission)
+            .where(VideoSubmission.bot_id == bot_id, VideoSubmission.status == SUB_APPROVED)
+        )
+        return int(res.scalar_one() or 0)
+
+
+async def delete_gallery_videos(bot_id: int | None = None) -> int:
+    """Удаляет все видео из галереи бота (одобренные заявки; без bot_id — у всех ботов). Возвращает, сколько удалено.
+    Ожидающие решения заявки не трогаются. Записи о сообщениях у модераторов удаляются каскадом."""
+    async with db.SessionLocal() as s, s.begin():
+        stmt = delete(VideoSubmission).where(VideoSubmission.status == SUB_APPROVED)
+        if bot_id is not None:
+            stmt = stmt.where(VideoSubmission.bot_id == bot_id)
+        res = await s.execute(stmt.returning(VideoSubmission.id))
+        return len(res.all())
+
+
+GALLERY_OWNER_KEY = "gallery_owner_bot"
+
+
+async def reset_gallery_on_switch(bot_id: int) -> int:
+    """Вызывается при запуске бота. Галерея принадлежит тому боту, который работал последним: если теперь запускается
+    ДРУГОЙ бот (смена бота), все видео галереи удаляются и она начинается с нуля. Перезапуск того же бота
+    (правка профиля, перезапуск приложения) галерею не трогает. Самый первый запуск после обновления (запомненного
+    бота ещё нет) только запоминает бота и ничего не удаляет. Возвращает, сколько видео удалено."""
+    owner = await kv_get(GALLERY_OWNER_KEY)
+    if owner == str(bot_id):
+        return 0
+    deleted = 0
+    if owner is not None:
+        deleted = await delete_gallery_videos()  # file_id действует только у бота, получившего видео
+    await kv_set(GALLERY_OWNER_KEY, str(bot_id))
+    return deleted
+
+
 # ---------- рандомизируемые сообщения и аватарки ----------
 
 def _read_texts(row: BotProfile) -> dict[str, str]:
@@ -659,6 +698,28 @@ async def kv_get(key: str) -> str | None:
     async with db.SessionLocal() as s:
         row = await s.get(KeyValue, key)
         return row.value if row else None
+
+
+async def add_metrics(key: str, delta: dict) -> dict:
+    """Прибавляет дельту к накопленным счётчикам в kv_settings (JSON) в одной транзакции с блокировкой строки и
+    возвращает новые итоги. Пустая дельта — просто чтение. Так два процесса не затирают друг друга."""
+    async with db.SessionLocal() as s, s.begin():
+        await s.execute(pg_insert(KeyValue).values(key=key, value="{}").on_conflict_do_nothing())
+        row = (await s.execute(select(KeyValue).where(KeyValue.key == key).with_for_update())).scalar_one()
+        try:
+            data = json.loads(row.value or "{}")
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        changed = False
+        for k, v in delta.items():
+            if v:
+                data[k] = int(data.get(k, 0) or 0) + int(v)
+                changed = True
+        if changed:
+            row.value = json.dumps(data)
+        return data
 
 
 async def kv_set(key: str, value: str) -> None:

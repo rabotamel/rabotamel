@@ -13,7 +13,7 @@
 Описание, подписи и callback_data кнопок подбираются один раз по seed (токен) и хранятся в БД.
 Цена видео фиксирована — 3🍬 (PRICE), входит в тексты кнопки покупки и не меняется.
 Кнопка «⬅️ Назад» без рандомизации текста; её callback_data уникален для бота.
-Кнопка «📩 Предложка 🤍» (SUGGEST_LABEL) стоит перед «Назад», текст фиксированный; её callback_data и callback_data
+Кнопка «Предложка» стоит перед «Назад», её подпись рандомизируется отдельно (suggest_ui.py); её callback_data и callback_data
 «Назад» внутри меню предложки не хранятся, а выводятся из back_cb бота (suggest_cb / suggest_back_cb): так они
 уникальны для бота и появляются у уже сохранённых в БД конфигов без перезаписи.
 """
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 PRICE = 3
 CANDY = "🍬"
 BACK_LABEL = "⬅️ Назад"
-SUGGEST_LABEL = "📩 Предложка 🤍"
+SUGGEST_LABEL = "📩 Предложка 🤍"  # эталон; у каждого бота своя подпись из suggest_ui (хранится в БД)
 
 DESCRIPTIONS: tuple[str, ...] = (
     "Здесь вы можете поштучно покупать случайные видео из нашей галереи",
@@ -46,15 +46,30 @@ BUY_EMOJI: tuple[tuple[str, str], ...] = (("🎥", "🖤"), ("🎬", "✨"), ("�
 PREMIUM_TEXTS: tuple[str, ...] = ("Премиум подписка", "Премиум-доступ", "VIP-подписка")
 PREMIUM_EMOJI: tuple[tuple[str, str], ...] = (("💝", "👑"), ("👑", "✨"), ("💎", "👑"), ("🌟", "💎"))
 
+# Подсказка под описанием: как заработать конфеты. {proposal_title} подставляется при отправке — это название
+# кнопки предложки ЭТОГО бота (suggest_ui, без эмодзи), поэтому подсказка всегда совпадает с кнопкой на экране.
+# Количество конфет не указывается. Только добавлять в конец.
+HINT_TITLE = "{proposal_title}"
+HINTS: tuple[str, ...] = (
+    "🤍 Заработать конфеты можно, нажав «{proposal_title}»",
+    "🍬 Заработать конфеты можно через «{proposal_title}»",
+    "✨ Нажмите «{proposal_title}», чтобы заработать конфеты",
+    "💫 Зарабатывайте конфеты, выбрав «{proposal_title}»",
+)
+DEFAULT_SUGGEST_NAME = "Предложка"
+
 BUY_PREFIX, PREMIUM_PREFIX, BACK_PREFIX = "gb:", "gp:", "gk:"
 SUGGEST_PREFIX, SUGGEST_BACK_PREFIX = "gs:", "gx:"
 HASH_LEN = 10
 
 
 def validate_tables() -> None:
-    for words in (DESCRIPTIONS, BUY_TEXTS, PREMIUM_TEXTS, BUY_EMOJI, PREMIUM_EMOJI):
+    for words in (DESCRIPTIONS, BUY_TEXTS, PREMIUM_TEXTS, BUY_EMOJI, PREMIUM_EMOJI, HINTS):
         if len(set(words)) != len(words):
             raise AssertionError("повторы в списках")
+    for h in HINTS:
+        if HINT_TITLE not in h or any(ch.isdigit() for ch in h):
+            raise AssertionError("в подсказке должно быть название предложки и не должно быть чисел")
     for t in BUY_TEXTS:
         if f"({PRICE}{CANDY})" not in t:
             raise AssertionError("цена должна быть в каждом тексте кнопки покупки")
@@ -85,6 +100,15 @@ class GalleryConfig:
     buy_cb: str
     premium_cb: str
     back_cb: str
+    hint: str = ""     # шаблон подсказки с {proposal_title}; пусто — у старых конфигов (см. hint_template)
+
+    @property
+    def hint_template(self) -> str:
+        """Сохранённый шаблон подсказки. У конфигов, созданных до появления подсказки, вариант выводится из back_cb:
+        он уникален для бота и не меняется, поэтому подсказка стабильна без перезаписи БД."""
+        if self.hint:
+            return self.hint
+        return HINTS[int(hashlib.sha256(f"hint:{self.back_cb}".encode()).hexdigest()[:8], 16) % len(HINTS)]
 
     @property
     def suggest_cb(self) -> str:
@@ -97,7 +121,8 @@ class GalleryConfig:
         return SUGGEST_BACK_PREFIX + hashlib.sha256(f"suggest-back:{self.back_cb}".encode()).hexdigest()[:HASH_LEN]
 
     def signature(self) -> str:
-        return "|".join((self.description, self.buy_label, self.premium_label, self.buy_cb, self.premium_cb, self.back_cb))
+        return "|".join((self.description, self.hint_template, self.buy_label, self.premium_label,
+                         self.buy_cb, self.premium_cb, self.back_cb))
 
     def to_json(self) -> str:
         return json.dumps(
@@ -107,6 +132,7 @@ class GalleryConfig:
                 "description": self.description, "buy_label": self.buy_label,
                 "premium_label": self.premium_label,
                 "buy_cb": self.buy_cb, "premium_cb": self.premium_cb, "back_cb": self.back_cb,
+                "hint": self.hint_template,
             },
             ensure_ascii=False,
         )
@@ -123,6 +149,7 @@ class GalleryConfig:
             description=str(d["description"]), buy_label=str(d["buy_label"]),
             premium_label=str(d["premium_label"]),
             buy_cb=str(d["buy_cb"]), premium_cb=str(d["premium_cb"]), back_cb=str(d["back_cb"]),
+            hint=str(d.get("hint") or ""),
         )
         cfg.validate()
         return cfg
@@ -130,6 +157,8 @@ class GalleryConfig:
     def validate(self) -> None:
         if not self.description.strip() or not self.premium_label.strip():
             raise ValueError("пустой текст")
+        if HINT_TITLE not in self.hint_template:
+            raise ValueError("в подсказке должно быть {proposal_title}")
         if f"{PRICE}{CANDY}" not in self.buy_label:
             raise ValueError("в кнопке покупки должна быть цена 3🍬")
         if not (self.buy_cb.startswith(BUY_PREFIX) and self.premium_cb.startswith(PREMIUM_PREFIX)
@@ -152,6 +181,7 @@ def generate_config(seed: str, taken: set[str] | None = None) -> GalleryConfig:
     cfg = None
     for _ in range(300):
         desc = rng.randrange(len(DESCRIPTIONS))
+        hint = HINTS[rng.randrange(len(HINTS))]
         buy_text, buy_emoji = rng.randrange(len(BUY_TEXTS)), rng.randrange(len(BUY_EMOJI))
         premium_text, premium_emoji = rng.randrange(len(PREMIUM_TEXTS)), rng.randrange(len(PREMIUM_EMOJI))
         digest = hashlib.sha256(f"gcb:{seed}:{rng.getrandbits(64)}".encode()).hexdigest()
@@ -164,6 +194,7 @@ def generate_config(seed: str, taken: set[str] | None = None) -> GalleryConfig:
             buy_cb=BUY_PREFIX + digest[:HASH_LEN],
             premium_cb=PREMIUM_PREFIX + digest[HASH_LEN:2 * HASH_LEN],
             back_cb=BACK_PREFIX + digest[2 * HASH_LEN:3 * HASH_LEN],
+            hint=hint,
         )
         if cfg.signature() not in taken:
             break
@@ -177,28 +208,38 @@ def balance_line(greeting_template: str, balance_text: str) -> str:
     return last.replace("{balance}", balance_text)
 
 
-def render(cfg: GalleryConfig, deco, title: str, greeting_template: str, balance: int) -> str:
-    """Текст раздела (HTML). title — текст кнопки галереи без эмодзи; экранируется."""
+def hint_line(cfg: GalleryConfig, suggest_name: str) -> str:
+    """Подсказка «как заработать конфеты» с названием кнопки предложки этого бота (экранируется)."""
+    return cfg.hint_template.replace(HINT_TITLE, html.escape(suggest_name, quote=False))
+
+
+def render(
+    cfg: GalleryConfig, deco, title: str, greeting_template: str, balance: int,
+    suggest_name: str = DEFAULT_SUGGEST_NAME,
+) -> str:
+    """Текст раздела (HTML). title — текст кнопки галереи без эмодзи; suggest_name — название кнопки предложки
+    этого бота (suggest_ui.SuggestConfig.name); оба экранируются."""
     return (
         f"<b>{html.escape(title, quote=False)}</b>\n\n"
         f"{deco.wrap(cfg.description)}\n\n"
+        f"{hint_line(cfg, suggest_name)}\n\n"
         f"{balance_line(greeting_template, str(int(balance)))}"
     )
 
 
-def layout_rows(cfg: GalleryConfig) -> list[list[tuple[str, str]]]:
+def layout_rows(cfg: GalleryConfig, suggest_label: str = SUGGEST_LABEL) -> list[list[tuple[str, str]]]:
     """Четыре кнопки по одной в ряд: покупка, премиум, предложка, назад (без aiogram — удобно для тестов)."""
     return [
         [(cfg.buy_label, cfg.buy_cb)],
         [(cfg.premium_label, cfg.premium_cb)],
-        [(SUGGEST_LABEL, cfg.suggest_cb)],
+        [(suggest_label, cfg.suggest_cb)],
         [(BACK_LABEL, cfg.back_cb)],
     ]
 
 
 # Цвета кнопок галереи по порядку рядов (Bot API 9.4+, нужен aiogram >= 3.25):
-# покупка — синяя, премиум — зелёная, «Предложка» — без цвета (владелец её не красил), «Назад» — красная.
-ROW_STYLES = ("primary", "success", None, "danger")
+# покупка — синяя, премиум — зелёная, «Предложка» — синяя, «Назад» — красная.
+ROW_STYLES = ("primary", "success", "primary", "danger")
 
 
 def _button(text: str, cb: str, style: str | None):
@@ -207,13 +248,13 @@ def _button(text: str, cb: str, style: str | None):
     return InlineKeyboardButton(text=text, callback_data=cb, **({"style": style} if style else {}))
 
 
-def build_keyboard(cfg: GalleryConfig):
+def build_keyboard(cfg: GalleryConfig, suggest_label: str = SUGGEST_LABEL):
     from aiogram.types import InlineKeyboardMarkup
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_button(t, cb, style) for t, cb in row]
-            for row, style in zip(layout_rows(cfg), ROW_STYLES)
+            for row, style in zip(layout_rows(cfg, suggest_label), ROW_STYLES)
         ]
     )
 

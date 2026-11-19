@@ -67,6 +67,16 @@
   .stat .label{color:var(--muted);font-size:13px}
   .stat .value{font-size:30px;font-weight:650;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
   .stat .value.sm{font-size:19px;line-height:1.5;padding-top:6px}
+  /* подвал: «живая» статистика за всё время */
+  .foot{padding-top:0;padding-bottom:40px}
+  .foot h2{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 10px;text-transform:uppercase;letter-spacing:.04em}
+  .foot-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .foot-cell{padding:14px 16px}
+  .foot-cell .label{font-size:13px;font-weight:600}
+  .foot-cell .value{font-size:24px;font-weight:650;letter-spacing:-.02em;margin-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .foot-cell .desc{color:var(--muted);font-size:12.5px;line-height:1.35;margin-top:2px}
+  .foot-note{color:var(--muted);font-size:12px;margin-top:10px}
+  @media(max-width:520px){.foot-grid{grid-template-columns:1fr}}
   .empty{padding:32px 20px;text-align:center;color:var(--muted)}
   .empty p{margin:0 0 16px}
 
@@ -232,6 +242,13 @@
     </div>
 
     <div class="card sb">
+      <h3>Удалить все видео</h3>
+      <p class="hint">Удаляет все видео в галерее бота</p>
+      <div class="msg" id="sb-vid-msg"></div>
+      <div class="row"><button type="button" class="btn red" id="sb-del-videos">Удалить все видео</button></div>
+    </div>
+
+    <div class="card sb">
       <h3>Уникальные текста</h3>
       <p class="hint">Переписывает все текста в боте и делает их уникальными.</p>
       <div class="msg" id="sb-rand-msg"></div>
@@ -239,6 +256,21 @@
     </div>
   </section>
 </main>
+
+<footer class="wrap foot" id="foot">
+  <h2>Статистика за всё время</h2>
+  <div class="foot-grid">
+    <div class="card foot-cell"><div class="label">Трафик сервера</div><div class="value" id="m-traffic">—</div>
+      <div class="desc">Объём сетевого трафика, прошедшего через веб-сервер / Render за всё время</div></div>
+    <div class="card foot-cell"><div class="label">Активность базы данных</div><div class="value" id="m-db">—</div>
+      <div class="desc">Количество операций / активность базы данных за всё время</div></div>
+    <div class="card foot-cell"><div class="label">HTTP-запросы к сайту</div><div class="value" id="m-http">—</div>
+      <div class="desc">Всего обработано HTTP-запросов сайтом за всё время</div></div>
+    <div class="card foot-cell"><div class="label">События предложки и выдачи</div><div class="value" id="m-events">—</div>
+      <div class="desc">Учтённые события предложки и выдачи контента</div></div>
+  </div>
+  <div class="foot-note">Счётчики ведутся на уровне приложения, это не биллинг Render или базы данных: цифры приближённо отражают расход ресурсов веб-сервера и БД и могут отличаться от счёта хостинга.</div>
+</footer>
 
 <dialog id="dlg-token">
   <form id="form-token" autocomplete="off">
@@ -419,6 +451,7 @@ function renderBot() {
     <div class="stats">
       <div class="card stat"><div class="label">Пользователей в боте</div><div class="value" id="users">${c.users ?? '—'}</div></div>
       <div class="card stat"><div class="label">Основной бот уже</div><div class="value sm" id="uptime">—</div></div>
+      <div class="card stat" style="grid-column:1/-1"><div class="label">Видео в галерее</div><div class="value" id="videos">${c.videos ?? '—'}</div></div>
     </div>`;
   tickUptime();
 }
@@ -725,7 +758,7 @@ function renderSandbox() {
     note.classList.add('off');
     note.textContent = S && S.current ? 'Основной бот сейчас не запущен — действия недоступны.' : 'Нет активного бота — действия недоступны.';
   }
-  ['#sb-submit', '#sb-reroll', '#sb-delete'].forEach((id) => { $(id).disabled = !ready; });
+  ['#sb-submit', '#sb-reroll', '#sb-delete', '#sb-del-videos'].forEach((id) => { $(id).disabled = !ready; });
 }
 
 /* ----- строка суммы: знак (+ / −) и валюта (🍬 / ₽ / $) ----- */
@@ -901,6 +934,26 @@ $('#sb-delete').addEventListener('click', async () => {
   renderSandbox();
 });
 
+$('#sb-del-videos').addEventListener('click', async () => {
+  setMsg('#sb-vid-msg', '');
+  const n = S && S.current && S.current.videos != null ? ` (сейчас: ${fmtNum(S.current.videos)})` : '';
+  const ok = await askConfirm({
+    title: 'Удалить все видео?',
+    text: `Все видео в галерее бота будут удалены${n}. Это действие нельзя отменить.`,
+    ok: 'Удалить все видео',
+    danger: true,
+  });
+  if (!ok) return;
+  $('#sb-del-videos').disabled = true;
+  try {
+    const r = await api('POST', '/api/sandbox/delete-videos', {confirm: true});
+    if (S && S.current) S.current.videos = 0;
+    const v = $('#videos'); if (v) v.textContent = '0';
+    setMsg('#sb-vid-msg', `Готово: удалено видео — ${fmtNum(r.deleted)}`);
+  } catch (err) { setMsg('#sb-vid-msg', err.message, true); }
+  renderSandbox();
+});
+
 /* ---------- Web Push ---------- */
 const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 let swReg = null;
@@ -1060,6 +1113,11 @@ function connect() {
         S.current.users = ev.users;
         const u = $('#users'); if (u) u.textContent = ev.users;
       }
+    } else if (ev.type === 'gallery') {
+      if (S && S.current && S.current.id === ev.bot_id) {
+        S.current.videos = ev.videos;
+        const v = $('#videos'); if (v) v.textContent = ev.videos;
+      }
     } else if (ev.type === 'changed' || ev.type === 'alert') {
       scheduleReload();
     }
@@ -1072,6 +1130,29 @@ function connect() {
     }
   };
 }
+
+/* ---------- подвал: «живая» статистика (лёгкий опрос раз в 3 секунды, значения из памяти сервера) ---------- */
+function fmtBytes(n) {
+  const u = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
+  let i = 0, v = Number(n) || 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toLocaleString('ru-RU', {useGrouping: false, maximumFractionDigits: i ? 2 : 0}) + ' ' + u[i];
+}
+async function pollMetrics() {
+  if (document.hidden) return;
+  try {
+    const m = await api('GET', '/api/metrics');
+    $('#m-traffic').textContent = fmtBytes(m.traffic_bytes);
+    $('#m-traffic').title = `Исходящий: ${fmtBytes(m.traffic_out)} · входящий: ${fmtBytes(m.traffic_in)}`;
+    $('#m-db').textContent = fmtNum(m.db_ops);
+    $('#m-http').textContent = fmtNum(m.http_requests);
+    $('#m-events').textContent = fmtNum(m.events);
+    $('#m-events').title = `Заявки: ${fmtNum(m.submissions)} · решения модераторов: ${fmtNum(m.decisions)} · выдано видео: ${fmtNum(m.videos_sent)}`;
+  } catch (_) {}   // сервис ещё запускается или нет сети — просто попробуем через 3 с
+}
+setInterval(pollMetrics, 3000);
+document.addEventListener('visibilitychange', pollMetrics);
+pollMetrics();
 
 /* ---------- старт ---------- */
 loadState().then(() => {

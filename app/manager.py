@@ -13,7 +13,7 @@ from aiogram.exceptions import (
     TelegramUnauthorizedError,
 )
 
-from . import avatars, push, repo
+from . import avatars, push, repo, video_pool
 from .config import Settings
 from .events import bus
 from .handlers import build_router
@@ -263,6 +263,16 @@ class BotManager:
             # варианты капчи, приветствия и других рандомизируемых сообщений: создаются один раз при первом
             # запуске бота и больше не меняются (кроме «Уникальные текста» в «Песочнице»)
             texts = BotTexts(await repo.get_or_create_texts(profile.id, profile.token))
+
+            # смена бота = галерея с нуля (видео привязаны к file_id прежнего бота и новому не нужны)
+            try:
+                dropped = await repo.reset_gallery_on_switch(profile.id)
+            except Exception:
+                log.exception("Не удалось проверить галерею при запуске бота id=%s", profile.id)
+            else:
+                if dropped:
+                    log.info("Смена бота: галерея очищена, удалено видео: %s", dropped)
+                video_pool.pool.reset()
 
             await self._apply_profile(bot, profile)
             await self._apply_avatar(profile)

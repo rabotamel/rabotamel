@@ -1,5 +1,5 @@
 """Логика вкладки «Песочница»: выдача/изъятие 🍬 (в конфетах, рублях или долларах), «Уникальные текста»
-(перезапись всех рандомизируемых текстов), удаление пользователя.
+(перезапись всех рандомизируемых текстов), удаление пользователя, «Удалить все видео» (очистка галереи).
 
 Все действия применяются к текущему основному боту и только пока он запущен (нужны его счётчики в памяти
 и сам объект бота для уведомления). Пользователь ищется среди тех, кто прошёл капчу: ID — по словарю в памяти,
@@ -10,7 +10,7 @@ import re
 
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 
-from . import currency, greeting, messaging, repo
+from . import currency, greeting, messaging, repo, video_pool
 from .manager import BotManager
 from .stats import norm_username
 
@@ -110,12 +110,14 @@ async def change_candies(
             raise SandboxError(404, "Пользователь не найден в базе (возможно, его только что удалили)")
         notified, notify_error = True, None
         try:
-            # картинка сообщений бота (если задана) идёт над текстом, как в приветствии
-            await messaging.send_message(
-                bot, uid, _gift_text(candies, cur, paid), manager.profile.message_image_url
-            )
-        except TelegramForbiddenError:
+            # уведомление о конфетах — без картинки бота
+            await messaging.send_message(bot, uid, _gift_text(candies, cur, paid))
+        except TelegramForbiddenError as e:
             notified, notify_error = False, "пользователь заблокировал бота"
+            if messaging.is_blocked_by_user(e):
+                # человек сам заблокировал бота — удаляем его из базы
+                stats.remove(uid)
+                await stats.flush()
         except TelegramAPIError as e:
             notified, notify_error = False, str(e)
         log.info("Песочница: выдано %s пользователю %s у бота %s", candies, uid, stats.bot_id)
@@ -153,3 +155,13 @@ async def reroll(manager: BotManager, confirm: bool) -> dict:
     await manager.reroll_texts()
     log.info("Песочница: тексты бота %s перерандомизированы", manager.profile.id if manager.profile else "?")
     return {"ok": True}
+
+
+async def delete_all_videos(manager: BotManager, confirm: bool) -> dict:
+    """«Удалить все видео»: очищает галерею текущего бота (одобренные видео, которые выдаёт «Купить видео»)."""
+    _require_confirm(confirm)
+    stats, _ = _running(manager)
+    deleted = await repo.delete_gallery_videos(stats.bot_id)
+    video_pool.pool.reset()
+    log.info("Песочница: удалено видео из галереи бота %s: %s", stats.bot_id, deleted)
+    return {"ok": True, "deleted": deleted, "videos": 0, "bot_id": stats.bot_id}

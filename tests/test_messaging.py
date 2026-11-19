@@ -167,3 +167,12 @@ class MessagingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BlockedByUserTests(unittest.TestCase):
+    def test_only_real_user_block_counts(self):
+        self.assertTrue(messaging.is_blocked_by_user(TelegramForbiddenError("Forbidden: bot was blocked by the user")))
+        for text in ("Forbidden: user is deactivated", "Forbidden: bot can't initiate conversation with a user",
+                     "Forbidden: bot was kicked from the group chat"):
+            self.assertFalse(messaging.is_blocked_by_user(TelegramForbiddenError(text)))
+        self.assertFalse(messaging.is_blocked_by_user(TelegramBadRequest("bot was blocked by the user")))
