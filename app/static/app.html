@@ -96,6 +96,10 @@
   .mini{display:none;margin-top:4px}
   .editing .mini{display:block}
   .bad{color:var(--red)}
+  /* бот без токена: красная пометка в очереди */
+  .notoken{margin-top:4px;font-size:13px;line-height:1.35;color:var(--red);font-weight:600;white-space:normal}
+  .notoken .link{color:var(--red);font-weight:600;text-decoration:underline;font-size:13px}
+  .item.notoken-bot{border-color:var(--red);border-style:dashed}
   .note{padding:28px;text-align:center;color:var(--muted)}
 
   /* окна */
@@ -172,7 +176,7 @@
 
   <section id="tab-tokens" hidden>
     <div class="toolbar">
-      <button class="btn green" data-act="add">+ Добавить токен</button>
+      <button class="btn green" data-act="add">+ Добавить бота</button>
       <button class="btn" id="btn-edit">Редактировать</button>
     </div>
     <div id="list"></div>
@@ -221,8 +225,9 @@
   <form id="form-token" autocomplete="off">
     <h2 id="dlg-token-title">Новый токен</h2>
     <div class="field" id="field-token">
-      <label for="f-token">Токен бота</label>
+      <label for="f-token" id="label-token">Токен бота</label>
       <input id="f-token" name="token" placeholder="123456789:AAH...">
+      <div class="fhint" id="hint-token"></div>
     </div>
     <div class="field">
       <label for="f-name">Имя бота</label>
@@ -367,8 +372,10 @@ function renderBot() {
   const c = S.current;
   if (!c) {
     el.innerHTML = `<div class="card empty">
-      <p>${S.has_any ? 'Сейчас нет активного токена.' : 'Токен ещё не добавлен.'}</p>
-      <button class="btn green" data-act="add">+ Добавить токен</button></div>`;
+      <p>${S.has_any ? 'Сейчас нет активного токена.' : 'Ботов ещё нет.'}</p>
+      ${S.bots.some((b) => b.status === 'queued' && b.has_token === false) && !S.bots.some((b) => b.status === 'queued' && b.has_token !== false)
+        ? '<p class="bad">В очереди только боты без токена — добавьте токен хотя бы одному из них, иначе запускать нечего.</p>' : ''}
+      <button class="btn green" data-act="add">+ Добавить бота</button></div>`;
     return;
   }
   el.innerHTML = `
@@ -422,14 +429,18 @@ function renderList() {
   el.innerHTML = S.bots.map((b) => {
     const badgeColor = b.status === 'active' ? 'green' : 'blue';
     const badge = b.queue ? `<span class="badge ${badgeColor}">#${b.queue}</span>` : `<span class="badge gray">!</span>`;
+    const noToken = b.has_token === false;
     const statusLine = b.status === 'blocked'
       ? `<span class="bad" title="${esc(b.last_error || '')}">заблокирован</span>`
-      : (b.status === 'active' ? 'основной' : 'в очереди');
-    const mini = b.status === 'queued'
+      : (b.status === 'active' ? 'основной' : (noToken ? 'шаблон в очереди' : 'в очереди'));
+    const noTokenNote = noToken
+      ? `<div class="notoken">Без токена — это только шаблон. Чтобы бот заработал, добавьте в него токен. <button class="link" data-act="edit">Добавить токен</button></div>`
+      : '';
+    const mini = b.status === 'queued' && !noToken
       ? `<button class="link mini" data-act="make-main">Сделать основным</button>`
       : (b.status === 'blocked' ? `<button class="link mini" data-act="requeue">Вернуть в очередь</button>` : '');
     return `
-    <div class="card item ${b.status}" data-id="${b.id}" data-kind="${b.status}">
+    <div class="card item ${b.status}${noToken ? ' notoken-bot' : ''}" data-id="${b.id}" data-kind="${b.status}">
       ${badge}
       <span class="handle ${b.status === 'queued' ? '' : (b.status === 'active' ? 'locked' : 'ph')}" title="${b.status === 'active' ? 'Основной токен нельзя перемещать' : 'Перетащить, чтобы изменить очередь'}">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -445,6 +456,7 @@ function renderList() {
         <div class="name">${esc(b.name)}</div>
         <div class="sub">${b.username ? '@' + esc(b.username) + ' · ' : ''}${statusLine}</div>
         ${b.description ? `<div class="sub">${esc(b.description)}</div>` : ''}
+        ${noTokenNote}
         ${mini}
       </div>
     </div>`;
@@ -514,8 +526,14 @@ document.querySelectorAll('dialog').forEach((d) => d.addEventListener('click', (
 
 function openTokenDialog(bot) {
   editId = bot ? bot.id : null;
-  $('#dlg-token-title').textContent = bot ? 'Профиль бота' : (S && S.has_any ? 'Новый токен про запас' : 'Первый токен');
-  $('#field-token').hidden = !!bot;
+  const noToken = !!bot && bot.has_token === false;
+  $('#dlg-token-title').textContent = bot ? (noToken ? 'Бот без токена (шаблон)' : 'Профиль бота') : (S && S.has_any ? 'Новый бот про запас' : 'Первый бот');
+  // у бота с токеном поле скрыто (токен не меняется); у шаблона — показано, чтобы добавить токен позже
+  $('#field-token').hidden = !!bot && !noToken;
+  $('#label-token').textContent = noToken ? 'Токен бота — добавьте, чтобы бот заработал' : 'Токен бота (можно добавить позже)';
+  $('#hint-token').textContent = noToken
+    ? 'Пока токена нет, бот остаётся шаблоном и не может запуститься.'
+    : 'Можно оставить пустым: бот встанет в очередь как шаблон без токена, токен добавится позже.';
   $('#f-token').value = '';
   $('#f-name').value = bot ? bot.name : '';
   $('#f-avatar').value = bot ? (bot.avatar_url || '') : '';

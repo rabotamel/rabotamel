@@ -46,7 +46,7 @@ async def token_exists(token: str) -> bool:
 
 
 async def add_bot(
-    token: str,
+    token: str | None,
     name: str,
     description: str,
     avatar_url: str | None,
@@ -56,7 +56,7 @@ async def add_bot(
     async with db.SessionLocal() as s, s.begin():
         max_pos = (await s.execute(select(func.coalesce(func.max(BotProfile.position), 0)))).scalar_one()
         bot = BotProfile(
-            token=token,
+            token=token or None,
             name=name,
             description=description,
             avatar_url=avatar_url or None,
@@ -86,7 +86,8 @@ async def claim_next() -> BotProfile | None:
 
         res = await s.execute(
             select(BotProfile)
-            .where(BotProfile.status == STATUS_QUEUED)
+            # боты без токена (шаблоны) пропускаются: запустить их нечем
+            .where(BotProfile.status == STATUS_QUEUED, BotProfile.token.is_not(None))
             .order_by(BotProfile.position, BotProfile.id)
             .limit(1)
             .with_for_update(skip_locked=True)
@@ -104,7 +105,9 @@ async def claim_next() -> BotProfile | None:
 async def has_spare(exclude_id: int) -> bool:
     async with db.SessionLocal() as s:
         res = await s.execute(
-            select(BotProfile.id).where(BotProfile.status == STATUS_QUEUED, BotProfile.id != exclude_id).limit(1)
+            select(BotProfile.id)
+            .where(BotProfile.status == STATUS_QUEUED, BotProfile.id != exclude_id, BotProfile.token.is_not(None))
+            .limit(1)
         )
         return res.first() is not None
 
@@ -122,7 +125,7 @@ async def activate(bot_id: int) -> bool:
     """Ручное переключение: текущий активный уходит обратно в очередь."""
     async with db.SessionLocal() as s, s.begin():
         target = await s.get(BotProfile, bot_id)
-        if target is None:
+        if target is None or not target.token:  # бот без токена основным быть не может
             return False
         await s.execute(
             update(BotProfile)
@@ -148,6 +151,17 @@ async def requeue(bot_id: int) -> None:
 async def delete_bot(bot_id: int) -> None:
     async with db.SessionLocal() as s, s.begin():
         await s.execute(delete(BotProfile).where(BotProfile.id == bot_id))
+
+
+async def set_token(bot_id: int, token: str, username: str | None) -> bool:
+    """Добавляет токен боту-шаблону. False — бот не найден или токен у него уже есть (менять токен нельзя)."""
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(
+            update(BotProfile)
+            .where(BotProfile.id == bot_id, BotProfile.token.is_(None))
+            .values(token=token, username=username, last_error=None)
+        )
+        return res.rowcount > 0
 
 
 async def update_profile(

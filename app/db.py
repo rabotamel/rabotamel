@@ -53,6 +53,8 @@ async def init_db(database_url: str) -> None:
         await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS captcha_config text"))
         await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS texts_config text"))
         await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS message_image_url text"))
+        # боты без токена (шаблоны): токен больше не обязателен
+        await conn.execute(text("ALTER TABLE bot_profiles ALTER COLUMN token DROP NOT NULL"))
         await conn.execute(text("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS candies bigint NOT NULL DEFAULT 0"))
         await conn.execute(text("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS username varchar(64)"))
         await conn.execute(text("UPDATE bot_profiles SET position = id WHERE position = 0"))

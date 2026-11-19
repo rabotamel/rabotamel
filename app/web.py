@@ -139,6 +139,18 @@ async def check_token(token: str) -> tuple[str | None, bool]:
         await bot.session.close()
 
 
+async def validate_new_token(token: str) -> str | None:
+    """Проверяет токен нового бота (формат, уникальность, Telegram). Возвращает username бота (или None)."""
+    if not TOKEN_RE.match(token):
+        raise HTTPException(400, "Токен выглядит неверно. Формат: 123456789:AA... (из @BotFather)")
+    if await repo.token_exists(token):
+        raise HTTPException(400, "Такой токен уже добавлен")
+    username, valid = await check_token(token)
+    if not valid:
+        raise HTTPException(400, "Telegram отклонил этот токен (недействителен или отозван)")
+    return username
+
+
 def _bot_dict(b, queue: int | None) -> dict:
     return {
         "id": b.id,
@@ -153,6 +165,8 @@ def _bot_dict(b, queue: int | None) -> dict:
         "status": b.status,
         "queue": queue,
         "masked_token": b.masked_token,
+        # False — бот-шаблон без токена: стоит в очереди, но запустить его нельзя, пока токен не добавлен
+        "has_token": b.has_token,
         "last_error": b.last_error,
     }
 
@@ -280,17 +294,14 @@ async def events(request: Request):
 @api.post("/bots")
 async def add_bot(body: BotIn, request: Request):
     token = body.token.strip()
-    if not TOKEN_RE.match(token):
-        raise HTTPException(400, "Токен выглядит неверно. Формат: 123456789:AA... (из @BotFather)")
     name, description, avatar, image = clean_profile(body.name, body.description, body.avatar_url, body.message_image_url)
-    if await repo.token_exists(token):
-        raise HTTPException(400, "Такой токен уже добавлен")
 
-    username, valid = await check_token(token)
-    if not valid:
-        raise HTTPException(400, "Telegram отклонил этот токен (недействителен или отозван)")
+    # токен можно не указывать: бот встанет в очередь как шаблон без токена, токен добавляется позже
+    username = None
+    if token:
+        username = await validate_new_token(token)
 
-    await repo.add_bot(token, name, description, avatar, username, image)
+    await repo.add_bot(token or None, name, description, avatar, username, image)
     request.app.state.manager.poke()
     bus.publish({"type": "changed"})
     return {"ok": True}
@@ -306,6 +317,19 @@ async def reorder(body: ReorderIn):
 @api.post("/bots/{bot_id}/edit")
 async def edit_bot(bot_id: int, body: BotIn, request: Request):
     name, description, avatar, image = clean_profile(body.name, body.description, body.avatar_url, body.message_image_url)
+
+    # токен можно добавить только боту-шаблону (без токена); после этого бот становится «настоящим» и может запускаться
+    new_token = body.token.strip()
+    if new_token:
+        bot = await repo.get_bot(bot_id)
+        if bot is None:
+            raise HTTPException(404, "Бот не найден")
+        if bot.has_token:
+            raise HTTPException(400, "У этого бота токен уже есть — заменить его нельзя")
+        username = await validate_new_token(new_token)
+        if not await repo.set_token(bot_id, new_token, username):
+            raise HTTPException(409, "Не удалось сохранить токен: бот изменился, обновите страницу")
+
     await repo.update_profile(bot_id, name, description, avatar, image)
     avatars.invalidate(bot_id)
     # если бот сейчас активен — перезапускаем его: новые имя/описание/аватарка уходят в Telegram,
@@ -317,6 +341,9 @@ async def edit_bot(bot_id: int, body: BotIn, request: Request):
 
 @api.post("/bots/{bot_id}/activate")
 async def activate_bot(bot_id: int, request: Request):
+    bot = await repo.get_bot(bot_id)
+    if bot is not None and not bot.has_token:
+        raise HTTPException(400, "У этого бота нет токена — это шаблон. Сначала добавьте токен (шестерёнка → редактировать)")
     if not await repo.activate(bot_id):
         raise HTTPException(404, "Бот не найден")
     request.app.state.manager.poke(switch=True)
@@ -354,7 +381,7 @@ async def bot_avatar(bot_id: int, request: Request):
     if bot.avatar_url and bot.avatar_url != bot.avatar_applied:
         return RedirectResponse(bot.avatar_url, status_code=302, headers=no_store)
 
-    tg = await avatars.get_tg_avatar(bot.id, bot.token)
+    tg = await avatars.get_tg_avatar(bot.id, bot.token) if bot.has_token else None
     if tg:
         data, ctype, etag = tg
         headers = {"ETag": etag, "Cache-Control": "no-cache"}
@@ -372,6 +399,8 @@ async def reveal_token(bot_id: int):
     bot = await repo.get_bot(bot_id)
     if bot is None:
         raise HTTPException(404, "Бот не найден")
+    if not bot.has_token:
+        raise HTTPException(404, "У этого бота нет токена")
     return {"token": bot.token}
 
 

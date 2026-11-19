@@ -6,7 +6,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
-from . import captcha, greeting, messaging, repo
+from . import captcha, gallery, greeting, messaging, repo, shop_buttons
 from .models import BotProfile
 from .stats import UserStats
 from .texts import BotTexts
@@ -30,14 +30,17 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
     во всех сообщениях, кроме капчи. Профиль при правке в панели подменяется перезапуском бота.
     """
     router = Router()
-    # user_id -> (id сообщения с капчей, порядок кнопок, время показа, версия текстов).
-    # Нужно, чтобы убирать старую капчу при повторном /start и не показывать подряд тот же порядок.
-    # Хранится в памяти; при перезапуске просто начнётся заново.
-    shown: dict[int, tuple[int, list[str], float, int]] = {}
+    # user_id -> (id сообщения с капчей, порядок кнопок, время показа, версия текстов, фрукт из задания).
+    # Нужно, чтобы убирать старую капчу при повторном /start и не показывать подряд тот же порядок и тот же фрукт.
+    # Хранится в памяти; при перезапуске просто начнётся заново (проверка ответа от этого не зависит: фрукт из
+    # задания восстанавливается по nonce в кнопках, см. captcha.target_for).
+    shown: dict[int, tuple[int, list[str], float, int, str]] = {}
     # user_id -> id приветствия, присланного после /start или после прохождения капчи. При следующем /start
     # (и при новой капче) оно удаляется, чтобы в чате не копились одинаковые сообщения. В памяти: после
     # перезапуска бота прежнее приветствие просто останется в чате.
     last_greeting: dict[int, int] = {}
+    # user_id -> id сообщения раздела «Галерея» (в памяти). Нужно, чтобы /start не оставлял его висеть рядом с приветствием.
+    last_gallery: dict[int, int] = {}
 
     async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> None:
         try:
@@ -45,7 +48,11 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         except TelegramAPIError:
             pass  # уже удалено или старше 48 часов — не страшно
 
-    async def send_captcha(bot: Bot, user_id: int, *, force: bool, deleted_id: int | None = None) -> None:
+    async def send_captcha(
+        bot: Bot, user_id: int, *, force: bool, deleted_id: int | None = None, nonce: str | None = None
+    ) -> None:
+        """nonce — оставить то же задание (после неверного ответа); без него фрукт выбирается заново и
+        отличается от прошлого."""
         now = time.monotonic()
         cfg = texts.captcha
         old = shown.get(user_id)
@@ -58,16 +65,25 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         shown.pop(user_id, None)
         if old and old[0] != deleted_id:
             await safe_delete(bot, user_id, old[0])
-        order = captcha.shuffled_order(cfg, previous=old[1] if old and old[3] == texts.version else None)
+        same_texts = bool(old) and old[3] == texts.version
+        order = captcha.shuffled_order(cfg, previous=old[1] if same_texts else None)
+        if nonce is None:
+            nonce = captcha.new_nonce(cfg, profile.token, user_id, previous_target=old[4] if same_texts else None)
+        target = captcha.target_for(cfg, profile.token, user_id, nonce)
         msg = await bot.send_message(
             user_id,
-            captcha.render_text(cfg),
-            reply_markup=captcha.build_keyboard(cfg, order),
+            captcha.render_text(cfg, target),
+            reply_markup=captcha.build_keyboard(cfg, order, nonce),
             parse_mode="HTML",
         )
         if len(shown) > 5000:
             shown.clear()
-        shown[user_id] = (msg.message_id, order, now, texts.version)
+        shown[user_id] = (msg.message_id, order, now, texts.version, target)
+
+    async def drop_last_gallery(bot: Bot, user_id: int, keep: int | None = None) -> None:
+        old_id = last_gallery.pop(user_id, None)
+        if old_id is not None and old_id != keep:
+            await safe_delete(bot, user_id, old_id)
 
     async def drop_last_greeting(bot: Bot, user_id: int) -> None:
         old_id = last_greeting.pop(user_id, None)
@@ -75,9 +91,15 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             await safe_delete(bot, user_id, old_id)
 
     async def send_greeting(bot: Bot, user_id: int, balance: int) -> None:
+        await drop_last_gallery(bot, user_id)  # приветствие и раздел галереи одновременно не висят
         text = greeting.render(texts.greeting, profile.name, balance)
         try:
-            msg = await messaging.send_message(bot, user_id, text, profile.message_image_url)
+            # кнопки «Магазин» / «Галерея» крепятся прямо под приветствием (отдельного меню нет);
+            # конфиг читается в момент отправки, а сохранён в БД, поэтому /start их не меняет
+            msg = await messaging.send_message(
+                bot, user_id, text, profile.message_image_url,
+                reply_markup=shop_buttons.build_keyboard(texts.shop_buttons),
+            )
             # подмена записи синхронная: при нескольких /start подряд прежнее приветствие удалит каждый следующий
             if len(last_greeting) > 5000:
                 last_greeting.clear()
@@ -133,7 +155,10 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         if msg_id is not None:
             await safe_delete(bot, chat_id, msg_id)
 
-        if captcha.is_correct(texts.captcha, captcha.parse_answer(call.data)):
+        nonce = captcha.parse_nonce(call.data)
+        # фрукт из задания: по nonce из кнопки (у старых сообщений без nonce — фрукт из конфигурации)
+        target = captcha.target_for(texts.captcha, profile.token, user_id, nonce) if nonce else None
+        if captcha.is_correct(texts.captcha, captcha.parse_answer(call.data), target):
             shown.pop(user_id, None)
             # Только здесь пользователь становится «новым»: add() синхронный, поэтому второе одновременное
             # нажатие уже увидит has() == True и ничего не продублирует.
@@ -146,6 +171,55 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         else:
             await call.answer()
             # те же 4 фрукта и то же задание, но в новом порядке (старое сообщение уже удалено выше)
-            await send_captcha(bot, user_id, force=True, deleted_id=msg_id)
+            await send_captcha(bot, user_id, force=True, deleted_id=msg_id, nonce=nonce)
+
+    async def send_gallery(bot: Bot, user_id: int) -> None:
+        """Сообщение раздела «Галерея»: заголовок = название кнопки этого бота, маркер бота, баланс как в приветствии."""
+        balance = await repo.get_candies(stats.bot_id, user_id)
+        text = gallery.render(texts.gallery, texts.deco, texts.shop_buttons.gallery_title, texts.greeting.template, balance)
+        try:
+            msg = await messaging.send_message(
+                bot, user_id, text, profile.message_image_url, reply_markup=gallery.build_keyboard(texts.gallery)
+            )
+            if len(last_gallery) > 5000:
+                last_gallery.clear()
+            last_gallery[user_id] = msg.message_id
+        except TelegramForbiddenError:
+            pass
+        except TelegramAPIError as e:
+            log.warning("Раздел галереи пользователю %s не доставлен: %s", user_id, e)
+
+    @router.callback_query(F.data.startswith((shop_buttons.SHOP_PREFIX, shop_buttons.GALLERY_PREFIX)))
+    async def on_shop_button(call: CallbackQuery, bot: Bot) -> None:
+        # Действие определяется по callback_data ЭТОГО бота (texts.shop_buttons читается в момент нажатия).
+        # Кнопки устаревшего (до «Перенаписать текста») или чужого приветствия просто гасят «часики».
+        action = shop_buttons.parse_action(texts.shop_buttons, call.data)
+        await call.answer()
+        user_id = call.from_user.id
+        if action is None or not stats.has(user_id):
+            return
+        if action == "gallery":
+            # приветствие (оно же главное меню) удаляется, вместо него приходит раздел галереи
+            if call.message is not None:
+                await safe_delete(bot, call.message.chat.id, call.message.message_id)
+            last_greeting.pop(user_id, None)
+            await drop_last_gallery(bot, user_id, keep=None)
+            await send_gallery(bot, user_id)
+        # TODO: action == "shop" — логика магазина (продажа пачками)
+
+    @router.callback_query(F.data.startswith((gallery.BUY_PREFIX, gallery.PREMIUM_PREFIX, gallery.BACK_PREFIX)))
+    async def on_gallery_button(call: CallbackQuery, bot: Bot) -> None:
+        action = gallery.parse_action(texts.gallery, call.data)
+        await call.answer()
+        user_id = call.from_user.id
+        if action is None or not stats.has(user_id):
+            return
+        if action == "back":
+            # сообщение галереи удаляется, приветствие отправляется заново
+            if call.message is not None:
+                await safe_delete(bot, call.message.chat.id, call.message.message_id)
+            last_gallery.pop(user_id, None)
+            await send_greeting(bot, user_id, await repo.get_candies(stats.bot_id, user_id))
+        # TODO: "buy" — покупка случайного видео за 3🍬; "premium" — премиум-подписка
 
     return router

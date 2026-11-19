@@ -21,12 +21,14 @@
   * Вариант создаётся один раз для бота и не меняется, пока жив бот (меняется только кнопкой «Песочница»).
   * 🍬 в конце строки баланса — валюта бота, ни при каких условиях не заменяется (проверяется в validate()).
   * Формат разметки — Telegram HTML (parse_mode="HTML"): <b> для жирного, <blockquote> для цитаты (только у пунктов).
+    Цитата всегда отделена пустой строкой от заголовка сверху и от баланса снизу (см. _space_quote()).
   * Индексы в словарях только добавляются в конец, не переставляются и не удаляются.
 """
 import hashlib
 import html
 import json
 import random
+import re
 from dataclasses import dataclass
 
 CANDY = "🍬"  # валюта бота: НЕ менять и не подбирать синонимы
@@ -160,6 +162,18 @@ validate_tables()
 
 # ---------- конфигурация одного бота ----------
 
+_QUOTE_BEFORE = re.compile(r"(?<=\S)\n*(?=<blockquote>)")
+_QUOTE_AFTER = re.compile(r"(?<=</blockquote>)\n*(?=\S)")
+
+
+def _space_quote(template: str) -> str:
+    """Гарантирует пустую строку между цитатой и соседним текстом. Нужна для шаблонов, которые уже сохранены в БД
+    у работающих ботов (раньше цитата стояла вплотную к тексту): они исправляются при чтении, без перезаписи в БД."""
+    if "<blockquote>" not in template:
+        return template
+    return _QUOTE_AFTER.sub("\n\n", _QUOTE_BEFORE.sub("\n\n", template))
+
+
 @dataclass(frozen=True)
 class GreetingConfig:
     layout: int
@@ -200,7 +214,7 @@ class GreetingConfig:
             hello=int(d["hello"]), anon_key=int(d["anon_key"]), pay=int(d["pay"]),
             nolog_key=int(d["nolog_key"]), chats=int(d["chats"]), history=int(d["history"]),
             balance_label=int(d["balance_label"]), palette=int(d["palette"]),
-            template=str(d["template"]),
+            template=_space_quote(str(d["template"])),
         )
         cfg.validate()
         return cfg
@@ -251,8 +265,8 @@ def build_template(
     points, balance = _points(lay, variant, order, parts)
 
     if variant == "quote_points":
-        # рядом с цитатой пустые строки не нужны: она и так отделена визуально
-        return f"{title}\n<blockquote>{points}</blockquote>\n{balance}"
+        # цитата отделена пустой строкой и от заголовка, и от баланса — иначе сообщение выглядит слитным
+        return f"{title}\n\n<blockquote>{points}</blockquote>\n\n{balance}"
     return f"{title}\n\n{points}\n\n{balance}"
 
 

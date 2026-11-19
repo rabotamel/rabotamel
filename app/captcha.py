@@ -8,15 +8,23 @@
                       с попыткой не повторять конфигурации других ботов.
 
 Правила:
-  * Конфигурация создаётся один раз для бота, хранится в БД и не меняется, пока жив этот бот.
-  * Целевой фрукт — часть конфигурации бота и тоже не меняется. Это сознательный выбор: так проверка
-    не требует хранить состояние по каждому пользователю (работает после перезапуска сервиса)
-    и повторный показ капчи после ошибки всегда ведёт к тому же заданию, только с новым порядком кнопок.
-  * При каждом показе меняется только порядок кнопок (и он отличается от предыдущего).
+  * Конфигурация (формулировка + 4 фрукта) создаётся один раз для бота, хранится в БД и не меняется, пока жив
+    этот бот (кроме «Уникальные текста»).
+  * Какой именно из этих 4 фруктов нужно выбрать — НЕ часть конфигурации: он меняется при каждом показе капчи
+    (каждый /start). Состояние по пользователю хранить не нужно: в callback_data каждой кнопки лежит короткий
+    случайный nonce, а целевой фрукт = HMAC(секрет бота, user_id + nonce) -> индекс среди 4 фруктов. Поэтому
+    проверка работает и после перезапуска сервиса, а подделать ответ без токена бота нельзя.
+  * При новом показе фрукт отличается от прошлого (если прошлый известен), порядок кнопок — тоже.
+  * После неверного ответа задание остаётся тем же (тот же nonce), меняется только порядок кнопок.
+  * Поле `target` в конфигурации осталось для совместимости: оно нужно только для старых сообщений с капчей,
+    у которых в кнопках ещё нет nonce (callback вида «cap:apple»).
 """
 import hashlib
+import hmac
 import json
 import random
+import re
+import secrets
 from dataclasses import dataclass
 
 
@@ -68,6 +76,7 @@ ACTIONS: tuple[str, ...] = (
 
 OPTIONS_COUNT = 4
 CALLBACK_PREFIX = "cap:"
+_NONCE_RE = re.compile(r"^[0-9a-f]{4}$")
 
 
 @dataclass(frozen=True)
@@ -122,9 +131,25 @@ def generate_config(seed: str, taken: set[tuple] | None = None) -> CaptchaConfig
     return cfg
 
 
-def render_text(cfg: CaptchaConfig) -> str:
+def target_for(cfg: CaptchaConfig, secret: str, user_id: int, nonce: str) -> str:
+    """Какой фрукт нужно выбрать в этой капче. Зависит только от секрета бота, пользователя и nonce из кнопок."""
+    digest = hmac.new(secret.encode(), f"captcha:{user_id}:{nonce}".encode(), hashlib.sha256).digest()
+    return cfg.fruits[int.from_bytes(digest[:4], "big") % OPTIONS_COUNT]
+
+
+def new_nonce(cfg: CaptchaConfig, secret: str, user_id: int, previous_target: str | None = None) -> str:
+    """Случайный nonce нового показа; целевой фрукт при этом отличается от прошлого (если он известен)."""
+    nonce = secrets.token_hex(2)
+    for _ in range(50):
+        if previous_target is None or target_for(cfg, secret, user_id, nonce) != previous_target:
+            break
+        nonce = secrets.token_hex(2)
+    return nonce
+
+
+def render_text(cfg: CaptchaConfig, target: str | None = None) -> str:
     """Текст сообщения (HTML). Название фрукта в задании — в винительном падеже и жирным."""
-    fruit = FRUITS[cfg.target]
+    fruit = FRUITS[target or cfg.target]
     task = ACTIONS[cfg.action].format(fruit=f"<b>{fruit.acc}</b>")
     return f"{LEADS[cfg.lead]}\n\n{task}"
 
@@ -140,12 +165,13 @@ def shuffled_order(cfg: CaptchaConfig, previous: list[str] | None = None) -> lis
     return order
 
 
-def build_keyboard(cfg: CaptchaConfig, order: list[str] | None = None):
+def build_keyboard(cfg: CaptchaConfig, order: list[str] | None = None, nonce: str | None = None):
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
     order = order or shuffled_order(cfg)
+    suffix = f":{nonce}" if nonce else ""
     buttons = [
-        InlineKeyboardButton(text=FRUITS[k].emoji, callback_data=CALLBACK_PREFIX + k) for k in order
+        InlineKeyboardButton(text=FRUITS[k].emoji, callback_data=CALLBACK_PREFIX + k + suffix) for k in order
     ]
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
@@ -154,9 +180,18 @@ def parse_answer(data: str | None) -> str | None:
     """Достаёт ключ фрукта из callback_data или None, если данные чужие/некорректные."""
     if not data or not data.startswith(CALLBACK_PREFIX):
         return None
-    key = data[len(CALLBACK_PREFIX):]
+    key = data[len(CALLBACK_PREFIX):].split(":", 1)[0]
     return key if key in FRUITS else None
 
 
-def is_correct(cfg: CaptchaConfig, key: str | None) -> bool:
-    return key is not None and key == cfg.target
+def parse_nonce(data: str | None) -> str | None:
+    """nonce из callback_data («cap:apple:1a2b» -> «1a2b»); None у старых сообщений без nonce или при мусоре."""
+    if not data or not data.startswith(CALLBACK_PREFIX):
+        return None
+    _, _, nonce = data[len(CALLBACK_PREFIX):].partition(":")
+    return nonce if _NONCE_RE.match(nonce) else None
+
+
+def is_correct(cfg: CaptchaConfig, key: str | None, target: str | None = None) -> bool:
+    """target — фрукт, заданный в показанной капче (target_for); без него — фрукт из конфигурации (старые сообщения)."""
+    return key is not None and key == (target or cfg.target)

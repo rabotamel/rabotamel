@@ -1,0 +1,190 @@
+"""Раздел «Галерея»: сообщение и inline-кнопки (поштучная покупка случайных видео).
+
+Сообщение (HTML):
+    <b>{название кнопки галереи этого бота}</b>
+
+    {маркер} {описание} {маркер}
+
+    {строка баланса из приветствия этого бота}
+
+  * название — текст кнопки «Галерея» из shop_buttons (без эмодзи); подставляется при отправке;
+  * маркер — общий декоративный эмодзи бота (app/deco.py);
+  * строка баланса — ровно последняя строка шаблона приветствия бота (та же формулировка, эмодзи и 🍬).
+Описание, подписи и callback_data кнопок подбираются один раз по seed (токен) и хранятся в БД.
+Цена видео фиксирована — 3🍬 (PRICE), входит в тексты кнопки покупки и не меняется.
+Кнопка «⬅️ Назад» без рандомизации текста; её callback_data уникален для бота.
+"""
+import hashlib
+import html
+import json
+import random
+from dataclasses import dataclass
+
+PRICE = 3
+CANDY = "🍬"
+BACK_LABEL = "⬅️ Назад"
+
+DESCRIPTIONS: tuple[str, ...] = (
+    "Здесь вы можете поштучно покупать случайные видео из нашей галереи",
+    "В этом разделе можно поштучно открывать случайные ролики из галереи",
+    "Поштучный доступ к случайным видео из общей галереи бота",
+    "Открывайте случайные видео из галереи по одному",
+    "Покупайте случайные видео из галереи по одному",
+)
+
+BUY_TEXTS: tuple[str, ...] = (
+    f"Купить видео ({PRICE}{CANDY})", f"Открыть видео ({PRICE}{CANDY})",
+    f"Случайное видео ({PRICE}{CANDY})", f"Смотреть видео ({PRICE}{CANDY})",
+)
+BUY_EMOJI: tuple[tuple[str, str], ...] = (("🎥", "🖤"), ("🎬", "✨"), ("🎞️", "💫"), ("📹", "🤍"))
+
+# Подписка: бесплатный просмотр видео + можно скачивать и пересылать контент из бота
+PREMIUM_TEXTS: tuple[str, ...] = ("Премиум подписка", "Премиум-доступ", "Безлимит и скачивание", "VIP-подписка")
+PREMIUM_EMOJI: tuple[tuple[str, str], ...] = (("💝", "👑"), ("👑", "✨"), ("💎", "👑"), ("🌟", "💎"))
+
+BUY_PREFIX, PREMIUM_PREFIX, BACK_PREFIX = "gb:", "gp:", "gk:"
+HASH_LEN = 10
+
+
+def validate_tables() -> None:
+    for words in (DESCRIPTIONS, BUY_TEXTS, PREMIUM_TEXTS, BUY_EMOJI, PREMIUM_EMOJI):
+        if len(set(words)) != len(words):
+            raise AssertionError("повторы в списках")
+    for t in BUY_TEXTS:
+        if f"({PRICE}{CANDY})" not in t:
+            raise AssertionError("цена должна быть в каждом тексте кнопки покупки")
+
+
+validate_tables()
+
+
+def label(text: str, emoji: tuple[str, str]) -> str:
+    """«🎥 Купить видео (3🍬) 🖤» — эмодзи по обе стороны, без разделителей."""
+    return f"{emoji[0]} {text} {emoji[1]}"
+
+
+@dataclass(frozen=True)
+class GalleryConfig:
+    desc: int
+    buy_text: int
+    buy_emoji: int
+    premium_text: int
+    premium_emoji: int
+    description: str   # готовая фраза (именно она показывается)
+    buy_label: str
+    premium_label: str
+    buy_cb: str
+    premium_cb: str
+    back_cb: str
+
+    def signature(self) -> str:
+        return "|".join((self.description, self.buy_label, self.premium_label, self.buy_cb, self.premium_cb, self.back_cb))
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "v": 1, "desc": self.desc, "buy_text": self.buy_text, "buy_emoji": self.buy_emoji,
+                "premium_text": self.premium_text, "premium_emoji": self.premium_emoji,
+                "description": self.description, "buy_label": self.buy_label,
+                "premium_label": self.premium_label,
+                "buy_cb": self.buy_cb, "premium_cb": self.premium_cb, "back_cb": self.back_cb,
+            },
+            ensure_ascii=False,
+        )
+
+    @classmethod
+    def from_json(cls, raw: str) -> "GalleryConfig":
+        d = json.loads(raw)
+        cfg = cls(
+            desc=int(d["desc"]), buy_text=int(d["buy_text"]), buy_emoji=int(d["buy_emoji"]),
+            premium_text=int(d["premium_text"]), premium_emoji=int(d["premium_emoji"]),
+            description=str(d["description"]), buy_label=str(d["buy_label"]),
+            premium_label=str(d["premium_label"]),
+            buy_cb=str(d["buy_cb"]), premium_cb=str(d["premium_cb"]), back_cb=str(d["back_cb"]),
+        )
+        cfg.validate()
+        return cfg
+
+    def validate(self) -> None:
+        if not self.description.strip() or not self.premium_label.strip():
+            raise ValueError("пустой текст")
+        if f"{PRICE}{CANDY}" not in self.buy_label:
+            raise ValueError("в кнопке покупки должна быть цена 3🍬")
+        if not (self.buy_cb.startswith(BUY_PREFIX) and self.premium_cb.startswith(PREMIUM_PREFIX)
+                and self.back_cb.startswith(BACK_PREFIX)):
+            raise ValueError("неверный префикс callback_data")
+        if len({self.buy_cb, self.premium_cb, self.back_cb}) != 3:
+            raise ValueError("callback_data совпадают")
+        for cb in (self.buy_cb, self.premium_cb, self.back_cb):
+            if len(cb.encode()) > 64 or not cb.isascii():
+                raise ValueError("callback_data: только ASCII, до 64 байт")
+        if any(bad in (self.description + self.buy_label + self.premium_label)
+               for bad in ("---", "***", "———", "═", "─", "│")):
+            raise ValueError("декоративные разделители запрещены")
+
+
+def generate_config(seed: str, taken: set[str] | None = None) -> GalleryConfig:
+    """Детерминированно по seed; текст и эмодзи каждой кнопки выбираются независимо."""
+    rng = random.Random(hashlib.sha256(("gallery:" + seed).encode()).digest())
+    taken = taken or set()
+    cfg = None
+    for _ in range(300):
+        desc = rng.randrange(len(DESCRIPTIONS))
+        buy_text, buy_emoji = rng.randrange(len(BUY_TEXTS)), rng.randrange(len(BUY_EMOJI))
+        premium_text, premium_emoji = rng.randrange(len(PREMIUM_TEXTS)), rng.randrange(len(PREMIUM_EMOJI))
+        digest = hashlib.sha256(f"gcb:{seed}:{rng.getrandbits(64)}".encode()).hexdigest()
+        cfg = GalleryConfig(
+            desc=desc, buy_text=buy_text, buy_emoji=buy_emoji,
+            premium_text=premium_text, premium_emoji=premium_emoji,
+            description=DESCRIPTIONS[desc],
+            buy_label=label(BUY_TEXTS[buy_text], BUY_EMOJI[buy_emoji]),
+            premium_label=label(PREMIUM_TEXTS[premium_text], PREMIUM_EMOJI[premium_emoji]),
+            buy_cb=BUY_PREFIX + digest[:HASH_LEN],
+            premium_cb=PREMIUM_PREFIX + digest[HASH_LEN:2 * HASH_LEN],
+            back_cb=BACK_PREFIX + digest[2 * HASH_LEN:3 * HASH_LEN],
+        )
+        if cfg.signature() not in taken:
+            break
+    cfg.validate()
+    return cfg
+
+
+def balance_line(greeting_template: str, balance_text: str) -> str:
+    """Строка баланса точно как в приветствии бота: последняя строка его шаблона."""
+    last = greeting_template.rstrip().splitlines()[-1]
+    return last.replace("{balance}", balance_text)
+
+
+def render(cfg: GalleryConfig, deco, title: str, greeting_template: str, balance: int) -> str:
+    """Текст раздела (HTML). title — текст кнопки галереи без эмодзи; экранируется."""
+    return (
+        f"<b>{html.escape(title, quote=False)}</b>\n\n"
+        f"{deco.wrap(cfg.description)}\n\n"
+        f"{balance_line(greeting_template, str(int(balance)))}"
+    )
+
+
+def layout_rows(cfg: GalleryConfig) -> list[list[tuple[str, str]]]:
+    """Три кнопки по одной в ряд: покупка, премиум, назад (без aiogram — удобно для тестов)."""
+    return [[(cfg.buy_label, cfg.buy_cb)], [(cfg.premium_label, cfg.premium_cb)], [(BACK_LABEL, cfg.back_cb)]]
+
+
+# Цвета кнопок галереи по порядку рядов (Bot API 9.4+, нужен aiogram >= 3.25):
+# покупка — синяя, премиум — зелёная, «Назад» — красная.
+ROW_STYLES = ("primary", "success", "danger")
+
+
+def build_keyboard(cfg: GalleryConfig):
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t, callback_data=cb, style=style) for t, cb in row]
+            for row, style in zip(layout_rows(cfg), ROW_STYLES)
+        ]
+    )
+
+
+def parse_action(cfg: GalleryConfig, data: str | None) -> str | None:
+    """'buy' / 'premium' / 'back' по callback_data ЭТОГО бота; None — чужие или устаревшие."""
+    return {cfg.buy_cb: "buy", cfg.premium_cb: "premium", cfg.back_cb: "back"}.get(data) if data else None

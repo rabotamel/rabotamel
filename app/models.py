@@ -18,7 +18,9 @@ class BotProfile(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    token: Mapped[str] = mapped_column(String(128), unique=True)
+    # NULL — бот-шаблон без токена: стоит в очереди «заранее», пока не добавлен токен (см. NOTES.md);
+    # запускаться и становиться основным он не может. UNIQUE в PostgreSQL допускает любое число NULL.
+    token: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     name: Mapped[str] = mapped_column(String(64))
     description: Mapped[str] = mapped_column(Text, default="", server_default="")
@@ -48,8 +50,14 @@ class BotProfile(Base):
     )
 
     @property
+    def has_token(self) -> bool:
+        return bool(self.token)
+
+    @property
     def masked_token(self) -> str:
-        """Показываем только числовой id бота и последние 4 символа."""
+        """Показываем только числовой id бота и последние 4 символа. У бота без токена — пустая строка."""
+        if not self.token:
+            return ""
         head, _, tail = self.token.partition(":")
         return f"{head}:••••{tail[-4:]}"
 

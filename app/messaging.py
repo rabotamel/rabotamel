@@ -97,12 +97,13 @@ async def _fetch_image(url: str) -> bytes | None:
         return None
 
 
-async def _send_photo(bot, chat_id: int, caption: str, url: str, parse_mode: str | None):
+async def _send_photo(bot, chat_id: int, caption: str, url: str, parse_mode: str | None, reply_markup=None):
     key = (bot.id, url)
+    extra = {"reply_markup": reply_markup} if reply_markup is not None else {}  # только если задана
     file_id = _file_ids.get(key)
     if file_id:
         try:
-            return await bot.send_photo(chat_id, file_id, caption=caption, parse_mode=parse_mode)
+            return await bot.send_photo(chat_id, file_id, caption=caption, parse_mode=parse_mode, **extra)
         except TelegramBadRequest as e:
             if _is_parse_error(e):
                 raise
@@ -114,7 +115,7 @@ async def _send_photo(bot, chat_id: int, caption: str, url: str, parse_mode: str
         file_id = _file_ids.get(key)
         if file_id:
             try:
-                return await bot.send_photo(chat_id, file_id, caption=caption, parse_mode=parse_mode)
+                return await bot.send_photo(chat_id, file_id, caption=caption, parse_mode=parse_mode, **extra)
             except TelegramBadRequest as e:
                 if _is_parse_error(e):
                     raise
@@ -127,14 +128,14 @@ async def _send_photo(bot, chat_id: int, caption: str, url: str, parse_mode: str
 
             try:
                 msg = await bot.send_photo(
-                    chat_id, BufferedInputFile(data, filename="image.jpg"), caption=caption, parse_mode=parse_mode
+                    chat_id, BufferedInputFile(data, filename="image.jpg"), caption=caption, parse_mode=parse_mode, **extra
                 )
             except TelegramBadRequest as e:
                 if _is_parse_error(e):
                     raise
                 log.warning("Telegram не принял загруженную картинку (%s), пробую по ссылке", e)
         if msg is None:
-            msg = await bot.send_photo(chat_id, url, caption=caption, parse_mode=parse_mode)
+            msg = await bot.send_photo(chat_id, url, caption=caption, parse_mode=parse_mode, **extra)
 
         photo = getattr(msg, "photo", None)
         if photo:
@@ -146,25 +147,26 @@ async def _send_photo(bot, chat_id: int, caption: str, url: str, parse_mode: str
         return msg
 
 
-async def send_message(bot, chat_id: int, text: str, image_url: str | None = None):
+async def send_message(bot, chat_id: int, text: str, image_url: str | None = None, reply_markup=None):
     """Шлёт HTML-текст; с картинкой — как фото с подписью. Ошибки доставки (например, пользователь заблокировал
     бота) пробрасываются как у обычного bot.send_message; разметку и картинку метод страхует сам."""
     if image_url and len(plain(text)) <= CAPTION_LIMIT:
         try:
-            return await _send_photo(bot, chat_id, text, image_url, "HTML")
+            return await _send_photo(bot, chat_id, text, image_url, "HTML", reply_markup)
         except TelegramBadRequest as e:
             if _is_parse_error(e):
                 log.warning("Подпись не ушла с разметкой (%s), отправляю без неё", e)
                 try:
-                    return await _send_photo(bot, chat_id, plain(text), image_url, None)
+                    return await _send_photo(bot, chat_id, plain(text), image_url, None, reply_markup)
                 except TelegramBadRequest as e2:
                     e = e2
             log.warning("Картинка к сообщению не отправилась (%s), отправляю только текст", e)
 
+    extra = {"reply_markup": reply_markup} if reply_markup is not None else {}
     try:
-        return await bot.send_message(chat_id, text, parse_mode="HTML")
+        return await bot.send_message(chat_id, text, parse_mode="HTML", **extra)
     except TelegramBadRequest as e:
         if not _is_parse_error(e):
             raise
         log.warning("Сообщение не ушло с разметкой (%s), отправляю без неё", e)
-        return await bot.send_message(chat_id, plain(text), parse_mode=None)
+        return await bot.send_message(chat_id, plain(text), parse_mode=None, **extra)

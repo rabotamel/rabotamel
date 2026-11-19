@@ -72,6 +72,25 @@ class GreetingTests(unittest.TestCase):
         self.assertEqual(g.format_number(0), "0")
         self.assertEqual(g.format_number(1234567), "1234567")
 
+    def test_quote_is_separated_by_blank_lines(self):
+        quote_cfgs = [g.generate_config(f"q{i}") for i in range(300)]
+        quote_cfgs = [c for c in quote_cfgs if c.variant == "quote_points"]
+        self.assertTrue(quote_cfgs)
+        for cfg in quote_cfgs:
+            t = cfg.template
+            self.assertIn("}</b>\n\n<blockquote>", t)
+            self.assertIn("</blockquote>\n\n", t)
+
+    def test_old_stored_quote_template_gets_spacing_when_loaded(self):
+        cfg = next(c for c in (g.generate_config(f"q{i}") for i in range(300)) if c.variant == "quote_points")
+        old = cfg.template.replace("\n\n<blockquote>", "\n<blockquote>").replace("</blockquote>\n\n", "</blockquote>\n")
+        self.assertNotEqual(old, cfg.template)
+        import json
+        raw = json.loads(cfg.to_json())
+        raw["template"] = old
+        restored = g.GreetingConfig.from_json(json.dumps(raw))
+        self.assertEqual(restored.template, cfg.template)
+
     def test_stored_template_is_independent_from_dictionaries(self):
         cfg = g.generate_config("stable")
         raw = cfg.to_json()
