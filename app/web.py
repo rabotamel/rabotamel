@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -17,7 +18,6 @@ from .models import STATUS_ACTIVE, STATUS_QUEUED
 BASE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 
-import re
 
 TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
 

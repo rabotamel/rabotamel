@@ -1,3 +1,4 @@
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -45,6 +46,11 @@ async def init_db(database_url: str) -> None:
     SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all не добавляет колонки в уже существующие таблицы — докидываем вручную
+        await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS position integer NOT NULL DEFAULT 0"))
+        await conn.execute(text("ALTER TABLE bot_profiles ADD COLUMN IF NOT EXISTS active_since timestamptz"))
+        await conn.execute(text("UPDATE bot_profiles SET position = id WHERE position = 0"))
+        await conn.execute(text("UPDATE bot_profiles SET active_since = now() WHERE is_active AND active_since IS NULL"))
 
 
 async def close_db() -> None:

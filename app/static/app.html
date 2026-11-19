@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot Rotator</title>
+<style>
+  :root{
+    --bg:#f5f6f8;--card:#fff;--text:#14171c;--muted:#6b7280;--line:#e6e8ec;
+    --green:#16a34a;--blue:#2563eb;--red:#dc2626;--gray:#9ca3af;
+    --amber-bg:#fff7db;--amber-line:#f5c542;--amber-text:#6b4e00;
+    --radius:16px;color-scheme:light dark;
+  }
+  @media(prefers-color-scheme:dark){:root{
+    --bg:#0e1013;--card:#171a1f;--text:#eceef2;--muted:#8b93a1;--line:#262a31;
+    --amber-bg:#2b2410;--amber-line:#8a6d12;--amber-text:#f5d77a;
+  }}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  [hidden]{display:none!important}
+  .wrap{max-width:720px;margin:0 auto;padding:0 16px}
+
+  /* предупреждения */
+  .banner{position:sticky;top:0;z-index:30;background:var(--amber-bg);border-bottom:1px solid var(--amber-line);color:var(--amber-text)}
+  .banner .in{max-width:720px;margin:0 auto;padding:12px 16px;display:flex;gap:12px;align-items:flex-start}
+  .banner svg{flex:none;margin-top:2px}
+  .banner b{display:block}
+  .banner button{margin-left:auto;background:none;border:0;color:inherit;font-size:22px;line-height:1;cursor:pointer;padding:0 4px}
+
+  /* шапка и вкладки */
+  .top{display:flex;align-items:center;justify-content:space-between;padding-top:18px}
+  h1{font-size:18px;margin:0;font-weight:650;letter-spacing:-.01em}
+  .actions{display:flex;gap:8px}
+  .icon-btn{width:38px;height:38px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--muted);display:inline-grid;place-items:center;cursor:pointer}
+  .icon-btn.on{color:var(--green);border-color:var(--green)}
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-top:10px}
+  .tab{background:none;border:0;padding:12px 14px;font:inherit;font-weight:550;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+  .tab.active{color:var(--text);border-bottom-color:var(--text)}
+  main{padding-top:20px;padding-bottom:64px}
+
+  /* общие элементы */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius)}
+  .btn{height:40px;padding:0 16px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit;font-weight:550;cursor:pointer}
+  .btn.green{background:var(--green);border-color:var(--green);color:#fff}
+  .btn.red{background:var(--red);border-color:var(--red);color:#fff}
+  .btn:disabled{opacity:.6;cursor:default}
+  .avatar{width:48px;height:48px;border-radius:50%;object-fit:cover;background:var(--bg);border:1px solid var(--line);display:grid;place-items:center;font-weight:650;color:var(--muted);flex:none;overflow:hidden}
+  .name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sub{color:var(--muted);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .link{background:none;border:0;padding:0;font:inherit;font-size:13px;color:var(--blue);cursor:pointer}
+
+  /* вкладка «Бот» */
+  .hero{display:flex;gap:16px;align-items:center;padding:20px}
+  .hero .avatar{width:68px;height:68px;font-size:24px}
+  .hero .grow{flex:1;min-width:0}
+  .hero .name{font-size:18px}
+  .tokline{margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .token{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);word-break:break-all}
+  .pill{font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;white-space:nowrap;align-self:flex-start}
+  .pill.ok{background:rgba(22,163,74,.12);color:var(--green)}
+  .pill.warn{background:rgba(245,158,11,.14);color:#b45309}
+  @media(prefers-color-scheme:dark){.pill.warn{color:#f5d77a}}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+  .stat{padding:18px}
+  .stat .label{color:var(--muted);font-size:13px}
+  .stat .value{font-size:30px;font-weight:650;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
+  .stat .value.sm{font-size:19px;line-height:1.5;padding-top:6px}
+  .empty{padding:32px 20px;text-align:center;color:var(--muted)}
+  .empty p{margin:0 0 16px}
+  @media(max-width:420px){.hero{flex-wrap:wrap}.pill{order:-1}}
+
+  /* вкладка «Токены» */
+  .toolbar{display:flex;justify-content:space-between;gap:10px;margin-bottom:14px}
+  .item{position:relative;display:flex;align-items:center;gap:12px;padding:14px 46px 14px 14px;margin-bottom:10px}
+  .item.active{border:2px solid var(--green);padding:13px 45px 13px 13px}
+  .item.blocked{opacity:.8}
+  .item .info{min-width:0;flex:1}
+  .badge{position:absolute;top:10px;right:10px;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:12px;font-weight:700}
+  .badge.green{background:var(--green)}
+  .badge.blue{background:var(--blue)}
+  .badge.gray{background:var(--gray)}
+  .ctrl{display:none;align-items:center;gap:2px;flex:none}
+  .editing .ctrl{display:flex}
+  .handle{width:28px;height:40px;display:grid;place-items:center;color:var(--muted);cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+  .handle.ph{visibility:hidden}
+  .trash{width:34px;height:34px;border:0;background:none;color:var(--red);cursor:pointer;display:grid;place-items:center;border-radius:10px}
+  .trash:active{background:rgba(220,38,38,.12)}
+  .item.dragging{box-shadow:0 10px 28px rgba(0,0,0,.22);transform:scale(1.015);z-index:5}
+  .mini{display:none;margin-top:4px}
+  .editing .mini{display:block}
+  .editing .item{cursor:pointer}
+  .bad{color:var(--red)}
+  .note{padding:28px;text-align:center;color:var(--muted)}
+
+  /* окна */
+  dialog{border:1px solid var(--line);border-radius:18px;background:var(--card);color:var(--text);padding:22px;width:min(440px,calc(100vw - 32px))}
+  dialog::backdrop{background:rgba(0,0,0,.5)}
+  dialog h2{margin:0 0 4px;font-size:18px}
+  dialog p{margin:6px 0 0;color:var(--muted)}
+  label{display:block;font-size:13px;color:var(--muted);margin:14px 0 6px}
+  input,textarea{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
+  input:focus,textarea:focus{outline:2px solid var(--blue);outline-offset:-1px}
+  textarea{resize:vertical;min-height:70px}
+  .err{color:var(--red);font-size:13px;min-height:18px;margin-top:12px}
+  .row{display:flex;gap:10px;justify-content:flex-end;margin-top:14px}
+
+  #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:14px;z-index:60;max-width:calc(100vw - 32px)}
+</style>
+</head>
+<body>
+
+<div id="banners"></div>
+
+<header class="wrap top">
+  <h1>Bot Rotator</h1>
+  <div class="actions">
+    <button id="bell" class="icon-btn" title="Уведомления в браузере" hidden>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+    </button>
+    <button id="logout" class="icon-btn" title="Выйти">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+    </button>
+  </div>
+</header>
+
+<nav class="wrap tabs">
+  <button class="tab active" data-tab="bot">Бот</button>
+  <button class="tab" data-tab="tokens">Токены</button>
+</nav>
+
+<main class="wrap">
+  <section id="tab-bot"></section>
+
+  <section id="tab-tokens" hidden>
+    <div class="toolbar">
+      <button class="btn green" data-act="add">+ Добавить токен</button>
+      <button class="btn" id="btn-edit">Редактировать</button>
+    </div>
+    <div id="list"></div>
+  </section>
+</main>
+
+<dialog id="dlg-token">
+  <form id="form-token" autocomplete="off">
+    <h2 id="dlg-token-title">Новый токен</h2>
+    <div id="field-token">
+      <label for="f-token">Токен бота</label>
+      <input id="f-token" name="token" placeholder="123456789:AAH...">
+    </div>
+    <label for="f-name">Имя бота (до 64 символов)</label>
+    <input id="f-name" name="name" maxlength="64" required>
+    <label for="f-avatar">Ссылка на аватарку</label>
+    <input id="f-avatar" name="avatar_url" placeholder="https://...">
+    <label for="f-desc">Описание (до 512 символов)</label>
+    <textarea id="f-desc" name="description" maxlength="512"></textarea>
+    <div class="err" id="token-err"></div>
+    <div class="row">
+      <button type="button" class="btn" data-close="dlg-token">Отмена</button>
+      <button type="submit" class="btn green" id="token-submit">Сохранить</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-delete">
+  <h2>Удалить токен?</h2>
+  <p id="delete-text"></p>
+  <div class="row">
+    <button type="button" class="btn" data-close="dlg-delete">Отмена</button>
+    <button type="button" class="btn red" id="delete-confirm">Удалить</button>
+  </div>
+</dialog>
+
+<div id="toast" hidden></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let S = null;            // последнее состояние с сервера
+let editing = false;
+let dragging = false;
+let pendingReload = false;
+let pendingDelete = null;
+let editId = null;
+let tab = 'bot';
+let reloadTimer = null;
+
+/* ---------- сеть ---------- */
+async function api(method, url, body) {
+  const r = await fetch(url, {
+    method,
+    headers: body ? {'Content-Type': 'application/json'} : {},
+    body: body ? JSON.stringify(body) : undefined,
+    credentials: 'same-origin',
+  });
+  if (r.status === 401) { location.href = '/login'; throw new Error('Требуется вход'); }
+  let data = null;
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok) {
+    const d = data && data.detail;
+    throw new Error(typeof d === 'string' ? d : 'Проверьте введённые данные (' + r.status + ')');
+  }
+  return data;
+}
+
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.hidden = true; }, 3500);
+}
+
+async function loadState() {
+  if (dragging) { pendingReload = true; return; }
+  S = await api('GET', '/api/state');
+  render();
+}
+function scheduleReload() {
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => loadState().catch(() => {}), 150);
+}
+
+/* ---------- отрисовка ---------- */
+function avatarHtml(b) {
+  if (b.avatar_url) return `<img class="avatar" src="${esc(b.avatar_url)}" alt="" referrerpolicy="no-referrer" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'avatar',textContent:'${esc((b.name||'?').slice(0,1).toUpperCase())}'}))">`;
+  return `<span class="avatar">${esc((b.name || '?').slice(0, 1).toUpperCase())}</span>`;
+}
+
+function render() {
+  renderBanners();
+  renderBot();
+  renderList();
+}
+
+function renderBanners() {
+  let dismissed = [];
+  try { dismissed = JSON.parse(localStorage.getItem('dismissed') || '[]'); } catch (_) {}
+  const list = (S.alerts || []).filter((a) => !dismissed.includes(a.id)).slice(-3);
+  $('#banners').innerHTML = list.map((a) => `
+    <div class="banner" role="alert"><div class="in">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+      <div><b>${esc(a.title)}</b>${esc(a.text)}</div>
+      <button data-dismiss="${esc(a.id)}" aria-label="Закрыть">×</button>
+    </div></div>`).join('');
+}
+
+function renderBot() {
+  const el = $('#tab-bot');
+  const c = S.current;
+  if (!c) {
+    el.innerHTML = `<div class="card empty">
+      <p>${S.has_any ? 'Сейчас нет активного токена.' : 'Токен ещё не добавлен.'}</p>
+      <button class="btn green" data-act="add">+ Добавить токен</button></div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="card hero">
+      ${avatarHtml(c)}
+      <div class="grow">
+        <div class="name">${esc(c.name)}</div>
+        <div class="sub">${c.username ? '@' + esc(c.username) : '—'}</div>
+        <div class="tokline">
+          <span class="token" id="tok">${esc(c.masked_token)}</span>
+          <button class="link" id="reveal">Показать</button>
+        </div>
+      </div>
+      <span class="pill ${c.running ? 'ok' : 'warn'}">${esc(c.running ? 'работает' : c.note)}</span>
+    </div>
+    <div class="stats">
+      <div class="card stat"><div class="label">Пользователей в боте</div><div class="value" id="users">${c.users ?? '—'}</div></div>
+      <div class="card stat"><div class="label">Основной бот уже</div><div class="value sm" id="uptime">—</div></div>
+    </div>`;
+  tickUptime();
+}
+
+function fmtDuration(sec) {
+  sec = Math.max(0, sec);
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  const parts = [];
+  if (d) parts.push(d + ' д');
+  if (d || h) parts.push(h + ' ч');
+  parts.push(m + ' мин');
+  if (!d) parts.push(String(s).padStart(2, '0') + ' с');
+  return parts.join(' ');
+}
+function tickUptime() {
+  const el = $('#uptime');
+  if (!el || !S || !S.current || !S.current.since) { if (el) el.textContent = '—'; return; }
+  el.textContent = fmtDuration(Math.floor((Date.now() - new Date(S.current.since).getTime()) / 1000));
+}
+setInterval(tickUptime, 1000);
+
+function renderList() {
+  const el = $('#list');
+  el.classList.toggle('editing', editing);
+  $('#btn-edit').textContent = editing ? 'Готово' : 'Редактировать';
+  if (!S.bots.length) { el.innerHTML = '<div class="card note">Список пуст</div>'; return; }
+
+  el.innerHTML = S.bots.map((b) => {
+    const badgeColor = b.status === 'active' ? 'green' : 'blue';
+    const badge = b.queue ? `<span class="badge ${badgeColor}">${b.queue}</span>` : `<span class="badge gray">!</span>`;
+    const statusLine = b.status === 'blocked'
+      ? `<span class="bad" title="${esc(b.last_error || '')}">заблокирован</span>`
+      : (b.status === 'active' ? 'основной' : 'в очереди');
+    const mini = b.status === 'queued'
+      ? `<button class="link mini" data-act="make-main">Сделать основным</button>`
+      : (b.status === 'blocked' ? `<button class="link mini" data-act="requeue">Вернуть в очередь</button>` : '');
+    return `
+    <div class="card item ${b.status}" data-id="${b.id}" data-kind="${b.status}">
+      ${badge}
+      <div class="ctrl">
+        <span class="handle ${b.status === 'queued' ? '' : 'ph'}" title="Перетащить">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </span>
+        <button class="trash" data-act="trash" aria-label="Удалить">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+        </button>
+      </div>
+      ${avatarHtml(b)}
+      <div class="info">
+        <div class="name">${esc(b.name)}</div>
+        <div class="sub">${b.username ? '@' + esc(b.username) + ' · ' : ''}${statusLine}</div>
+        ${b.description ? `<div class="sub">${esc(b.description)}</div>` : ''}
+        ${mini}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+/* ---------- вкладки и кнопки ---------- */
+document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => {
+  tab = t.dataset.tab;
+  document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
+  $('#tab-bot').hidden = tab !== 'bot';
+  $('#tab-tokens').hidden = tab !== 'tokens';
+}));
+
+$('#btn-edit').addEventListener('click', () => { editing = !editing; if (S) renderList(); });
+
+document.addEventListener('click', async (e) => {
+  const t = e.target;
+  const dismiss = t.closest('[data-dismiss]');
+  if (dismiss) {
+    let d = [];
+    try { d = JSON.parse(localStorage.getItem('dismissed') || '[]'); } catch (_) {}
+    d.push(dismiss.dataset.dismiss);
+    try { localStorage.setItem('dismissed', JSON.stringify(d.slice(-50))); } catch (_) {}
+    renderBanners();
+    return;
+  }
+  if (t.closest('[data-act="add"]')) { openTokenDialog(null); return; }
+  const close = t.closest('[data-close]');
+  if (close) { document.getElementById(close.dataset.close).close(); return; }
+  if (t.closest('#reveal')) { toggleReveal(); return; }
+});
+
+async function toggleReveal() {
+  const tok = $('#tok'), btn = $('#reveal');
+  if (btn.dataset.shown) {
+    tok.textContent = S.current.masked_token; btn.textContent = 'Показать'; delete btn.dataset.shown; return;
+  }
+  try {
+    const r = await api('GET', `/api/bots/${S.current.id}/token`);
+    tok.textContent = r.token; btn.textContent = 'Скрыть'; btn.dataset.shown = '1';
+  } catch (err) { toast(err.message); }
+}
+
+/* действия в списке */
+$('#list').addEventListener('click', async (e) => {
+  const item = e.target.closest('.item');
+  if (!item) return;
+  const id = Number(item.dataset.id);
+  const bot = S.bots.find((b) => b.id === id);
+  if (e.target.closest('[data-act="trash"]')) { askDelete(bot); return; }
+  try {
+    if (e.target.closest('[data-act="make-main"]')) { await api('POST', `/api/bots/${id}/activate`); await loadState(); return; }
+    if (e.target.closest('[data-act="requeue"]')) { await api('POST', `/api/bots/${id}/requeue`); await loadState(); return; }
+  } catch (err) { toast(err.message); return; }
+  if (editing && !e.target.closest('.handle')) openTokenDialog(bot);
+});
+
+/* ---------- окна ---------- */
+document.querySelectorAll('dialog').forEach((d) => d.addEventListener('click', (e) => { if (e.target === d) d.close(); }));
+
+function openTokenDialog(bot) {
+  editId = bot ? bot.id : null;
+  $('#dlg-token-title').textContent = bot ? 'Профиль бота' : (S && S.has_any ? 'Новый токен про запас' : 'Первый токен');
+  $('#field-token').hidden = !!bot;
+  $('#f-token').value = '';
+  $('#f-name').value = bot ? bot.name : '';
+  $('#f-avatar').value = bot ? (bot.avatar_url || '') : '';
+  $('#f-desc').value = bot ? (bot.description || '') : '';
+  $('#token-err').textContent = '';
+  $('#dlg-token').showModal();
+}
+
+$('#form-token').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = Object.fromEntries(new FormData(e.target));
+  const btn = $('#token-submit');
+  btn.disabled = true; $('#token-err').textContent = '';
+  try {
+    if (editId) await api('POST', `/api/bots/${editId}/edit`, body);
+    else await api('POST', '/api/bots', body);
+    $('#dlg-token').close();
+    await loadState();
+  } catch (err) { $('#token-err').textContent = err.message; }
+  btn.disabled = false;
+});
+
+function askDelete(bot) {
+  pendingDelete = bot;
+  $('#delete-text').textContent = `«${bot.name}» будет удалён без возможности восстановления.` +
+    (bot.status === 'active' ? ' Это основной бот — его заменит следующий токен из очереди.' : '');
+  $('#dlg-delete').showModal();
+}
+$('#delete-confirm').addEventListener('click', async () => {
+  if (!pendingDelete) return;
+  const id = pendingDelete.id;
+  $('#dlg-delete').close();
+  try { await api('DELETE', `/api/bots/${id}`); await loadState(); } catch (err) { toast(err.message); }
+  pendingDelete = null;
+});
+
+/* ---------- перетаскивание (мышь и палец) ---------- */
+(function initDrag() {
+  const list = $('#list');
+  let card = null;
+
+  function queuedCards() { return [...list.querySelectorAll('.item[data-kind="queued"]')]; }
+  function renumber() {
+    const hasActive = !!list.querySelector('.item[data-kind="active"]');
+    queuedCards().forEach((c, i) => { c.querySelector('.badge').textContent = i + (hasActive ? 2 : 1); });
+  }
+
+  list.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('.handle');
+    if (!handle || handle.classList.contains('ph') || !editing) return;
+    card = handle.closest('.item');
+    dragging = true;
+    card.classList.add('dragging');
+    handle.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  list.addEventListener('pointermove', (e) => {
+    if (!card) return;
+    const y = e.clientY;
+    const others = queuedCards().filter((c) => c !== card);
+    let before = null;
+    for (const c of others) {
+      const r = c.getBoundingClientRect();
+      if (y < r.top + r.height / 2) { before = c; break; }
+    }
+    if (before) { if (card.nextElementSibling !== before) list.insertBefore(card, before); }
+    else if (others.length) { const last = others[others.length - 1]; if (last.nextElementSibling !== card) last.after(card); }
+    renumber();
+    if (y < 90) window.scrollBy(0, -14);
+    else if (y > window.innerHeight - 90) window.scrollBy(0, 14);
+  });
+
+  async function finish() {
+    if (!card) return;
+    card.classList.remove('dragging');
+    card = null;
+    dragging = false;
+    const ids = queuedCards().map((c) => Number(c.dataset.id));
+    try { await api('POST', '/api/bots/reorder', {ids}); }
+    catch (err) { toast(err.message); }
+    pendingReload = false;
+    loadState().catch(() => {});
+  }
+  list.addEventListener('pointerup', finish);
+  list.addEventListener('pointercancel', finish);
+})();
+
+/* ---------- Web Push ---------- */
+const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+let swReg = null;
+
+function b64ToUint8(b64) {
+  const pad = '='.repeat((4 - b64.length % 4) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+function setBell(on) {
+  const b = $('#bell');
+  b.classList.toggle('on', on);
+  b.title = on ? 'Уведомления включены — нажмите, чтобы отключить' : 'Включить уведомления в браузере';
+}
+async function initPush() {
+  if (!pushSupported || !S.push_key) return;
+  $('#bell').hidden = false;
+  try {
+    swReg = await navigator.serviceWorker.register('/sw.js');
+    const sub = await swReg.pushManager.getSubscription();
+    const on = !!sub && Notification.permission === 'granted';
+    setBell(on);
+    if (on) api('POST', '/api/push/subscribe', sub.toJSON()).catch(() => {});
+  } catch (err) { console.warn('Service worker:', err); }
+}
+$('#bell').addEventListener('click', async () => {
+  try {
+    if (!swReg) swReg = await navigator.serviceWorker.register('/sw.js');
+    const existing = await swReg.pushManager.getSubscription();
+    if (existing) {
+      await api('POST', '/api/push/unsubscribe', {endpoint: existing.endpoint});
+      await existing.unsubscribe();
+      setBell(false); toast('Уведомления отключены'); return;
+    }
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { toast('Разрешите уведомления для этого сайта в настройках браузера'); return; }
+    const sub = await swReg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: b64ToUint8(S.push_key)});
+    await api('POST', '/api/push/subscribe', sub.toJSON());
+    setBell(true); toast('Уведомления включены');
+  } catch (err) { toast('Не удалось включить уведомления: ' + err.message); }
+});
+
+/* ---------- выход ---------- */
+$('#logout').addEventListener('click', async () => {
+  try { await fetch('/logout', {method: 'POST', credentials: 'same-origin'}); } catch (_) {}
+  location.href = '/login';
+});
+
+/* ---------- события в реальном времени (SSE) ---------- */
+function connect() {
+  const es = new EventSource('/api/events');
+  let opened = false;
+  es.onopen = () => { if (opened) scheduleReload(); opened = true; };
+  es.onmessage = (e) => {
+    let ev; try { ev = JSON.parse(e.data); } catch (_) { return; }
+    if (ev.type === 'stats') {
+      if (S && S.current && S.current.id === ev.bot_id) {
+        S.current.users = ev.users;
+        const u = $('#users'); if (u) u.textContent = ev.users;
+      }
+    } else if (ev.type === 'changed' || ev.type === 'alert') {
+      scheduleReload();
+    }
+  };
+  es.onerror = () => {
+    if (es.readyState === EventSource.CLOSED) {   // например, сессия истекла
+      es.close();
+      loadState().catch(() => {});
+      setTimeout(connect, 3000);
+    }
+  };
+}
+
+/* ---------- старт ---------- */
+loadState().then(() => { connect(); initPush(); }).catch((err) => toast(err.message));
+</script>
+</body>
+</html>
