@@ -1,16 +1,18 @@
 """«🍭 Купить конфеты 🍬»: пополнение баланса картой, через CryptoBot и Telegram Stars.
 
 Переписанная версия отдельного модуля topup.py (данные для оплаты те же: номер карты, курс 1🍬 = 0,8₽ = 0,01$ = 1⭐,
-токены CryptoBot / Stars-бота, чат админов для чеков). Отличия от прежнего кода:
+токены CryptoBot / Stars-бота, админы для чеков). Отличия от прежнего кода:
   * заказы лежат в таблице `topup_orders` (SQLAlchemy, как всё остальное в проекте), без своего пула asyncpg и
     без самописных миграций; начисление — один условный UPDATE (`repo.credit_topup_order`), двойного начисления нет;
   * баланс общий с остальным ботом: `bot_users.candies` ЭТОГО бота (заказ помнит bot_id);
-  * один экран на всё меню: сообщение обновляется на месте (как раздел «Магазин»), картинка — картинка бота;
+  * один экран на всё меню: каждый переход — новое сообщение, прежнее удаляется (как во всём боте), картинка — картинка бота;
   * фоновый опрос CryptoBot работает, только пока есть неоплаченные счета (иначе база не просыпалась бы зря);
-  * кнопки «Выдать / Отказать» под чеком доступны только администраторам чата, в который чек отправлен.
+  * чеки по карте принимает отдельный бот (CHECK_BOT_TOKEN) в личных сообщениях админов — группа не нужна: кнопки «Выдать / Отказать»,
+    /pending (повторно прислать чеки на проверке) и /start; решает любой из админов, у остальных копии чека обновляются.
 
 Переменные окружения (те же имена): CRYPTO_PAY_TOKEN (или CRYPTO_BOT_TOKEN), STARS_BOT_TOKEN, TOPUP_CARD_NUMBER,
-TOPUP_ADMIN_GROUP_ID (или GROUP_ID, или ADMIN_CHAT_ID), CHECK_BOT_TOKEN (бот, который шлёт чеки по карте в чат админов), а также CRYPTO_PAY_BASE_URL, CRYPTO_PAY_FIAT,
+CHECK_BOT_TOKEN (бот для чеков: весь разбор оплат картой происходит в нём) и CHECK_ADMIN_IDS (Telegram ID админов; запасные имена —
+ADMIN_CHAT_ID, GROUP_ID, TOPUP_ADMIN_GROUP_ID), а также CRYPTO_PAY_BASE_URL, CRYPTO_PAY_FIAT,
 CRYPTO_PAY_ACCEPTED_ASSETS, TOPUP_INVOICE_EXPIRES, TOPUP_POLL_INTERVAL, STARS_BOT_TITLE, STARS_BOT_DESCRIPTION.
 Всё, что связано с aiogram / aiohttp, импортируется внутри функций: чистая логика (тексты, расчёты) проверяется без них.
 """
@@ -43,8 +45,8 @@ POLL_INTERVAL = int(os.environ.get("TOPUP_POLL_INTERVAL", "10") or 10)
 STARS_BOT_TOKEN = _secret("STARS_BOT_TOKEN").strip()
 STARS_TITLE = os.environ.get("STARS_BOT_TITLE", "Покупка конфет").strip()
 STARS_DESCRIPTION = os.environ.get("STARS_BOT_DESCRIPTION", "Оплата покупки конфет через Telegram Stars").strip()
-# Бот для чеков по карте: именно он (а не бот-магазин, который крутится в ротации) отправляет чек в чат админов и
-# принимает нажатия «Выдать / Отказать». Его нужно добавить в этот чат. Без токена чеки шлёт сам бот-магазин.
+# Бот для чеков по карте: именно он (а не бот-магазин, который крутится в ротации) отправляет чек админам и
+# принимает «Выдать / Отказать», /start и /pending в личных сообщениях админов (CHECK_ADMIN_IDS). Без токена оплата картой выключена.
 CHECK_BOT_TOKEN = _secret("CHECK_BOT_TOKEN").strip()
 CHECK_PREFIX = "tpchk"        # callback_data кнопок под чеком (общий для всех ботов-магазинов: «tpchk:ok:<id заказа>»)
 
@@ -58,16 +60,28 @@ M_CARD, M_CRYPTO, M_STARS = "card", "cryptobot", "stars"
 SYMBOLS = {"USD": "$", "RUB": "₽", "XTR": "⭐"}
 
 
-def admin_chat_id() -> int | None:
-    """Куда слать чеки по карте: TOPUP_ADMIN_GROUP_ID, затем GROUP_ID, затем ADMIN_CHAT_ID."""
-    for name in ("TOPUP_ADMIN_GROUP_ID", "GROUP_ID", "ADMIN_CHAT_ID"):
+def receipt_targets() -> list[int]:
+    """Кому бот для чеков шлёт чеки по карте и кто может их разбирать: Telegram ID админов из CHECK_ADMIN_IDS (через запятую
+    или пробел). Если не задано — запасные имена ADMIN_CHAT_ID, GROUP_ID, TOPUP_ADMIN_GROUP_ID (одно значение; отрицательный ID —
+    группа, но она не обязательна). Каждый админ должен один раз нажать /start у бота для чеков: писать первым бот не может."""
+    ids: list[int] = []
+    for part in re.split(r"[,;\s]+", os.environ.get("CHECK_ADMIN_IDS", "")):
+        if part.lstrip("-").isdigit() and int(part) != 0 and int(part) not in ids:
+            ids.append(int(part))
+    if ids:
+        return ids
+    for name in ("ADMIN_CHAT_ID", "GROUP_ID", "TOPUP_ADMIN_GROUP_ID"):
         raw = os.environ.get(name, "").strip()
-        if raw:
-            try:
-                return int(raw)
-            except ValueError:
-                continue
-    return None
+        if raw.lstrip("-").isdigit() and int(raw) != 0:
+            return [int(raw)]
+    return []
+
+
+def card_available() -> bool:
+    return bool(CHECK_BOT_TOKEN) and bool(receipt_targets())
+
+
+CARD_OFF_REASON = "карта: нужны CHECK_BOT_TOKEN и CHECK_ADMIN_IDS (ID админов; запасной вариант — ADMIN_CHAT_ID)"
 
 
 # ---------- расчёты ----------
@@ -268,19 +282,11 @@ def success_rows(keys: Keys) -> list[Row]:
     return [[("⬅️ Назад", keys.cb("methods"), None, "danger")]]
 
 
-def check_bot_enabled() -> bool:
-    return bool(CHECK_BOT_TOKEN)
-
-
-def receipt_rows(keys: Keys, order) -> list[Row]:
+def receipt_rows(order) -> list[Row]:
     oid = int(order.id)
-    if check_bot_enabled():   # кнопки обрабатывает бот для чеков, он не знает ключей конкретного бота-магазина
-        ok, no = f"{CHECK_PREFIX}:ok:{oid}", f"{CHECK_PREFIX}:no:{oid}"
-    else:
-        ok, no = keys.cb("ok", oid), keys.cb("no", oid)
     return [
-        [(f"✅ Выдать {int(order.candies)}🍬 за {money(order.fiat_amount)}₽", ok, None, "success")],
-        [("❌ Отказать", no, None, "danger")],
+        [(f"✅ Выдать {int(order.candies)}🍬 за {money(order.fiat_amount)}₽", f"{CHECK_PREFIX}:ok:{oid}", None, "success")],
+        [("❌ Отказать", f"{CHECK_PREFIX}:no:{oid}", None, "danger")],
     ]
 
 
@@ -532,6 +538,12 @@ def _ensure_stars_bot():
     return _stars_bot
 
 
+# order_id -> [(chat_id, message_id)] копий чека у админов (в памяти: после перезапуска «Выдать / Отказать» работают по
+# id заказа, а потерянные копии админ получает командой /pending)
+_receipt_msgs: dict[int, list[tuple[int, int]]] = {}
+PENDING_LIMIT = 20
+
+
 async def _answer(call, text: str | None = None, alert: bool = False) -> None:
     try:
         if text:
@@ -542,16 +554,17 @@ async def _answer(call, text: str | None = None, alert: bool = False) -> None:
         pass
 
 
-async def _strip_buttons(bot, msg) -> None:
+async def _strip_buttons(bot, chat_id: int, message_id: int) -> None:
     try:
-        await bot.edit_message_reply_markup(chat_id=msg.chat.id, message_id=msg.message_id, reply_markup=None)
+        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
     except Exception:
         pass
 
 
 async def _is_admin(bot, chat_id: int, user_id: int) -> bool:
+    """Личный чат: админ — тот, чей ID указан в списке получателей. Группа (если задана): администраторы группы."""
     if chat_id > 0:
-        return user_id == chat_id
+        return user_id == chat_id and user_id in receipt_targets()
     try:
         member = await bot.get_chat_member(chat_id, user_id)
     except Exception:
@@ -560,7 +573,7 @@ async def _is_admin(bot, chat_id: int, user_id: int) -> bool:
 
 
 async def _admin_mentions(bot, chat_id: int) -> str:
-    if chat_id > 0:   # личный чат владельца — пинговать некого
+    if chat_id > 0:   # личные сообщения — пинговать некого
         return ""
     try:
         admins = await bot.get_chat_administrators(chat_id)
@@ -574,10 +587,41 @@ async def _admin_mentions(bot, chat_id: int) -> str:
     return " ".join(dict.fromkeys(names))
 
 
-async def _decide(call, bot, action: str, order_id: int | None, expected_bot_id: int | None = None) -> None:
-    """«Выдать» / «Отказать» под чеком. `bot` — тот бот, который отправил чек в чат админов (бот для чеков или, без
-    CHECK_BOT_TOKEN, сам бот-магазин): им проверяем права нажавшего и правим сообщение с чеком. Пользователю сообщает
-    бот-магазин, чей это заказ (ACTIVE[order.bot_id])."""
+async def _fetch_receipt(shop_bot, file_id: str) -> tuple[bytes, str, bool]:
+    """Скачивает файл чека ботом-магазином (file_id выдан именно ему и боту для чеков не подойдёт).
+    Возвращает (содержимое, имя файла, это картинка)."""
+    info = await shop_bot.get_file(file_id)
+    path = str(getattr(info, "file_path", "") or "")
+    buf = io.BytesIO()
+    await shop_bot.download_file(path, destination=buf)
+    name = path.rsplit("/", 1)[-1] or "receipt"
+    return buf.getvalue(), name, name.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+
+
+async def _deliver_receipt(order, shop_bot, targets: list[int]) -> list[tuple[int, int]]:
+    """Присылает чек ботом для чеков каждому из targets. Возвращает [(chat_id, message_id)] доставленных копий."""
+    check_bot = _ensure_check_bot()
+    data, name, is_photo = await _fetch_receipt(shop_bot, order.receipt_file_id)
+    sent: list[tuple[int, int]] = []
+    for chat_id in targets:
+        try:
+            media = _input_file(data, name)
+            caption = receipt_caption(order, await _admin_mentions(check_bot, chat_id))
+            send = check_bot.send_photo if is_photo else check_bot.send_document
+            kwargs = {"photo": media} if is_photo else {"document": media}
+            msg = await send(chat_id, caption=caption, reply_markup=markup(receipt_rows(order)), parse_mode="HTML", **kwargs)
+            sent.append((chat_id, int(msg.message_id)))
+        except Exception as e:
+            log.warning("Чек заказа %s не доставлен в чат %s (админ должен нажать /start у бота для чеков): %s", order.id, chat_id, e)
+    if sent:
+        _receipt_msgs.setdefault(int(order.id), []).extend(sent)
+    return sent
+
+
+async def _decide(call, bot, action: str, order_id: int | None) -> None:
+    """«Выдать» / «Отказать» под чеком; `bot` — бот для чеков (им проверяем права и правим сообщения). Пользователю
+    сообщает бот-магазин, чей это заказ (ACTIVE[order.bot_id]). Решает первый нажавший: у остальных админов копии чека
+    обновляются, повторное нажатие отвечает «уже обработан»."""
     msg = call.message
     if msg is None or order_id is None:
         await _answer(call)
@@ -586,45 +630,97 @@ async def _decide(call, bot, action: str, order_id: int | None, expected_bot_id:
         await _answer(call, "Подтверждать оплату могут только администраторы.", True)
         return
     order = await repo.get_topup_order(order_id)
-    if order is None or order.method != M_CARD or (expected_bot_id is not None and int(order.bot_id) != expected_bot_id):
+    if order is None or order.method != M_CARD:
         await _answer(call, "Заказ не найден.", True)
         return
     who = f"@{call.from_user.username}" if call.from_user.username else html.escape(call.from_user.full_name or str(call.from_user.id))
     if order.status != "review":
         await _answer(call, "Этот чек уже обработан.", True)
-        await _strip_buttons(bot, msg)
+        await _strip_buttons(bot, msg.chat.id, msg.message_id)
         return
     if action == "ok":
         if await repo.mark_topup_paid(order_id):
             await finalize(order_id)
         fresh = await repo.get_topup_order(order_id)
         done = fresh is not None and fresh.status == "credited"
-        line = (f"✅ Выдано {int(order.candies)}{CANDY} за {money(order.fiat_amount)}₽ ({who})" if done
-                else "⚠️ Оплата отмечена, но конфеты пока не начислены (пользователя нет в базе?).")
+        result = (f"✅ Выдано {int(order.candies)}{CANDY} за {money(order.fiat_amount)}₽ ({who})" if done
+                  else "⚠️ Оплата отмечена, но конфеты пока не начислены (пользователя нет в базе?).")
     else:
         if await repo.finish_topup_order(order_id, "rejected"):
             mod = ACTIVE.get(int(order.bot_id))
             if mod is not None:
                 await mod._notify(mod.bot, order, "❌ Чек не подтверждён. Если вы действительно оплатили, свяжитесь с поддержкой.")
-        line = f"❌ Отказано ({who})"
-    try:
-        await bot.edit_message_caption(chat_id=msg.chat.id, message_id=msg.message_id, caption=line, reply_markup=None)
-    except Exception:
-        await _strip_buttons(bot, msg)
+        result = f"❌ Отказано ({who})"
+    sender = html.escape(order.receipt_sender or str(order.user_id), quote=False)
+    line = f"{result}\n\n<b>Пользователь:</b> {sender} (<code>{order.user_id}</code>)"
+    copies = {(msg.chat.id, msg.message_id), *_receipt_msgs.pop(order_id, [])}
+    for chat_id, message_id in copies:
+        try:
+            await bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=line, parse_mode="HTML", reply_markup=None)
+        except Exception:
+            await _strip_buttons(bot, chat_id, message_id)
     await _answer(call)
 
 
+async def _send_pending(bot, chat_id: int) -> int:
+    """/pending: заново присылает в чат чеки, ожидающие проверки (до PENDING_LIMIT). Возвращает, сколько прислано."""
+    sent = 0
+    for order in (await repo.list_topup_orders("review", M_CARD))[:PENDING_LIMIT]:
+        mod = ACTIVE.get(int(order.bot_id))
+        if mod is None or mod.bot is None or not order.receipt_file_id:
+            continue
+        try:
+            sent += len(await _deliver_receipt(order, mod.bot, [chat_id]))
+        except Exception:
+            log.exception("/pending: не удалось прислать чек заказа %s", order.id)
+    return sent
+
+
 def _ensure_check_bot():
-    """Бот для чеков по карте: шлёт чеки в чат админов и принимает нажатия «Выдать / Отказать» (только callback_query)."""
+    """Бот для чеков: принимает «Выдать / Отказать», команды /start и /pending и шлёт чеки админам (polling в ensure_started)."""
     global _check_bot, _check_dp
     if _check_bot is not None:
         return _check_bot
     if not CHECK_BOT_TOKEN:
         raise RuntimeError("CHECK_BOT_TOKEN is not set")
     from aiogram import Bot, Dispatcher, F
-    from aiogram.types import CallbackQuery
+    from aiogram.filters import Command
+    from aiogram.types import CallbackQuery, Message
 
     _check_bot, _check_dp = Bot(token=CHECK_BOT_TOKEN), Dispatcher()
+
+    async def count_pending() -> int:
+        try:
+            return len(await repo.list_topup_orders("review", M_CARD))
+        except Exception:
+            return 0
+
+    @_check_dp.message(Command("start"))
+    async def _on_start(message: Message, bot: Bot) -> None:
+        uid = message.from_user.id if message.from_user else 0
+        if message.chat.type == "private" and uid in receipt_targets():
+            text = ("👮 <b>Бот для чеков</b>\n\nСюда приходят чеки об оплате конфет картой. Под каждым чеком — кнопки "
+                    "«Выдать» и «Отказать». Решает первый нажавший, у остальных админов чек обновится.\n\n"
+                    f"🧾 Сейчас на проверке: {await count_pending()}\n/pending — прислать чеки на проверке ещё раз.")
+        else:
+            text = (f"⛔ Нет доступа. Ваш Telegram ID: <code>{uid}</code>\n"
+                    "Чтобы получать чеки, владелец должен добавить этот ID в CHECK_ADMIN_IDS.")
+        try:
+            await bot.send_message(message.chat.id, text, parse_mode="HTML")
+        except Exception:
+            log.warning("Бот для чеков: не удалось ответить на /start")
+
+    @_check_dp.message(Command("pending"))
+    async def _on_pending(message: Message, bot: Bot) -> None:
+        uid = message.from_user.id if message.from_user else 0
+        if message.chat.type != "private" or uid not in receipt_targets():
+            return
+        try:
+            sent = await _send_pending(bot, message.chat.id)
+            if not sent:
+                await bot.send_message(message.chat.id, "✅ Чеков на проверке нет.")
+        except Exception:
+            log.exception("Бот для чеков: /pending не выполнен")
 
     @_check_dp.callback_query(F.data.startswith(CHECK_PREFIX + ":"))
     async def _on_check_decision(call: CallbackQuery, bot: Bot) -> None:
@@ -652,7 +748,7 @@ def ensure_started() -> None:
     global _poll_task, _stars_task, _check_task
     if _poll_task is None or _poll_task.done():
         for ok, what in ((bool(CRYPTO_PAY_TOKEN), "CryptoBot: не задан CRYPTO_PAY_TOKEN"),
-                         (admin_chat_id() is not None, "карта: не задан чат админов (TOPUP_ADMIN_GROUP_ID / GROUP_ID / ADMIN_CHAT_ID)")):
+                         (card_available(), CARD_OFF_REASON)):
             if not ok:
                 log.warning("Способ оплаты выключен — %s", what)
         _poll_task = asyncio.create_task(_poll_loop(), name="topup-poll")
@@ -664,7 +760,7 @@ def ensure_started() -> None:
         else:
             async def run_check() -> None:
                 try:
-                    await _check_dp.start_polling(check_bot, handle_signals=False, allowed_updates=["callback_query"])
+                    await _check_dp.start_polling(check_bot, handle_signals=False, allowed_updates=["message", "callback_query"])
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -672,7 +768,7 @@ def ensure_started() -> None:
 
             _check_task = asyncio.create_task(run_check(), name="topup-check")
     elif not CHECK_BOT_TOKEN:
-        log.warning("CHECK_BOT_TOKEN не задан — чеки по карте уходят через бота-магазин, он должен состоять в чате админов")
+        log.info("CHECK_BOT_TOKEN не задан — оплата картой выключена")
     if STARS_BOT_TOKEN and (_stars_task is None or _stars_task.done()):
         try:
             bot = _ensure_stars_bot()
@@ -768,17 +864,22 @@ class TopupModule:
         return getattr(self.profile, "message_image_url", None)
 
     # --- вывод ---
-    async def _edit_any(self, bot, chat_id: int, message_id: int, text: str, rows: list[Row]) -> bool:
-        """Обновляет сообщение раздела на месте (с картинкой или без: не знаем, дошла ли картинка)."""
+    async def _replace_screen(self, bot, chat_id: int, old_id: int, text: str, rows: list[Row]) -> bool:
+        """Присылает новый экран и удаляет прежний (счёт после оплаты не редактируется). False — не доставлено."""
         from aiogram.exceptions import TelegramAPIError
 
-        for has_photo in (bool(self.image), not bool(self.image)):
-            try:
-                await messaging.edit_message(bot, chat_id, message_id, text, markup(rows), has_photo=has_photo)
-                return True
-            except TelegramAPIError:
-                continue
-        return False
+        try:
+            sent = await messaging.send_message(bot, chat_id, text, self.image, reply_markup=markup(rows))
+        except TelegramAPIError as e:
+            log.warning("Экран пополнения пользователю %s не доставлен: %s", chat_id, e)
+            return False
+        self._track(chat_id, sent.message_id)
+        st = self.states.get(chat_id)
+        if st is not None:
+            st.message_id, st.chat_id = sent.message_id, sent.chat.id
+        if old_id != sent.message_id:
+            await self._delete(bot, chat_id, old_id)
+        return True
 
     async def _send_new(self, bot, user_id: int, st: UserState, text: str, rows: list[Row]) -> None:
         """Новое сообщение раздела вместо старого (например, после ввода количества конфет)."""
@@ -796,10 +897,10 @@ class TopupModule:
             await self._delete(bot, user_id, old)
 
     async def _screen(self, call, bot, st: UserState, screen: str, text: str, rows: list[Row]) -> None:
-        await self._show(call, bot, call.from_user.id, text, markup(rows))
+        new_id = await self._show(call, bot, call.from_user.id, text, markup(rows))   # новое сообщение, старое удалено
         st.screen = screen
         st.chat_id = call.message.chat.id if call.message else call.from_user.id
-        st.message_id = call.message.message_id if call.message else None
+        st.message_id = new_id if new_id is not None else (call.message.message_id if call.message else None)
 
     async def _methods(self, call, bot, st: UserState) -> None:
         await self._screen(call, bot, st, "methods", methods_text(st.amount), methods_rows(self.keys, st.amount))
@@ -820,9 +921,6 @@ class TopupModule:
                 pass
             return
         action, arg = parsed
-        if action in ("ok", "no"):
-            await self._admin_decision(call, bot, action, arg)
-            return
         user_id = call.from_user.id
         if not self._is_user(user_id) or call.message is None:
             try:
@@ -853,8 +951,8 @@ class TopupModule:
     async def _pay_action(self, call, bot, st: UserState, action: str) -> None:
         amount = int(st.amount or 0)
         if action == "card":
-            if admin_chat_id() is None:
-                log.warning("Оплата картой недоступна: не задан чат админов (TOPUP_ADMIN_GROUP_ID / GROUP_ID / ADMIN_CHAT_ID)")
+            if not card_available():
+                log.warning("Оплата картой недоступна — %s", CARD_OFF_REASON)
                 await self._alert(call, "❌ Оплата картой сейчас недоступна.")
                 return
             await self._screen(call, bot, st, "card", card_text(amount), card_rows(self.keys))
@@ -935,6 +1033,11 @@ class TopupModule:
             st.order_id, st.method, st.invoice_url, st.invoice_amount = order_id, method, url, amount
         text = crypto_text(amount) if crypto else stars_text(amount)
         await self._screen(call, bot, st, "invoice", text, invoice_rows(self.keys, url, crypto=crypto))
+        if st.order_id and st.chat_id is not None and st.message_id is not None:
+            try:   # экран счёта — новое сообщение: после оплаты именно его заменим экраном «успешно оплачен»
+                await repo.set_topup_screen(st.order_id, st.chat_id, st.message_id)
+            except Exception:
+                pass
 
     # --- сообщения пользователя внутри раздела ---
     async def on_message(self, message, bot) -> bool:
@@ -964,8 +1067,8 @@ class TopupModule:
 
     # --- чек по карте ---
     async def _receipt(self, message, bot, st: UserState) -> None:
-        user_id, amount, target = message.from_user.id, int(st.amount or 0), admin_chat_id()
-        if not amount or target is None:
+        user_id, amount, targets = message.from_user.id, int(st.amount or 0), receipt_targets()
+        if not amount or not targets or not CHECK_BOT_TOKEN:
             return
         user = message.from_user
         sender = f"@{user.username}" if user.username else ((user.full_name or "").strip() or str(user.id))
@@ -979,7 +1082,8 @@ class TopupModule:
         if order is None:
             return
         try:
-            await self._send_receipt(message, bot, order, file_id, target)
+            if not await _deliver_receipt(order, bot, targets):
+                raise RuntimeError("чек не доставлен ни одному админу")
         except Exception:
             log.exception("Не удалось отправить чек админам")
             await repo.finish_topup_order(order_id, "rejected")
@@ -996,27 +1100,6 @@ class TopupModule:
             except Exception:
                 pass
 
-    async def _send_receipt(self, message, bot, order, file_id: str, target: int) -> None:
-        """Отправляет чек в чат админов. С CHECK_BOT_TOKEN — ботом для чеков: file_id выдан боту-магазину и чужому боту
-        не подойдёт, поэтому файл скачивается ботом-магазином и загружается заново."""
-        is_photo = bool(message.photo)
-        if check_bot_enabled():
-            sender_bot = _ensure_check_bot()
-            buf = io.BytesIO()
-            await bot.download(file_id, destination=buf)
-            name = "receipt.jpg" if is_photo else (getattr(message.document, "file_name", None) or "receipt")
-            media: Any = _input_file(buf.getvalue(), name)
-        else:
-            sender_bot, media = bot, file_id
-        caption = receipt_caption(order, await _admin_mentions(sender_bot, target))
-        send = sender_bot.send_photo if is_photo else sender_bot.send_document
-        kwargs = {"photo": media} if is_photo else {"document": media}
-        await send(target, caption=caption, reply_markup=markup(receipt_rows(self.keys, order)), parse_mode="HTML", **kwargs)
-
-    async def _admin_decision(self, call, bot, action: str, order_id: int | None) -> None:
-        """Нажатие под чеком, пришедшее боту-магазину (чек был отправлен без CHECK_BOT_TOKEN)."""
-        await _decide(call, bot, action, order_id, expected_bot_id=self.bot_id)
-
     # --- сообщения пользователю после оплаты ---
     async def _notify(self, bot, order, text: str) -> None:
         try:
@@ -1030,8 +1113,8 @@ class TopupModule:
             return
         st = self.states.get(int(order.user_id))
         if order.method != M_CARD and order.screen_chat_id and order.screen_message_id:
-            await self._edit_any(bot, int(order.screen_chat_id), int(order.screen_message_id),
-                                 success_text(order.method, order), success_rows(self.keys))
+            await self._replace_screen(bot, int(order.screen_chat_id), int(order.screen_message_id),
+                                       success_text(order.method, order), success_rows(self.keys))
         if st is not None:
             st.method = st.order_id = st.invoice_url = st.invoice_amount = None
             st.screen = "methods"

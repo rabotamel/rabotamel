@@ -324,7 +324,7 @@ class GalleryNavigationTests(unittest.TestCase):
 
 
 class ShopNavigationTests(unittest.TestCase):
-    """Магазин: приветствие -> меню -> карточка товара -> назад -> назад; всё в одном сообщении (обновление на месте)."""
+    """Магазин: приветствие -> меню -> карточка товара -> назад -> назад; каждый переход — новое сообщение, прежнее удаляется."""
 
     def _setup(self, known=(5,), photo=False, products=None):
         from app import greeting
@@ -397,7 +397,7 @@ class ShopNavigationTests(unittest.TestCase):
     def _buttons(markup):
         return [b for row in markup.inline_keyboard for b in row]
 
-    def test_full_navigation_edits_one_message(self):
+    def test_full_navigation_sends_new_message_and_deletes_old(self):
         rows = [
             types.SimpleNamespace(id=7, name="Абсолют", price=6789, about="**Мощный** набор", color="danger", is_visible=True),
             types.SimpleNamespace(id=3, name="Классика", price=50, about="", color="", is_visible=True),
@@ -408,9 +408,10 @@ class ShopNavigationTests(unittest.TestCase):
         cfg = texts.shop_menu
 
         async def go():
-            await router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb), bot)
-            kind, mid, text, markup = edits[-1]
-            self.assertEqual((kind, mid), ("text", 10))
+            await router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb, 10), bot)
+            menu_id, text = sent[-1]
+            markup = self.sent_markup[-1]
+            self.assertEqual(bot.deleted, [10])                       # приветствие удалено, меню — новое сообщение
             self.assertEqual(text, shop.render_menu(texts.shop_buttons.shop_label, 42))
             self.assertTrue(text.startswith(f"<b>{texts.shop_buttons.shop_label}</b>\n\n"))   # заголовок жирным
             self.assertIn("Ваш баланс: 42🍬", text)
@@ -421,8 +422,10 @@ class ShopNavigationTests(unittest.TestCase):
             self.assertEqual([getattr(b, "style", None) for b in btns], ["danger", None, "success", "danger"])
             self.assertEqual([b.callback_data for b in btns[:3]], [f"{cfg.product_cb}:{i}" for i in (7, 3, 4)])
 
-            await router.handlers["on_shop_menu_button"](call(btns[0].callback_data), bot)
-            _, _, text, markup = edits[-1]
+            await router.handlers["on_shop_menu_button"](call(btns[0].callback_data, menu_id), bot)
+            card_id, text = sent[-1]
+            markup = self.sent_markup[-1]
+            self.assertEqual(bot.deleted, [10, menu_id])
             self.assertEqual(text, shop.render_product(shop.product_from_row(rows[0])))
             self.assertEqual(text.split("\n")[0], "<b>📦 Товар:</b> Абсолют")
             self.assertIn("<b>Мощный</b> набор", text)
@@ -431,17 +434,21 @@ class ShopNavigationTests(unittest.TestCase):
             self.assertEqual([b.text for b in btns2], ["🍭 Купить (6789🍬)", "⬅️ Назад"])
             self.assertEqual([b.style for b in btns2], ["success", "danger"])
 
-            n = len(edits)
-            await router.handlers["on_shop_menu_button"](call(btns2[0].callback_data), bot)   # заглушка: ничего не делает
-            self.assertEqual((len(edits), sent, bot.deleted), (n, [], []))
+            n = len(sent)
+            await router.handlers["on_shop_menu_button"](call(btns2[0].callback_data, card_id), bot)   # заглушка: ничего не делает
+            self.assertEqual((len(sent), bot.deleted), (n, [10, menu_id]))
 
-            await router.handlers["on_shop_menu_button"](call(cfg.product_back_cb), bot)
-            self.assertEqual(edits[-1][2], shop.render_menu(texts.shop_buttons.shop_label, 42))
-            await router.handlers["on_shop_menu_button"](call(cfg.back_cb), bot)
-            self.assertIn("Бот", edits[-1][2])                       # главное меню — приветствие
-            self.assertIn("42🍬", edits[-1][2])
-            self.assertEqual(texts.shop_buttons.shop_label, edits[-1][3].inline_keyboard[0][0].text)
-            self.assertEqual((sent, bot.deleted), ([], []))          # новых сообщений не было, ничего не удалялось
+            await router.handlers["on_shop_menu_button"](call(cfg.product_back_cb, card_id), bot)
+            menu2_id, text = sent[-1]
+            self.assertEqual(text, shop.render_menu(texts.shop_buttons.shop_label, 42))
+            self.assertEqual(bot.deleted, [10, menu_id, card_id])
+            await router.handlers["on_shop_menu_button"](call(cfg.back_cb, menu2_id), bot)
+            _, text = sent[-1]
+            self.assertIn("Бот", text)                                # главное меню — приветствие
+            self.assertIn("42🍬", text)
+            self.assertEqual(texts.shop_buttons.shop_label, self.sent_markup[-1].inline_keyboard[0][0].text)
+            self.assertEqual(bot.deleted, [10, menu_id, card_id, menu2_id])
+            self.assertEqual(edits, [])                               # ни одного редактирования на месте
 
         asyncio.run(go())
 
@@ -455,28 +462,26 @@ class ShopNavigationTests(unittest.TestCase):
 
         async def go():
             await router.handlers["on_shop_menu_button"](call(f"{cfg.product_cb}:1", msg_id=10), bot)
-            # первая часть заменила сообщение магазина (без кнопок), остальные пришли следом, кнопки — под последней
-            kind, mid, text, markup = edits[-1]
-            self.assertEqual((kind, mid, markup), ("text", 10, None))
-            self.assertEqual(len(sent), len(parts) - 1)
+            # все части — новые сообщения (меню удалено), кнопки — под последней
+            self.assertEqual(len(sent), len(parts))
+            self.assertEqual(sent[0][1][:20], parts[0][:20])
             self.assertEqual([t for _, t in sent][-1][:20], parts[-1][:20])
             self.assertTrue(all(m is None for m in self.sent_markup[:-1]))
             self.assertEqual([b.text for b in self._buttons(self.sent_markup[-1])], ["🍭 Купить (10🍬)", "⬅️ Назад"])
             last_id = sent[-1][0]
-            self.assertEqual(bot.deleted, [])
-            # «Назад» с последней части: меню — на месте этой части, верхние части удалены
+            self.assertEqual(bot.deleted, [10])
+            # «Назад» с последней части: меню — новым сообщением, эта часть и верхние части удалены
             await router.handlers["on_shop_menu_button"](call(cfg.product_back_cb, msg_id=last_id), bot)
-            self.assertEqual(edits[-1][1], last_id)
-            self.assertEqual(edits[-1][2], shop.render_menu(texts.shop_buttons.shop_label, 42))
-            self.assertEqual(sorted(bot.deleted), sorted([10] + [i for i, _ in sent[:-1]]))
+            self.assertEqual(sent[-1][1], shop.render_menu(texts.shop_buttons.shop_label, 42))
+            self.assertEqual(sorted(bot.deleted), sorted([10, last_id] + [i for i, _ in sent[:len(parts) - 1]]))
+            self.assertEqual(edits, [])
         asyncio.run(go())
 
     def test_empty_catalog_menu_opens_with_back_button_only(self):
         bot, router, texts, call, edits, sent = self._setup(products=[])
         asyncio.run(router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb), bot))
-        _, _, text, markup = edits[-1]
-        self.assertEqual(text, shop.render_menu(texts.shop_buttons.shop_label, 42))
-        btns = self._buttons(markup)
+        self.assertEqual(sent[-1][1], shop.render_menu(texts.shop_buttons.shop_label, 42))
+        btns = self._buttons(self.sent_markup[-1])
         self.assertEqual([(b.text, b.callback_data, b.style) for b in btns],
                          [("⬅️ Назад", texts.shop_menu.back_cb, "danger")])
 
@@ -487,20 +492,20 @@ class ShopNavigationTests(unittest.TestCase):
         async def go():
             self.catalog[0].is_visible = False           # скрыт, пока пользователь смотрел меню
             await router.handlers["on_shop_menu_button"](call(f"{cfg.product_cb}:1"), bot)
-            self.assertEqual(edits[-1][2], shop.render_menu(texts.shop_buttons.shop_label, 42))
-            self.assertEqual([b.text for b in self._buttons(edits[-1][3])], ["⬅️ Назад"])
+            self.assertEqual(sent[-1][1], shop.render_menu(texts.shop_buttons.shop_label, 42))
+            self.assertEqual([b.text for b in self._buttons(self.sent_markup[-1])], ["⬅️ Назад"])
             await router.handlers["on_shop_menu_button"](call(f"{cfg.product_cb}:999"), bot)   # такого товара нет
-            self.assertEqual(edits[-1][2], shop.render_menu(texts.shop_buttons.shop_label, 42))
+            self.assertEqual(sent[-1][1], shop.render_menu(texts.shop_buttons.shop_label, 42))
             await router.handlers["on_shop_menu_button"](call(cfg.product_cb), bot)            # кнопка версии без id
-            self.assertEqual(edits[-1][2], shop.render_menu(texts.shop_buttons.shop_label, 42))
-            self.assertEqual((sent, bot.deleted), ([], []))
+            self.assertEqual(sent[-1][1], shop.render_menu(texts.shop_buttons.shop_label, 42))
+            self.assertEqual((len(sent), edits), (3, []))
 
         asyncio.run(go())
 
-    def test_photo_message_edits_caption(self):
-        bot, router, texts, call, edits, _ = self._setup(photo=True)
+    def test_photo_message_is_replaced_not_edited(self):
+        bot, router, texts, call, edits, sent = self._setup(photo=True)
         asyncio.run(router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb), bot))
-        self.assertEqual(edits[-1][0], "caption")
+        self.assertEqual((edits, len(sent), bot.deleted), ([], 1, [10]))
 
     def test_foreign_stale_and_unverified_do_nothing(self):
         bot, router, texts, call, edits, sent = self._setup()
@@ -515,17 +520,15 @@ class ShopNavigationTests(unittest.TestCase):
         asyncio.run(go())
         self.assertEqual((edits, sent, stranger_edits), ([], [], []))
 
-    def test_edit_failure_falls_back_to_new_message(self):
+    def test_send_failure_keeps_old_message(self):
         bot, router, texts, call, edits, sent = self._setup()
 
         async def broken(*a, **k):
-            raise handlers.TelegramAPIError("message to edit not found")
+            raise handlers.TelegramAPIError("chat not found")
 
-        bot.edit_message_text = broken
+        messaging.send_message = broken   # вернёт на место cleanup из _setup
         asyncio.run(router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb, 10), bot))
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0][1], shop.render_menu(texts.shop_buttons.shop_label, 42))
-        self.assertEqual(bot.deleted, [10])                          # старое сообщение убрано
+        self.assertEqual((sent, edits, bot.deleted), ([], [], []))   # экран не доставлен — прежний остаётся на месте
 
 
 class CaptchaTargetChangesTests(unittest.TestCase):

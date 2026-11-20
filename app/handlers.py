@@ -395,23 +395,11 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             log.warning("Раздел галереи пользователю %s не доставлен: %s", user_id, e)
 
     async def show_screen(call: CallbackQuery, bot: Bot, user_id: int, text: str, markup) -> int | None:
-        """Раздел «Магазин» живёт в ОДНОМ сообщении: приветствие -> меню магазина -> карточка товара и обратно
-        обновляются на месте (текст или подпись к фото, картинка остаётся). Если обновить нельзя (сообщение удалено
-        или слишком старое) — присылается новое, а старое убирается. Возвращает id сообщения с экраном."""
+        """Переходы по разделу «Магазин» (приветствие -> магазин -> карточка товара -> «Купить конфеты» и обратно), как
+        и в остальном боте: сообщение не редактируется, а присылается новое, прежнее удаляется. Новое отправляется
+        первым, поэтому при сбое отправки старый экран остаётся на месте. Возвращает id нового сообщения."""
         await drop_product_parts(bot, user_id)   # уходим с длинной карточки товара — её верхние части убираем
         msg = call.message
-        if msg is not None:
-            try:
-                await messaging.edit_message(
-                    bot, msg.chat.id, msg.message_id, text, markup, has_photo=bool(getattr(msg, "photo", None))
-                )
-                last_greeting.setdefault(user_id, msg.message_id)  # это же сообщение — «главное меню»: /start его заменит
-                return msg.message_id
-            except TelegramForbiddenError as e:
-                await on_forbidden(e, user_id)
-                return None
-            except TelegramAPIError as e:
-                log.warning("Сообщение магазина у %s не обновилось (%s), отправляю новое", user_id, e)
         try:
             sent = await messaging.send_message(bot, user_id, text, profile.message_image_url, reply_markup=markup)
         except TelegramForbiddenError as e:
@@ -421,7 +409,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             log.warning("Раздел магазина пользователю %s не доставлен: %s", user_id, e)
             return None
         stale = {last_greeting.get(user_id), msg.message_id if msg is not None else None}
-        last_greeting[user_id] = sent.message_id
+        last_greeting[user_id] = sent.message_id   # это «главное меню»: /start его заменит
         for old_id in stale - {None, sent.message_id}:
             await safe_delete(bot, user_id, old_id)
         return sent.message_id

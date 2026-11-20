@@ -18,12 +18,12 @@ services:
         sync: false
       - key: VAPID_SUBJECT
         value: mailto:admin@example.com
-      # «Купить конфеты» (по желанию): оплата CryptoBot / Telegram Stars / картой (чеки уходят в чат админов)
+      # «Купить конфеты» (по желанию): оплата CryptoBot / Telegram Stars / картой (чеки разбирают админы в боте для чеков)
       - key: CRYPTO_PAY_TOKEN
         sync: false
       - key: STARS_BOT_TOKEN
         sync: false
-      - key: TOPUP_ADMIN_GROUP_ID
-        sync: false
       - key: CHECK_BOT_TOKEN
+        sync: false
+      - key: CHECK_ADMIN_IDS
         sync: false

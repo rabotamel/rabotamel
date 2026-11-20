@@ -25,6 +25,25 @@ class PureTests(unittest.TestCase):
         self.assertEqual([topup.parse_amount(t) for t in ("100", " 1 000 ", "500 конфет", "x", "", None, "0", "-5", "1000001")],
                          [100, 1000, 500, None, None, None, None, 5, None])
 
+    def test_receipt_targets_from_env(self):
+        names = ("CHECK_ADMIN_IDS", "ADMIN_CHAT_ID", "GROUP_ID", "TOPUP_ADMIN_GROUP_ID")
+        saved = {n: os.environ.pop(n, None) for n in names}
+        try:
+            self.assertEqual(topup.receipt_targets(), [])
+            os.environ["TOPUP_ADMIN_GROUP_ID"] = "-100123"
+            self.assertEqual(topup.receipt_targets(), [-100123])
+            os.environ["ADMIN_CHAT_ID"] = "555"                       # запасные имена: ADMIN_CHAT_ID главнее
+            self.assertEqual(topup.receipt_targets(), [555])
+            os.environ["CHECK_ADMIN_IDS"] = "11, 22;33 abc 11 0"      # свой список главнее; мусор и повторы отбрасываются
+            self.assertEqual(topup.receipt_targets(), [11, 22, 33])
+            os.environ["CHECK_ADMIN_IDS"] = "oops"
+            self.assertEqual(topup.receipt_targets(), [555])
+        finally:
+            for n, v in saved.items():
+                os.environ.pop(n, None)
+                if v is not None:
+                    os.environ[n] = v
+
     def test_keys_are_per_bot_and_checked(self):
         a, b = topup.Keys.for_seed("tokA"), topup.Keys.for_seed("tokB")
         self.assertNotEqual(a.p, b.p)
@@ -126,15 +145,22 @@ class FakeRepo:
 
 
 class Bot:
-    def __init__(self):
-        self.sent, self.edits_caption, self.deleted, self.admins = [], [], [], {101}
+    def __init__(self, admins=(101,)):
+        self.sent, self.edits_caption, self.deleted, self.admins = [], [], [], set(admins)
         self.next_id = 500
+        self.files = []
+        self.markup_edits = []
+
+    async def _send(self, kind, chat_id, kw):
+        self.next_id += 1
+        self.sent.append((kind, chat_id, kw))
+        return NS(message_id=self.next_id, chat=NS(id=chat_id))
 
     async def send_photo(self, chat_id, **kw):
-        self.sent.append(("photo", chat_id, kw))
+        return await self._send("photo", chat_id, kw)
 
     async def send_document(self, chat_id, **kw):
-        self.sent.append(("document", chat_id, kw))
+        return await self._send("document", chat_id, kw)
 
     async def get_chat_administrators(self, chat_id):
         return [NS(user=NS(is_bot=False, username="boss")), NS(user=NS(is_bot=True, username="somebot"))]
@@ -146,11 +172,15 @@ class Bot:
         self.edits_caption.append(kw)
 
     async def edit_message_reply_markup(self, **kw):
-        pass
+        self.markup_edits.append(kw)
 
-    async def download(self, file_id, destination=None, **kw):
-        self.downloaded = getattr(self, "downloaded", []) + [file_id]
-        destination.write(b"IMG:" + file_id.encode())
+    # бот-магазин: скачивание файла чека
+    async def get_file(self, file_id):
+        self.files.append(file_id)
+        return NS(file_path=f"photos/{file_id}.jpg")
+
+    async def download_file(self, path, destination=None, **kw):
+        destination.write(b"IMG:" + path.encode())
         return destination
 
 
@@ -172,13 +202,20 @@ class FlowTests(unittest.TestCase):
             self.news.append((chat_id, text, reply_markup))
             return NS(message_id=self.bot.next_id, chat=NS(id=chat_id))
 
-        self.orig = (messaging.edit_message, messaging.send_message, topup.CRYPTO_PAY_TOKEN, topup._crypto_post, topup.admin_chat_id)
+        self.check = Bot()   # бот для чеков (отдельный от бота-магазина self.bot)
+        self.orig = (messaging.edit_message, messaging.send_message, topup.CRYPTO_PAY_TOKEN, topup._crypto_post,
+                     topup.receipt_targets, topup.CHECK_BOT_TOKEN, topup._ensure_check_bot, topup._input_file)
         messaging.edit_message, messaging.send_message = fake_edit, fake_send
         topup.CRYPTO_PAY_TOKEN = "tok"
-        topup.admin_chat_id = lambda: -100
+        topup.receipt_targets = lambda: [101, 102]   # два админа в личных сообщениях
+        topup.CHECK_BOT_TOKEN = "check-token"
+        topup._ensure_check_bot = lambda: self.check
+        topup._input_file = lambda data, name: NS(data=data, name=name)
+        topup._receipt_msgs.clear()
 
         async def show_screen(call, bot, user_id, text, mk):
             self.screens.append((call.message.message_id, text, mk))
+            return 900 + len(self.screens)   # как в боте: экран — НОВОЕ сообщение с другим id
 
         async def safe_delete(bot, chat, mid):
             self.deleted.append(mid)
@@ -196,7 +233,8 @@ class FlowTests(unittest.TestCase):
         topup._retry.clear()
 
     def tearDown(self):
-        messaging.edit_message, messaging.send_message, topup.CRYPTO_PAY_TOKEN, topup._crypto_post, topup.admin_chat_id = self.orig
+        (messaging.edit_message, messaging.send_message, topup.CRYPTO_PAY_TOKEN, topup._crypto_post,
+         topup.receipt_targets, topup.CHECK_BOT_TOKEN, topup._ensure_check_bot, topup._input_file) = self.orig
         for n, v in self.saved.items():
             if v is not None:
                 setattr(topup.repo, n, v)
@@ -236,12 +274,13 @@ class FlowTests(unittest.TestCase):
             await self.mod.on_message(self.msg("250"), self.bot)
             chat, text, mk = self.news[-1]
             self.assertEqual(text, topup.methods_text(250))
-            self.assertEqual(self.deleted, [10, 77])          # прежний экран и число пользователя убраны
+            self.assertEqual(self.deleted, [901, 77])         # прежний экран (теперь это новое сообщение 901) и число пользователя убраны
             self.assertEqual(self.tracked[5], self.bot.next_id)
             self.assertEqual(self.mod.state(5).amount, 250)
         self.run_(go())
 
-    def test_card_flow_receipt_and_admin_approval(self):
+    def _send_receipt(self):
+        """Пользователь проходит путь до отправки чека на 100🍬; возвращает (kind, chat, kwargs) первой копии у админа."""
         k = self.mod.keys
 
         async def go():
@@ -252,96 +291,126 @@ class FlowTests(unittest.TestCase):
             await self.mod.on_callback(self.call(k.cb("paid")), self.bot)
             self.assertEqual(self.screens[-1][1], topup.CARD_CONFIRM_TEXT)
             await self.mod.on_message(self.msg(None, photo=True), self.bot)
-            kind, chat, kw = self.bot.sent[-1]
-            self.assertEqual((kind, chat, kw["photo"]), ("photo", -100, "F1"))
-            self.assertIn("@boss", kw["caption"])
-            self.assertNotIn("somebot", kw["caption"])
-            self.assertIn("100🍬", kw["caption"])
-            self.assertEqual(self.news[-1][1], topup.CARD_PROCESSING_TEXT)
-            order = self.repo.orders[1]
-            self.assertEqual((order.status, order.method, order.fiat_amount), ("review", "card", Decimal("80.00")))
-            ok = kw["reply_markup"].inline_keyboard[0][0].callback_data
+        self.run_(go())
+
+    def test_card_flow_receipt_goes_to_admins_in_check_bot(self):
+        self._send_receipt()
+        self.assertEqual(self.bot.sent, [])                          # бот-магазин админам ничего не шлёт
+        self.assertEqual(self.bot.files, ["F1"])                     # файл скачан ботом-магазином (его file_id)
+        self.assertEqual([(kind, chat) for kind, chat, _ in self.check.sent], [("photo", 101), ("photo", 102)])
+        _, _, kw = self.check.sent[0]
+        self.assertEqual((kw["photo"].data, kw["photo"].name), (b"IMG:photos/F1.jpg", "F1.jpg"))
+        self.assertIn("100🍬", kw["caption"])
+        self.assertIn("80", kw["caption"])
+        self.assertNotIn("@boss", kw["caption"])                     # личные сообщения — никого не пингуем
+        self.assertEqual([b.callback_data for row in kw["reply_markup"].inline_keyboard for b in row], ["tpchk:ok:1", "tpchk:no:1"])
+        self.assertEqual(self.news[-1][1], topup.CARD_PROCESSING_TEXT)
+        order = self.repo.orders[1]
+        self.assertEqual((order.status, order.method, order.fiat_amount), ("review", "card", Decimal("80.00")))
+        self.assertEqual(len(topup._receipt_msgs[1]), 2)
+
+    def test_admin_approves_once_and_other_copy_is_updated(self):
+        self._send_receipt()
+        order = self.repo.orders[1]
+        (c1, m1), (c2, m2) = topup._receipt_msgs[1]
+
+        async def go():
             # не админ — ничего не выдаётся
-            await self.mod.on_callback(self.call(ok, uid=999, chat=-100), self.bot)
+            await topup._decide(self.call("tpchk:ok:1", uid=999, chat=c1, msg_id=m1), self.check, "ok", 1)
             self.assertEqual((order.status, self.repo.balance[(1, 5)]), ("review", 10))
-            # админ — выдаётся ровно один раз
-            await self.mod.on_callback(self.call(ok, uid=101, chat=-100), self.bot)
+            # админ — выдаётся ровно один раз; пользователю пишет бот-магазин
+            await topup._decide(self.call("tpchk:ok:1", uid=101, chat=c1, msg_id=m1), self.check, "ok", 1)
             self.assertEqual((order.status, self.repo.balance[(1, 5)]), ("credited", 110))
-            self.assertIn("✅ Выдано 100🍬 за 80₽", self.bot.edits_caption[-1]["caption"])
             self.assertEqual(self.news[-1][1], "🍭 Вы приобрели 100🍬 за 80₽")
-            await self.mod.on_callback(self.call(ok, uid=101, chat=-100), self.bot)
-            self.assertEqual(self.repo.balance[(1, 5)], 110)
-        self.run_(go())
-
-    def test_reject_gives_nothing(self):
-        k = self.mod.keys
-
-        async def go():
-            oid = await self.repo.create_topup_order(1, 5, 50, "card", "RUB", Decimal("40"), status="review", receipt_sender="@u")
-            await self.mod.on_callback(self.call(k.cb("no", oid), uid=101, chat=-100), self.bot)
-            self.assertEqual((self.repo.orders[oid].status, self.repo.balance[(1, 5)]), ("rejected", 10))
-            self.assertEqual(self.news[-1][1].startswith("❌ Чек не подтверждён"), True)
-        self.run_(go())
-
-    def test_receipt_goes_through_check_bot_and_it_handles_buttons(self):
-        """С CHECK_BOT_TOKEN чек уходит ботом для чеков (файл перезагружается), кнопки обрабатывает он же."""
-        check = Bot()
-        shop_notices = self.news
-        saved = (topup.CHECK_BOT_TOKEN, topup._ensure_check_bot, topup._input_file)
-        topup.CHECK_BOT_TOKEN = "check-token"
-        topup._ensure_check_bot = lambda: check
-        topup._input_file = lambda data, name: NS(data=data, name=name)
-        k = self.mod.keys
-
-        async def go():
-            await self.mod.on_callback(self.call(k.cb("open")), self.bot)
-            await self.mod.on_message(self.msg("100"), self.bot)
-            await self.mod.on_callback(self.call(k.cb("card")), self.bot)
-            await self.mod.on_callback(self.call(k.cb("paid")), self.bot)
-            await self.mod.on_message(self.msg(None, photo=True), self.bot)
-            self.assertEqual(self.bot.sent, [])                      # бот-магазин в чат админов ничего не шлёт
-            kind, chat, kw = check.sent[-1]
-            self.assertEqual((kind, chat), ("photo", -100))
-            self.assertEqual((kw["photo"].data, kw["photo"].name), (b"IMG:F1", "receipt.jpg"))
-            self.assertEqual(self.bot.downloaded, ["F1"])
-            self.assertIn("@boss", kw["caption"])
-            order = self.repo.orders[1]
-            ok = kw["reply_markup"].inline_keyboard[0][0].callback_data
-            self.assertEqual(ok, "tpchk:ok:1")
-            # нажатие приходит боту для чеков: не админ — ничего, админ — выдаёт один раз, пользователю пишет бот-магазин
-            await topup._decide(self.call(ok, uid=999, chat=-100), check, "ok", 1)
-            self.assertEqual((order.status, self.repo.balance[(1, 5)]), ("review", 10))
-            await topup._decide(self.call(ok, uid=101, chat=-100), check, "ok", 1)
-            self.assertEqual((order.status, self.repo.balance[(1, 5)]), ("credited", 110))
-            self.assertIn("✅ Выдано 100🍬 за 80₽", check.edits_caption[-1]["caption"])
+            # обе копии чека (у обоих админов) обновлены, кнопок нет
+            edited = {(e["chat_id"], e["message_id"]) for e in self.check.edits_caption}
+            self.assertEqual(edited, {(c1, m1), (c2, m2)})
+            self.assertIn("✅ Выдано 100🍬 за 80₽", self.check.edits_caption[-1]["caption"])
+            self.assertIn("@u", self.check.edits_caption[-1]["caption"])
+            self.assertTrue(all(e["reply_markup"] is None for e in self.check.edits_caption))
             self.assertEqual(self.bot.edits_caption, [])
-            self.assertEqual(shop_notices[-1][1], "🍭 Вы приобрели 100🍬 за 80₽")
-            await topup._decide(self.call(ok, uid=101, chat=-100), check, "ok", 1)
+            # второй админ жмёт на устаревшую копию — «уже обработан», баланс не меняется
+            await topup._decide(self.call("tpchk:ok:1", uid=102, chat=c2, msg_id=m2), self.check, "ok", 1)
+            self.assertEqual(self.alerts[-1], "Этот чек уже обработан.")
             self.assertEqual(self.repo.balance[(1, 5)], 110)
+        self.run_(go())
 
-        try:
-            self.run_(go())
-        finally:
-            topup.CHECK_BOT_TOKEN, topup._ensure_check_bot, topup._input_file = saved
-
-    def test_check_bot_reject_notifies_user_via_shop_bot(self):
-        check = Bot()
-        k = self.mod.keys
-
+    def test_reject_gives_nothing_and_notifies_user(self):
         async def go():
             oid = await self.repo.create_topup_order(1, 5, 50, "card", "RUB", Decimal("40"), status="review", receipt_sender="@u")
-            await topup._decide(self.call(f"tpchk:no:{oid}", uid=101, chat=-100), check, "no", oid)
+            await topup._decide(self.call(f"tpchk:no:{oid}", uid=101, chat=101), self.check, "no", oid)
             self.assertEqual((self.repo.orders[oid].status, self.repo.balance[(1, 5)]), ("rejected", 10))
             self.assertTrue(self.news[-1][1].startswith("❌ Чек не подтверждён"))
+            self.assertIn("❌ Отказано", self.check.edits_caption[-1]["caption"])
         self.run_(go())
 
-    def test_card_unavailable_without_admin_chat(self):
-        topup.admin_chat_id = lambda: None
+    def test_group_is_optional_but_still_works(self):
+        topup.receipt_targets = lambda: [-100]
+        self._send_receipt()
+        kind, chat, kw = self.check.sent[-1]
+        self.assertEqual((kind, chat), ("photo", -100))
+        self.assertIn("@boss", kw["caption"])
+        self.assertNotIn("somebot", kw["caption"])
+
+        async def go():
+            await topup._decide(self.call("tpchk:ok:1", uid=999, chat=-100), self.check, "ok", 1)   # не админ группы
+            self.assertEqual(self.repo.orders[1].status, "review")
+            await topup._decide(self.call("tpchk:ok:1", uid=101, chat=-100), self.check, "ok", 1)   # админ группы
+            self.assertEqual(self.repo.orders[1].status, "credited")
+        self.run_(go())
+
+    def test_undeliverable_receipt_is_rejected_and_user_told(self):
+        async def boom(chat_id, **kw):
+            raise RuntimeError("Forbidden: bot can't initiate conversation with a user")
+        self.check.send_photo = boom
+        self._send_receipt()
+        self.assertEqual(self.repo.orders[1].status, "rejected")
+        self.assertEqual(self.news[-1][1], "❌ Не удалось отправить чек на проверку. Попробуйте позже.")
+        self.assertNotIn(1, topup._receipt_msgs)
+
+    def test_partial_delivery_is_enough(self):
+        real = self.check.send_photo
+
+        async def only_102(chat_id, **kw):
+            if chat_id == 101:
+                raise RuntimeError("admin has not pressed /start")
+            return await real(chat_id, **kw)
+        self.check.send_photo = only_102
+        self._send_receipt()
+        self.assertEqual(self.repo.orders[1].status, "review")
+        self.assertEqual([c for c, _ in topup._receipt_msgs[1]], [102])
+
+    def test_pending_resends_receipts_through_shop_bot_file(self):
+        async def go():
+            oid = await self.repo.create_topup_order(1, 5, 70, "card", "RUB", Decimal("56"), status="review",
+                                                     receipt_file_id="OLD", receipt_sender="@u")
+            await self.repo.create_topup_order(1, 5, 10, "card", "RUB", Decimal("8"), status="credited", receipt_file_id="DONE")
+            n = await topup._send_pending(self.check, 101)
+            self.assertEqual(n, 1)
+            kind, chat, kw = self.check.sent[-1]
+            self.assertEqual((kind, chat, self.bot.files), ("photo", 101, ["OLD"]))
+            self.assertEqual(kw["reply_markup"].inline_keyboard[0][0].callback_data, f"tpchk:ok:{oid}")
+            self.assertEqual(await topup._send_pending(self.check, 101), 1)   # снова пришлёт, пока чек не разобран
+        self.run_(go())
+
+    def test_admin_check_by_user_id_in_private_chat(self):
+        async def go():
+            self.assertTrue(await topup._is_admin(self.check, 101, 101))
+            self.assertFalse(await topup._is_admin(self.check, 101, 999))     # чужой человек в чужом чате
+            self.assertFalse(await topup._is_admin(self.check, 777, 777))     # не в списке админов
+        self.run_(go())
+
+    def test_card_unavailable_without_admins_or_check_bot(self):
         k = self.mod.keys
 
         async def go():
             await self.mod.on_callback(self.call(k.cb("open")), self.bot)
             await self.mod.on_message(self.msg("100"), self.bot)
+            topup.receipt_targets = lambda: []
+            await self.mod.on_callback(self.call(k.cb("card")), self.bot)
+            self.assertEqual(self.alerts[-1], "❌ Оплата картой сейчас недоступна.")
+            topup.receipt_targets = lambda: [101]
+            topup.CHECK_BOT_TOKEN = ""
             await self.mod.on_callback(self.call(k.cb("card")), self.bot)
             self.assertEqual(self.alerts[-1], "❌ Оплата картой сейчас недоступна.")
         self.run_(go())
@@ -392,7 +461,12 @@ class FlowTests(unittest.TestCase):
             topup._crypto_post = paid_post
             await topup._check_invoices()
             self.assertEqual((self.repo.orders[1].status, self.repo.balance[(1, 5)], topup._watch), ("credited", 310, {}))
-            self.assertIn("Вы успешно купили 300🍬", self.screens[-1][1])
+            # экран счёта не редактируется: «успешно оплачен» приходит новым сообщением, сообщение со счётом удаляется
+            invoice_msg = 900 + len(self.screens)
+            self.assertEqual(self.repo.orders[1].screen_message_id, invoice_msg)
+            self.assertIn("Вы успешно купили 300🍬", self.news[-2][1])
+            self.assertEqual(self.deleted[-1], invoice_msg)
+            self.assertEqual(self.mod.state(5).message_id, self.bot.next_id - 1)
             self.assertEqual(self.news[-1][1], "🍭 Вы приобрели 300🍬 за 3$")
             await topup._check_invoices()                                          # повторная проверка ничего не добавляет
             self.assertEqual(self.repo.balance[(1, 5)], 310)
