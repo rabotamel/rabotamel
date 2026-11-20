@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -13,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import auth, avatars, moderation, push, repo, sandbox, shop
+from . import auth, avatars, moderation, push, repo, sandbox, shop, shop_io
 from .metrics import metrics
 from .events import bus
 from .models import STATUS_ACTIVE, STATUS_QUEUED
@@ -101,6 +103,11 @@ class ConfirmIn(BaseModel):
 
 class ModeratorIn(BaseModel):
     target: str = ""  # @username, username или Telegram user_id
+
+
+class ShopImportIn(BaseModel):
+    text: str = ""
+    confirm: bool = False   # False — только проверить файл и показать, что будет заменено; True — применить
 
 
 class ProductIn(BaseModel):
@@ -567,6 +574,38 @@ async def delete_shop_product(product_id: int):
         raise HTTPException(404, "Товар не найден")
     bus.publish({"type": "changed"})
     return {"ok": True}
+
+
+@api.get("/shop/export")
+async def export_shop_products():
+    """Весь каталог (и скрытые товары, в порядке показа) одним .txt-файлом UTF-8."""
+    text = shop_io.export_products(await repo.list_shop_products(only_visible=False))
+    name = f"shop-products-{datetime.now().strftime('%Y%m%d-%H%M')}.txt"
+    return Response(
+        text, media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"},
+    )
+
+
+@api.post("/shop/import")
+async def import_shop_products(body: ShopImportIn):
+    """Восстановление каталога из файла экспорта. Без confirm — только проверка (ничего не меняется); с confirm: true
+    текущие товары заменяются товарами из файла одной транзакцией. Повреждённый файл -> 400, каталог не тронут."""
+    try:
+        items = shop_io.parse_products(body.text)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    current = len(await repo.list_shop_products(only_visible=False))
+    if not body.confirm:
+        return {"ok": True, "applied": False, "count": len(items), "current": current,
+                "names": [it.name for it in items[:10]]}
+    try:
+        await repo.replace_shop_products(items)
+    except Exception:
+        logging.getLogger("bot.web").exception("Восстановление товаров из файла не удалось")
+        raise HTTPException(500, "Не удалось восстановить товары, текущие товары не изменены")
+    bus.publish({"type": "changed"})
+    return {"ok": True, "applied": True, "count": len(items), "current": current}
 
 
 @api.post("/push/subscribe")

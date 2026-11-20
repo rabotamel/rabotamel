@@ -285,8 +285,66 @@ def _balanced(text: str) -> bool:
     return not stack
 
 
-def format_about(raw: str | None) -> str:
-    """Описание товара «как введено» -> безопасный HTML для Telegram (см. правила выше). Пустое описание — пустая строка."""
+# ---------- варианты фраз [вариант1/вариант2] ----------
+# Синтаксис: в квадратных скобках хотя бы один «/» — выбирается ОДИН вариант: «Привет [товарищ/друг]!».
+# Варианты обрезаются по краям от пробелов, пустой вариант допустим («[очень/]» — слово можно не писать); несколько
+# конструкций и вложенность («[а/б [в/г]]») поддерживаются. Не трогаются: скобки без «/», незакрытые/лишние скобки,
+# ссылки `[текст](https://…)`, скобки с «://» внутри и всё внутри `кода`.
+# Выбор детерминирован: sha256(seed бота | id товара | какой раз встречается тот же набор вариантов | сам набор) —
+# у одного бота текст всегда один и тот же, у разных ботов (разные seed) выбор различается, а одинаковые «слоты»
+# внутри описания выбирают независимо. Добавление новой конструкции не меняет выбор в остальных.
+_L, _R, _SL = "\x01", "\x02", "\x03"   # маски для скобок/слэшей, которые остаются текстом
+
+
+def _pick(options: list[str], seed: str, product_id: int, counts: dict[str, int]) -> str:
+    key = "/".join(options)
+    n = counts.get(key, 0)
+    counts[key] = n + 1
+    digest = hashlib.sha256(f"{seed}|{product_id}|{n}|{key}".encode()).digest()
+    return options[int.from_bytes(digest[:8], "big") % len(options)]
+
+
+def _resolve_segment(text: str, seed: str, product_id: int, counts: dict[str, int]) -> str:
+    stack: list[list[str]] = [[]]
+    for i, ch in enumerate(text):
+        if ch == "[":
+            stack.append([])
+        elif ch == "]" and len(stack) > 1:
+            content = "".join(stack.pop())
+            is_link = text.startswith(("(http://", "(https://"), i + 1)
+            if "/" in content and "://" not in content and not is_link:
+                stack[-1].append(_pick([o.strip() for o in content.split("/")], seed, product_id, counts))
+            else:  # не вариант: скобки и «/» внутри прячем, чтобы внешняя конструкция их не разбирала
+                stack[-1].append(_L + content.replace("/", _SL) + _R)
+        else:
+            stack[-1].append(ch)
+    while len(stack) > 1:  # незакрытая «[» — обычный текст
+        content = "".join(stack.pop())
+        stack[-1].append(_L + content.replace("/", _SL))
+    return "".join(stack[0])
+
+
+def resolve_variants(raw: str | None, seed: str, product_id: int = 0) -> str:
+    """Подставляет по одному варианту вместо каждой конструкции [а/б] (правила выше). Без «[» возвращает текст как есть."""
+    text = raw or ""
+    if "[" not in text:
+        return text
+    counts: dict[str, int] = {}
+    parts, pos = [], 0
+    for m in _CODE_RE.finditer(text):       # код `...` не трогаем
+        parts.append(_resolve_segment(text[pos:m.start()], seed, product_id, counts))
+        parts.append(m.group(0))
+        pos = m.end()
+    parts.append(_resolve_segment(text[pos:], seed, product_id, counts))
+    return "".join(parts).replace(_L, "[").replace(_R, "]").replace(_SL, "/")
+
+
+def format_about(raw: str | None, seed: str | None = None, product_id: int = 0) -> str:
+    """Описание товара «как введено» -> безопасный HTML для Telegram (см. правила выше). Пустое описание — пустая строка.
+    seed (seed бота) задан — сначала из [а/б] выбираются варианты этого бота, затем идут оформление и экранирование;
+    seed=None — варианты не разворачиваются (текст как введён)."""
+    if seed is not None:
+        raw = resolve_variants(raw, seed, product_id)
     text = html.escape((raw or "").replace("\r\n", "\n").replace("\r", "\n").strip(), quote=False)
     if not text:
         return ""
@@ -329,14 +387,15 @@ def render_menu(heading: str, balance: int) -> str:
     )
 
 
-def render_product(p: Product) -> str:
-    """Карточка товара (HTML): название без « — 6789🍬», цена отдельной строкой, описание из БД с оформлением."""
+def render_product(p: Product, seed: str = "") -> str:
+    """Карточка товара (HTML): название без « — 6789🍬», цена отдельной строкой, описание из БД с оформлением.
+    seed — seed бота: по нему из [а/б] в описании выбираются варианты (у одного бота всегда одни и те же)."""
     text = (
         f"<b>📦 Товар:</b> {html.escape(p.name, quote=False)}\n"
         f"{BALANCE_EMOJI} <b>Цена:</b> {int(p.price)}{CANDY}\n\n"
         f"<b>ℹ️ О товаре:</b>"
     )
-    about = format_about(p.about)
+    about = format_about(p.about, seed, p.id)
     return f"{text}\n\n{about}" if about else text
 
 

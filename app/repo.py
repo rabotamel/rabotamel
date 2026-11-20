@@ -4,7 +4,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import bindparam, delete, func, or_, select, update
+from sqlalchemy import bindparam, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -631,6 +631,29 @@ async def reorder_shop_products(ids: list[int]) -> None:
         seen = {r.id for r in ordered}
         for pos, r in enumerate(ordered + [r for r in rows if r.id not in seen], start=1):
             r.position = pos
+
+
+async def replace_shop_products(items) -> int:
+    """Восстановление каталога из файла: ВСЕ текущие товары заменяются товарами из `items` (shop_io.Item) в их порядке —
+    одной транзакцией: при любой ошибке текущий каталог остаётся нетронутым. Товары с id сохраняют его (от id зависят
+    выбор вариантов и кнопки), товары без id получают новые. Возвращает число товаров."""
+    items = list(items)
+    async with db.SessionLocal() as s, s.begin():
+        await s.execute(delete(ShopProduct))
+        def make(pos, it):
+            return ShopProduct(id=it.id, name=it.name, price=it.price, about=it.about, color=it.color,
+                               position=pos, is_visible=it.visible)
+        with_id = [make(pos, it) for pos, it in enumerate(items, start=1) if it.id is not None]
+        s.add_all(with_id)
+        await s.flush()
+        # счётчик id — за максимальный сохранённый id, чтобы новые товары не столкнулись с восстановленными
+        await s.execute(text(
+            "SELECT setval(pg_get_serial_sequence('shop_products', 'id'), GREATEST(COALESCE(MAX(id), 0), 1), "
+            "COALESCE(MAX(id), 0) >= 1) FROM shop_products"
+        ))
+        s.add_all([make(pos, it) for pos, it in enumerate(items, start=1) if it.id is None])
+        await s.flush()
+    return len(items)
 
 
 # ---------- рандомизируемые сообщения и аватарки ----------

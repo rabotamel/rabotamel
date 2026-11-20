@@ -412,7 +412,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
                 await show_shop_menu(call, bot, user_id)
                 return
             product = shop.product_from_row(row)
-            await show_screen(call, bot, user_id, shop.render_product(product),
+            seed = str(getattr(profile, "token", None) or stats.bot_id)   # seed бота: токен (как у остальных текстов)
+            await show_screen(call, bot, user_id, shop.render_product(product, seed),
                               shop.build_product_keyboard(texts.shop_menu, product))
         elif action == "product_back":
             await show_shop_menu(call, bot, user_id)

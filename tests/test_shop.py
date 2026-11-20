@@ -168,6 +168,82 @@ class FormatAboutTests(unittest.TestCase):
         self.assertEqual(shop.format_about("  \n "), "")
 
 
+class VariantsTests(unittest.TestCase):
+    R = staticmethod(shop.resolve_variants)
+
+    def test_picks_one_of_the_options_and_trims(self):
+        for i in range(50):
+            out = self.R("Привет [ товарищ / друг ]!", f"s{i}", 1)
+            self.assertIn(out, ("Привет товарищ!", "Привет друг!"))
+
+    def test_deterministic_per_bot_and_differs_between_bots(self):
+        text = "[a/b] [c/d] [e/f] [g/h] [i/j] [k/l] [m/n] [o/p]"
+        self.assertEqual(self.R(text, "bot-1", 7), self.R(text, "bot-1", 7))
+        outs = {self.R(text, f"bot-{i}", 7) for i in range(40)}
+        self.assertGreater(len(outs), 20)
+
+    def test_all_options_occur_across_bots(self):
+        self.assertEqual({self.R("[x/y/z]", f"b{i}") for i in range(200)}, {"x", "y", "z"})
+
+    def test_same_slots_choose_independently_and_adding_slot_keeps_others(self):
+        seen = {self.R("[a/b] [a/b]", f"b{i}") for i in range(100)}
+        self.assertEqual(seen, {"a a", "a b", "b a", "b b"})          # одинаковые слоты не обязаны совпадать
+        for i in range(100):
+            seed = f"b{i}"
+            first = self.R("[a/b] и [c/d]", seed, 3).split(" и ")
+            second = self.R("[e/f] [a/b] и [c/d]", seed, 3).split(" ")
+            self.assertEqual(second[1:], [first[0], "и", first[1]])    # прежние слоты не поменялись
+
+    def test_product_id_changes_choices(self):
+        text = "[a/b] [c/d] [e/f] [g/h] [i/j] [k/l]"
+        self.assertGreater(len({self.R(text, "bot", pid) for pid in range(1, 30)}), 5)
+
+    def test_nesting_and_multiline(self):
+        for i in range(60):
+            out = self.R("[а/б [в/г]]\nстрока [д/е]", f"n{i}")
+            first, second = out.split("\n")
+            self.assertIn(first, ("а", "б в", "б г"))
+            self.assertIn(second, ("строка д", "строка е"))
+
+    def test_left_untouched(self):
+        for raw in ("[нет слэша]", "[не закрыт/ нет", "лишняя ] скобка", "a/b", "[]", "[x] [y]", "[https://a.b/c]",
+                    "[текст/вариант](https://a.b/c)", "`[a/b]`", "[[a]]", ""):
+            self.assertEqual(self.R(raw, "s", 1), raw, raw)
+
+    def test_unclosed_outer_does_not_break_inner(self):
+        out = self.R("[не закрыт [a/b]", "s")
+        self.assertIn(out, ("[не закрыт a", "[не закрыт b"))
+
+    def test_empty_option_allowed(self):
+        self.assertEqual({self.R("очень [ красиво/]", f"e{i}") for i in range(100)}, {"очень красиво", "очень "})
+
+    def test_works_with_formatting_and_escaping(self):
+        outs = {shop.format_about("**[Жирный/Крепкий]** <b> [a&b/a&b] [нет]", f"f{i}", 2) for i in range(60)}
+        self.assertEqual(outs, {"<b>Жирный</b> &lt;b&gt; a&amp;b [нет]", "<b>Крепкий</b> &lt;b&gt; a&amp;b [нет]"})
+        # вариант с маркерами оформления форматируется после выбора
+        self.assertIn(shop.format_about("[**а**/**а**]", "s"), ("<b>а</b>",))
+        # ссылка с «/» в тексте остаётся ссылкой
+        self.assertEqual(shop.format_about("[a/b](https://x.ru)", "s"), '<a href="https://x.ru">a/b</a>')
+        # без seed варианты не разворачиваются
+        self.assertEqual(shop.format_about("[a/b]"), "[a/b]")
+
+    def test_html_stays_balanced_on_random_input(self):
+        import random
+        rng = random.Random(3)
+        alphabet = ["[", "]", "/", "**", "__", "*", "a", " ", "(https://a.b)", "`", "~~", "||", "<", "&"]
+        for _ in range(3000):
+            raw = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 16)))
+            self.assertTrue(shop._balanced(shop.format_about(raw, "seed", 1)), raw)
+
+    def test_render_product_uses_bot_seed_and_is_stable(self):
+        p = shop.Product(id=4, name="N", price=1, about="Привет [товарищ/друг]! Как [твои дела/поживаешь]?")
+        cards = {shop.render_product(p, f"tok{i}") for i in range(60)}
+        self.assertEqual(len(cards), 4)
+        for i in range(10):
+            self.assertEqual(shop.render_product(p, "tok1"), shop.render_product(p, "tok1"))
+            self.assertNotIn("[", shop.render_product(p, f"tok{i}"))
+
+
 class ShopInputTests(unittest.TestCase):
     def test_color(self):
         self.assertEqual([shop.normalize_color(c) for c in ("", None, "Красный", "green", "success", "синий", "default")],
