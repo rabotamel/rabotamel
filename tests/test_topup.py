@@ -37,21 +37,40 @@ class PureTests(unittest.TestCase):
 
     def test_texts_use_same_payment_data(self):
         self.assertEqual(topup.CARD_NUMBER, "5599002131738728")
-        self.assertIn("1🍬 ➜ 0,8₽ ➜ 0,01$ ➜ 1⭐", topup.methods_text(None))
-        t = topup.methods_text(250)
-        self.assertIn("<b>200₽</b>", t)
-        self.assertIn("<b>2,5$</b>", t)
-        self.assertIn("<b>250⭐</b>", t)
+        self.assertEqual(
+            topup.methods_text(None),
+            "💳 Оплата проходит автоматически, данные карты мы не храним. Конфеты зачисляются сразу после оплаты.\n\n"
+            "👇 Введите желаемое количество конфет и выберите удобный метод оплаты.\n\n"
+            "🍭 Выбрано для покупки: 0🍬\n(Курс: 1🍬 ≈ 0,01$)",
+        )
+        self.assertIn("🍭 Выбрано для покупки: 250🍬\n(Курс: 1🍬 ≈ 0,01$)", topup.methods_text(250))
+        self.assertEqual(topup.methods_text(0), topup.methods_text(None))
         self.assertIn("<code>5599002131738728</code>", topup.card_text(250))
         self.assertIn("200₽", topup.card_text(250))
 
     def test_button_label_and_rows(self):
         k = topup.Keys.for_seed("s")
         self.assertEqual(topup.menu_row(k), [("🍭 Купить конфеты 🍬", k.cb("open"), "primary")])
-        ready, notready = topup.methods_rows(k, True), topup.methods_rows(k, False)
+        ready, notready = topup.methods_rows(k, 250), topup.methods_rows(k, None)
         self.assertEqual([r[0][3] for r in ready], ["success", "success", "success", "danger"])
-        self.assertEqual([r[0][3] for r in notready], [None, None, None, "danger"])
+        self.assertEqual([r[0][0] for r in ready[:3]], ["💫 Telegram Stars ≈ 250⭐", "🤖 CryptoBot ≈ 2,5$", "💳 По карте ≈ 200₽"])
+        self.assertEqual([r[0][1] for r in ready[:3]], [k.cb("stars"), k.cb("crypto"), k.cb("card")])
+        # до ввода суммы: нули, серые (disabled) и без callback_data — нажать нельзя
+        self.assertEqual([r[0][3] for r in notready], [topup.DISABLED] * 3 + ["danger"])
+        self.assertEqual([r[0][0] for r in notready[:3]], ["💫 Telegram Stars ≈ 0⭐", "🤖 CryptoBot ≈ 0$", "💳 По карте ≈ 0₽"])
+        self.assertEqual([(r[0][1], r[0][2]) for r in notready[:3]], [(None, None)] * 3)
         self.assertEqual(ready[-1][0][0], "⬅️ Назад")
+        self.assertEqual(topup.methods_rows(k, 0), notready)
+
+    def test_disabled_buttons_have_no_callback_in_markup(self):
+        k = topup.Keys.for_seed("s")
+        buttons = [b for row in topup.markup(topup.methods_rows(k, None)).inline_keyboard for b in row]
+        for b in buttons[:3]:
+            self.assertTrue(hasattr(b, "disabled"))
+            self.assertFalse(hasattr(b, "callback_data") or hasattr(b, "style"))
+        self.assertEqual((buttons[3].callback_data, buttons[3].style), (k.cb("back"), "danger"))
+        live = [b for row in topup.markup(topup.methods_rows(k, 5)).inline_keyboard for b in row]
+        self.assertTrue(all(hasattr(b, "callback_data") and not hasattr(b, "disabled") for b in live))
 
 
 class FakeRepo:
@@ -128,6 +147,11 @@ class Bot:
 
     async def edit_message_reply_markup(self, **kw):
         pass
+
+    async def download(self, file_id, destination=None, **kw):
+        self.downloaded = getattr(self, "downloaded", []) + [file_id]
+        destination.write(b"IMG:" + file_id.encode())
+        return destination
 
 
 class FlowTests(unittest.TestCase):
@@ -259,6 +283,58 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(self.news[-1][1].startswith("❌ Чек не подтверждён"), True)
         self.run_(go())
 
+    def test_receipt_goes_through_check_bot_and_it_handles_buttons(self):
+        """С CHECK_BOT_TOKEN чек уходит ботом для чеков (файл перезагружается), кнопки обрабатывает он же."""
+        check = Bot()
+        shop_notices = self.news
+        saved = (topup.CHECK_BOT_TOKEN, topup._ensure_check_bot, topup._input_file)
+        topup.CHECK_BOT_TOKEN = "check-token"
+        topup._ensure_check_bot = lambda: check
+        topup._input_file = lambda data, name: NS(data=data, name=name)
+        k = self.mod.keys
+
+        async def go():
+            await self.mod.on_callback(self.call(k.cb("open")), self.bot)
+            await self.mod.on_message(self.msg("100"), self.bot)
+            await self.mod.on_callback(self.call(k.cb("card")), self.bot)
+            await self.mod.on_callback(self.call(k.cb("paid")), self.bot)
+            await self.mod.on_message(self.msg(None, photo=True), self.bot)
+            self.assertEqual(self.bot.sent, [])                      # бот-магазин в чат админов ничего не шлёт
+            kind, chat, kw = check.sent[-1]
+            self.assertEqual((kind, chat), ("photo", -100))
+            self.assertEqual((kw["photo"].data, kw["photo"].name), (b"IMG:F1", "receipt.jpg"))
+            self.assertEqual(self.bot.downloaded, ["F1"])
+            self.assertIn("@boss", kw["caption"])
+            order = self.repo.orders[1]
+            ok = kw["reply_markup"].inline_keyboard[0][0].callback_data
+            self.assertEqual(ok, "tpchk:ok:1")
+            # нажатие приходит боту для чеков: не админ — ничего, админ — выдаёт один раз, пользователю пишет бот-магазин
+            await topup._decide(self.call(ok, uid=999, chat=-100), check, "ok", 1)
+            self.assertEqual((order.status, self.repo.balance[(1, 5)]), ("review", 10))
+            await topup._decide(self.call(ok, uid=101, chat=-100), check, "ok", 1)
+            self.assertEqual((order.status, self.repo.balance[(1, 5)]), ("credited", 110))
+            self.assertIn("✅ Выдано 100🍬 за 80₽", check.edits_caption[-1]["caption"])
+            self.assertEqual(self.bot.edits_caption, [])
+            self.assertEqual(shop_notices[-1][1], "🍭 Вы приобрели 100🍬 за 80₽")
+            await topup._decide(self.call(ok, uid=101, chat=-100), check, "ok", 1)
+            self.assertEqual(self.repo.balance[(1, 5)], 110)
+
+        try:
+            self.run_(go())
+        finally:
+            topup.CHECK_BOT_TOKEN, topup._ensure_check_bot, topup._input_file = saved
+
+    def test_check_bot_reject_notifies_user_via_shop_bot(self):
+        check = Bot()
+        k = self.mod.keys
+
+        async def go():
+            oid = await self.repo.create_topup_order(1, 5, 50, "card", "RUB", Decimal("40"), status="review", receipt_sender="@u")
+            await topup._decide(self.call(f"tpchk:no:{oid}", uid=101, chat=-100), check, "no", oid)
+            self.assertEqual((self.repo.orders[oid].status, self.repo.balance[(1, 5)]), ("rejected", 10))
+            self.assertTrue(self.news[-1][1].startswith("❌ Чек не подтверждён"))
+        self.run_(go())
+
     def test_card_unavailable_without_admin_chat(self):
         topup.admin_chat_id = lambda: None
         k = self.mod.keys
@@ -269,6 +345,25 @@ class FlowTests(unittest.TestCase):
             await self.mod.on_callback(self.call(k.cb("card")), self.bot)
             self.assertEqual(self.alerts[-1], "❌ Оплата картой сейчас недоступна.")
         self.run_(go())
+
+    def test_stars_and_crypto_unavailable_without_tokens(self):
+        k = self.mod.keys
+        topup.CRYPTO_PAY_TOKEN = ""
+        saved = topup.STARS_BOT_TOKEN
+        topup.STARS_BOT_TOKEN = ""
+
+        async def go():
+            await self.mod.on_callback(self.call(k.cb("open")), self.bot)
+            await self.mod.on_message(self.msg("100"), self.bot)
+            await self.mod.on_callback(self.call(k.cb("stars")), self.bot)
+            self.assertEqual(self.alerts[-1], "❌ Оплата через Telegram Stars сейчас недоступна.")
+            await self.mod.on_callback(self.call(k.cb("crypto")), self.bot)
+            self.assertEqual(self.alerts[-1], "❌ Оплата через CryptoBot сейчас недоступна.")
+            self.assertEqual(self.repo.orders, {})
+        try:
+            self.run_(go())
+        finally:
+            topup.STARS_BOT_TOKEN = saved
 
     def test_crypto_invoice_reused_and_credited_once(self):
         k = self.mod.keys

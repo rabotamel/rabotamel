@@ -342,9 +342,12 @@ class ShopNavigationTests(unittest.TestCase):
             async def edit_message_caption(self, chat_id, message_id, caption, parse_mode, reply_markup):
                 edits.append(("caption", message_id, caption, reply_markup))
 
+        self.sent_markup = []
+
         async def fake_send(b, chat_id, text, image=None, reply_markup=None):
             b.next_id += 1
             sent.append((b.next_id, text))
+            self.sent_markup.append(reply_markup)
             return types.SimpleNamespace(message_id=b.next_id)
 
         async def fake_candies(bot_id, uid):
@@ -440,6 +443,32 @@ class ShopNavigationTests(unittest.TestCase):
             self.assertEqual(texts.shop_buttons.shop_label, edits[-1][3].inline_keyboard[0][0].text)
             self.assertEqual((sent, bot.deleted), ([], []))          # новых сообщений не было, ничего не удалялось
 
+        asyncio.run(go())
+
+    def test_long_card_goes_in_several_messages_and_cleans_up(self):
+        about = "".join(f"Строка описания номер {i} для проверки длинной карточки\n" for i in range(100))[:5000]
+        rows = [types.SimpleNamespace(id=1, name="Большой", price=10, about=about, color="", is_visible=True)]
+        bot, router, texts, call, edits, sent = self._setup(products=rows)
+        cfg = texts.shop_menu
+        parts = shop.render_product_parts(shop.product_from_row(rows[0]), "")
+        self.assertGreaterEqual(len(parts), 2)
+
+        async def go():
+            await router.handlers["on_shop_menu_button"](call(f"{cfg.product_cb}:1", msg_id=10), bot)
+            # первая часть заменила сообщение магазина (без кнопок), остальные пришли следом, кнопки — под последней
+            kind, mid, text, markup = edits[-1]
+            self.assertEqual((kind, mid, markup), ("text", 10, None))
+            self.assertEqual(len(sent), len(parts) - 1)
+            self.assertEqual([t for _, t in sent][-1][:20], parts[-1][:20])
+            self.assertTrue(all(m is None for m in self.sent_markup[:-1]))
+            self.assertEqual([b.text for b in self._buttons(self.sent_markup[-1])], ["🍭 Купить (10🍬)", "⬅️ Назад"])
+            last_id = sent[-1][0]
+            self.assertEqual(bot.deleted, [])
+            # «Назад» с последней части: меню — на месте этой части, верхние части удалены
+            await router.handlers["on_shop_menu_button"](call(cfg.product_back_cb, msg_id=last_id), bot)
+            self.assertEqual(edits[-1][1], last_id)
+            self.assertEqual(edits[-1][2], shop.render_menu(texts.shop_buttons.shop_label, 42))
+            self.assertEqual(sorted(bot.deleted), sorted([10] + [i for i, _ in sent[:-1]]))
         asyncio.run(go())
 
     def test_empty_catalog_menu_opens_with_back_button_only(self):

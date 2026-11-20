@@ -25,3 +25,5 @@ services:
         sync: false
       - key: TOPUP_ADMIN_GROUP_ID
         sync: false
+      - key: CHECK_BOT_TOKEN
+        sync: false

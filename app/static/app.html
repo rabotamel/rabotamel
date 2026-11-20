@@ -231,7 +231,8 @@
       <label for="shop-price">Цена</label>
       <input id="shop-price" type="text" inputmode="numeric" autocomplete="off" placeholder="100">
       <label for="shop-about">О товаре</label>
-      <textarea id="shop-about" maxlength="3900" placeholder="**Жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~"></textarea>
+      <textarea id="shop-about" maxlength="20000" placeholder="**Жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~"></textarea>
+      <p class="hint" id="shop-about-count">В Telegram — до 5000 символов (считается после выбора вариантов [а/б], без значков оформления). Здесь можно ввести больше — до 20000, скобки вариантов тоже считаются.</p>
       <p class="hint">Оформление: **жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~, ||спойлер||, `код`, [текст](https://адрес), «# Заголовок» в начале строки. В боте это превращается в настоящее форматирование.</p>
       <p class="hint">Варианты фраз: [вариант1/вариант2] — каждый бот получит свой постоянный вариант, например «Привет [товарищ/друг]! Как [твои дела/поживаешь]?». Можно несколько в тексте и вложенные: [а/б [в/г]]. Скобки без «/» остаются как есть.</p>
       <label for="shop-color">Цвет кнопки товара</label>
@@ -822,7 +823,7 @@ function renderShop() {
 
 function shopFormReset() {
   shopEditId = null;
-  $('#shop-name').value = ''; $('#shop-price').value = ''; $('#shop-about').value = '';
+  $('#shop-name').value = ''; $('#shop-price').value = ''; $('#shop-about').value = ''; updateAboutCount();
   $('#shop-color').value = ''; $('#shop-visible').checked = true;
   $('#shop-form-title').textContent = 'Добавить товар';
   $('#shop-save').textContent = 'Добавить';
@@ -832,6 +833,21 @@ function shopFormReset() {
 function shopBody(p) {
   return {name: p.name, price: String(p.price), about: p.about, color: p.color, visible: p.visible};
 }
+
+// счётчик под полем «О товаре»: считает сервер теми же правилами, что и при сохранении
+let aboutCountTimer = null;
+function updateAboutCount() {
+  clearTimeout(aboutCountTimer);
+  aboutCountTimer = setTimeout(async () => {
+    const el = $('#shop-about-count');
+    try {
+      const r = await api('POST', '/api/shop/about-length', {about: $('#shop-about').value});
+      el.textContent = 'Введено: ' + r.site + ' из ' + r.site_max + ' · в Telegram займёт до ' + r.telegram + ' из ' + r.telegram_max;
+      el.style.color = (r.telegram > r.telegram_max || r.site > r.site_max) ? 'var(--red, #d33)' : '';
+    } catch (err) { /* счётчик необязателен */ }
+  }, 300);
+}
+$('#shop-about').addEventListener('input', updateAboutCount);
 
 $('#shop-save').addEventListener('click', async () => {
   setMsg('#shop-msg', '');
@@ -864,7 +880,7 @@ $('#shop-list').addEventListener('click', async (e) => {
   try {
     if (d.shopEdit) {
       shopEditId = p.id;
-      $('#shop-name').value = p.name; $('#shop-price').value = p.price; $('#shop-about').value = p.about;
+      $('#shop-name').value = p.name; $('#shop-price').value = p.price; $('#shop-about').value = p.about; updateAboutCount();
       $('#shop-color').value = p.color; $('#shop-visible').checked = p.visible;
       $('#shop-form-title').textContent = 'Изменить товар';
       $('#shop-save').textContent = 'Сохранить';

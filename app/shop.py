@@ -58,7 +58,10 @@ COLOR_ALIASES = {
 }
 
 MAX_NAME = 64
-MAX_ABOUT = 3900   # лимит Telegram на текст сообщения — 4096; ~200 уходит на название, цену и заголовки карточки
+MAX_ABOUT = 5000       # лимит для Telegram: сколько символов описания пользователь реально увидит (после выбора вариантов
+                       # [а/б] и без значков оформления). Длиннее 4096 в одно сообщение не влезает — карточка уходит частями
+MAX_ABOUT_RAW = 20000  # лимит поля на сайте: считается как введено — вместе со скобками вариантов [а/б] и значками оформления
+PART_LIMIT = 4000      # сколько видимых символов кладём в одно сообщение (у Telegram предел 4096, берём с запасом)
 MAX_PRICE = 1_000_000_000
 MAX_PRODUCTS = 90   # у Telegram не больше 100 кнопок под сообщением; одна занята «Назад»
 
@@ -246,9 +249,18 @@ def normalize_price(value) -> int:
 
 
 def normalize_about(value: str | None) -> str:
+    """Описание товара «как введено». Два лимита: на сайте текст считается целиком (MAX_ABOUT_RAW, со скобками вариантов
+    [а/б] и значками оформления), а Telegram видит только выбранный вариант без значков — для него считаем худший случай
+    (в каждой скобке самый длинный вариант) и сравниваем с MAX_ABOUT."""
     about = (value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if len(about) > MAX_ABOUT:
-        raise ValueError(f"Описание товара — не длиннее {MAX_ABOUT} символов")
+    if len(about) > MAX_ABOUT_RAW:
+        raise ValueError(f"Описание товара — не длиннее {MAX_ABOUT_RAW} символов (считая скобки вариантов и значки оформления)")
+    shown = telegram_about_length(about)
+    if shown > MAX_ABOUT:
+        raise ValueError(
+            f"В Telegram описание займёт до {shown} символов, а можно не больше {MAX_ABOUT} "
+            "(считается уже после выбора вариантов [а/б], без значков оформления)"
+        )
     return about
 
 
@@ -296,7 +308,9 @@ def _balanced(text: str) -> bool:
 _L, _R, _SL = "\x01", "\x02", "\x03"   # маски для скобок/слэшей, которые остаются текстом
 
 
-def _pick(options: list[str], seed: str, product_id: int, counts: dict[str, int]) -> str:
+def _pick(options: list[str], seed: str, product_id: int, counts: dict[str, int], longest: bool = False) -> str:
+    if longest:   # режим проверки длины: берём самый длинный вариант (худший случай для лимита Telegram)
+        return max(options, key=len)
     key = "/".join(options)
     n = counts.get(key, 0)
     counts[key] = n + 1
@@ -304,7 +318,7 @@ def _pick(options: list[str], seed: str, product_id: int, counts: dict[str, int]
     return options[int.from_bytes(digest[:8], "big") % len(options)]
 
 
-def _resolve_segment(text: str, seed: str, product_id: int, counts: dict[str, int]) -> str:
+def _resolve_segment(text: str, seed: str, product_id: int, counts: dict[str, int], longest: bool = False) -> str:
     stack: list[list[str]] = [[]]
     for i, ch in enumerate(text):
         if ch == "[":
@@ -313,7 +327,7 @@ def _resolve_segment(text: str, seed: str, product_id: int, counts: dict[str, in
             content = "".join(stack.pop())
             is_link = text.startswith(("(http://", "(https://"), i + 1)
             if "/" in content and "://" not in content and not is_link:
-                stack[-1].append(_pick([o.strip() for o in content.split("/")], seed, product_id, counts))
+                stack[-1].append(_pick([o.strip() for o in content.split("/")], seed, product_id, counts, longest))
             else:  # не вариант: скобки и «/» внутри прячем, чтобы внешняя конструкция их не разбирала
                 stack[-1].append(_L + content.replace("/", _SL) + _R)
         else:
@@ -324,7 +338,7 @@ def _resolve_segment(text: str, seed: str, product_id: int, counts: dict[str, in
     return "".join(stack[0])
 
 
-def resolve_variants(raw: str | None, seed: str, product_id: int = 0) -> str:
+def resolve_variants(raw: str | None, seed: str, product_id: int = 0, *, longest: bool = False) -> str:
     """Подставляет по одному варианту вместо каждой конструкции [а/б] (правила выше). Без «[» возвращает текст как есть."""
     text = raw or ""
     if "[" not in text:
@@ -332,10 +346,10 @@ def resolve_variants(raw: str | None, seed: str, product_id: int = 0) -> str:
     counts: dict[str, int] = {}
     parts, pos = [], 0
     for m in _CODE_RE.finditer(text):       # код `...` не трогаем
-        parts.append(_resolve_segment(text[pos:m.start()], seed, product_id, counts))
+        parts.append(_resolve_segment(text[pos:m.start()], seed, product_id, counts, longest))
         parts.append(m.group(0))
         pos = m.end()
-    parts.append(_resolve_segment(text[pos:], seed, product_id, counts))
+    parts.append(_resolve_segment(text[pos:], seed, product_id, counts, longest))
     return "".join(parts).replace(_L, "[").replace(_R, "]").replace(_SL, "/")
 
 
@@ -364,6 +378,92 @@ def format_about(raw: str | None, seed: str | None = None, product_id: int = 0) 
     if not _balanced(text):
         return html.escape(raw.replace("\r\n", "\n").replace("\r", "\n").strip(), quote=False)
     return text
+
+
+# ---------- длина текста так, как её считает Telegram ----------
+_ANY_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def visible_length(markup: str) -> int:
+    """Сколько символов Telegram посчитает в HTML-тексте: теги не в счёт, &lt; &amp; … — по одному символу."""
+    return len(html.unescape(_ANY_TAG_RE.sub("", markup)))
+
+
+def telegram_about_length(raw: str | None) -> int:
+    """Худший случай длины описания в Telegram: в каждой [скобке/вариантов] берётся самый длинный вариант, затем
+    описание оформляется как при показе (значки ** __ и т. п. и адреса ссылок в длину не входят)."""
+    return visible_length(format_about(resolve_variants(raw, "", 0, longest=True)))
+
+
+# ---------- длинная карточка товара: разбиение на сообщения ----------
+_SPLIT_TOKEN_RE = re.compile(r"(<[^>]+>)")
+_ENTITY_OR_CHAR_RE = re.compile(r"&#?\w+;|.", re.S)
+
+
+def _text_pieces(text: str, limit: int):
+    """Куски текста (без тегов) не длиннее limit видимых символов: по строкам; слишком длинную строку — по словам;
+    слишком длинное слово — по символам (HTML-сущности вроде &amp; не рвутся)."""
+    for line in text.splitlines(keepends=True):
+        if visible_length(line) <= limit:
+            yield line
+            continue
+        for word in re.findall(r"\S+\s*|\s+", line):
+            if visible_length(word) <= limit:
+                yield word
+                continue
+            buf: list[str] = []
+            size = 0
+            for unit in _ENTITY_OR_CHAR_RE.findall(word):
+                w = len(html.unescape(unit))
+                if size + w > limit:
+                    yield "".join(buf)
+                    buf, size = [], 0
+                buf.append(unit)
+                size += w
+            if buf:
+                yield "".join(buf)
+
+
+def split_html(text: str, limit: int = PART_LIMIT) -> list[str]:
+    """Делит HTML-текст сообщения на части не длиннее limit видимых символов. Режет по строкам (если строка длиннее —
+    по словам); теги, открытые на границе, закрываются в конце части и открываются снова в начале следующей, поэтому
+    каждая часть — корректная разметка. Короткий текст возвращается одной частью без изменений."""
+    if visible_length(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    cur: list[str] = []
+    size = 0
+    stack: list[tuple[str, str]] = []   # (имя тега, тег целиком) — открытые на данный момент
+
+    def flush() -> None:
+        nonlocal cur, size
+        parts.append("".join(cur).rstrip() + "".join(f"</{name}>" for name, _ in reversed(stack)))
+        cur, size = ["".join(tag for _, tag in stack)], 0
+
+    for tok in _SPLIT_TOKEN_RE.split(text):
+        if not tok:
+            continue
+        m = re.match(r"<(/?)([\w-]+)", tok) if _SPLIT_TOKEN_RE.fullmatch(tok) else None
+        if m:
+            if m.group(1):
+                if stack and stack[-1][0] == m.group(2):
+                    stack.pop()
+            else:
+                stack.append((m.group(2), tok))
+            cur.append(tok)
+            continue
+        for piece in _text_pieces(tok, limit):
+            n = visible_length(piece)
+            if size + n > limit and size > 0:
+                flush()
+            if size == 0 and not piece.strip():
+                continue   # пустые строки в начале части не нужны
+            cur.append(piece)
+            size += n
+    body = "".join(cur)
+    if html.unescape(_ANY_TAG_RE.sub("", body)).strip():   # хвост из одних пробелов/тегов частью не считается
+        parts.append(body.rstrip() + "".join(f"</{name}>" for name, _ in reversed(stack)))
+    return parts
 
 
 # ---------- тексты сообщений ----------
@@ -397,6 +497,12 @@ def render_product(p: Product, seed: str = "") -> str:
     )
     about = format_about(p.about, seed, p.id)
     return f"{text}\n\n{about}" if about else text
+
+
+def render_product_parts(p: Product, seed: str = "") -> list[str]:
+    """Карточка товара одним или несколькими сообщениями: до MAX_ABOUT символов описания в одно сообщение
+    (4096) не влезают, поэтому длинная карточка делится по строкам (split_html). Кнопки крепятся к последней части."""
+    return split_html(render_product(p, seed))
 
 
 # ---------- клавиатуры и разбор нажатий ----------

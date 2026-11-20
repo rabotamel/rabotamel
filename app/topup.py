@@ -10,13 +10,14 @@
   * кнопки «Выдать / Отказать» под чеком доступны только администраторам чата, в который чек отправлен.
 
 Переменные окружения (те же имена): CRYPTO_PAY_TOKEN (или CRYPTO_BOT_TOKEN), STARS_BOT_TOKEN, TOPUP_CARD_NUMBER,
-TOPUP_ADMIN_GROUP_ID (или GROUP_ID, или ADMIN_CHAT_ID), а также CRYPTO_PAY_BASE_URL, CRYPTO_PAY_FIAT,
+TOPUP_ADMIN_GROUP_ID (или GROUP_ID, или ADMIN_CHAT_ID), CHECK_BOT_TOKEN (бот, который шлёт чеки по карте в чат админов), а также CRYPTO_PAY_BASE_URL, CRYPTO_PAY_FIAT,
 CRYPTO_PAY_ACCEPTED_ASSETS, TOPUP_INVOICE_EXPIRES, TOPUP_POLL_INTERVAL, STARS_BOT_TITLE, STARS_BOT_DESCRIPTION.
 Всё, что связано с aiogram / aiohttp, импортируется внутри функций: чистая логика (тексты, расчёты) проверяется без них.
 """
 import asyncio
 import hashlib
 import html
+import io
 import logging
 import os
 import re
@@ -42,6 +43,10 @@ POLL_INTERVAL = int(os.environ.get("TOPUP_POLL_INTERVAL", "10") or 10)
 STARS_BOT_TOKEN = _secret("STARS_BOT_TOKEN").strip()
 STARS_TITLE = os.environ.get("STARS_BOT_TITLE", "Покупка конфет").strip()
 STARS_DESCRIPTION = os.environ.get("STARS_BOT_DESCRIPTION", "Оплата покупки конфет через Telegram Stars").strip()
+# Бот для чеков по карте: именно он (а не бот-магазин, который крутится в ротации) отправляет чек в чат админов и
+# принимает нажатия «Выдать / Отказать». Его нужно добавить в этот чат. Без токена чеки шлёт сам бот-магазин.
+CHECK_BOT_TOKEN = _secret("CHECK_BOT_TOKEN").strip()
+CHECK_PREFIX = "tpchk"        # callback_data кнопок под чеком (общий для всех ботов-магазинов: «tpchk:ok:<id заказа>»)
 
 CANDY = "🍬"
 BUTTON_LABEL = "🍭 Купить конфеты 🍬"
@@ -113,22 +118,14 @@ class Keys:
 
 
 # ---------- тексты ----------
-RATE_LINE = "1🍬 ➜ 0,8₽ ➜ 0,01$ ➜ 1⭐"
-
-
 def methods_text(amount: int | None) -> str:
-    head = (
-        "<b>Курс конфет:</b>\n"
-        f"{RATE_LINE}\n\n"
-        "💳 Оплата проходит автоматически, данные карты мы не храним. Конфеты зачислятся сразу после оплаты. 🫰\n\n"
-    )
-    if amount is None:
-        return head + "👇 Введите желаемое количество конфет, чтобы узнать их цену."
+    """Экран выбора способа оплаты. Пока количество не введено, в «Выбрано для покупки» стоит 0."""
+    chosen = int(amount) if amount else 0
     return (
-        head
-        + f"🍭 За {amount}🍬 вы заплатите:\n"
-        f"— <b>{money(to_rub(amount))}₽</b> или <b>{money(to_usd(amount))}$</b> или <b>{money(to_stars(amount))}⭐</b>\n\n"
-        "👇 Выберите способ оплаты или введите другое количество конфет."
+        "💳 Оплата проходит автоматически, данные карты мы не храним. Конфеты зачисляются сразу после оплаты.\n\n"
+        "👇 Введите желаемое количество конфет и выберите удобный метод оплаты.\n\n"
+        f"🍭 Выбрано для покупки: {chosen}{CANDY}\n"
+        "(Курс: 1🍬 ≈ 0,01$)"
     )
 
 
@@ -220,12 +217,25 @@ def receipt_caption(order, mentions: str = "") -> str:
 Row = list[tuple[str, str | None, str | None, str | None]]
 
 
-def methods_rows(keys: Keys, ready: bool) -> list[Row]:
-    pay = "success" if ready else None
+DISABLED = "disabled"   # «стиль» кнопки: серая нерабочая кнопка (поле `disabled` из Bot API 10.3, нажатие ничего не делает)
+
+
+def methods_rows(keys: Keys, amount: int | None) -> list[Row]:
+    """Способы оплаты. Пока количество конфет не введено, три кнопки серые и не нажимаются (в подписях нули);
+    после ввода в подписях стоит цена по курсу, и кнопки становятся рабочими."""
+    ready = bool(amount)
+    stars = money(to_stars(amount)) if ready else "0"
+    usd = money(to_usd(amount)) if ready else "0"
+    rub = money(to_rub(amount)) if ready else "0"
+    pay = "success" if ready else DISABLED
+
+    def cb(action: str) -> str | None:
+        return keys.cb(action) if ready else None   # у отключённой кнопки callback_data быть не должно
+
     return [
-        [("⭐ Telegram Stars 💫", keys.cb("stars"), None, pay)],
-        [("🤖 CryptoBot 💎", keys.cb("crypto"), None, pay)],
-        [("💳 По карте 💵", keys.cb("card"), None, pay)],
+        [(f"💫 Telegram Stars ≈ {stars}⭐", cb("stars"), None, pay)],
+        [(f"🤖 CryptoBot ≈ {usd}$", cb("crypto"), None, pay)],
+        [(f"💳 По карте ≈ {rub}₽", cb("card"), None, pay)],
         [("⬅️ Назад", keys.cb("back"), None, "danger")],
     ]
 
@@ -258,17 +268,39 @@ def success_rows(keys: Keys) -> list[Row]:
     return [[("⬅️ Назад", keys.cb("methods"), None, "danger")]]
 
 
+def check_bot_enabled() -> bool:
+    return bool(CHECK_BOT_TOKEN)
+
+
 def receipt_rows(keys: Keys, order) -> list[Row]:
+    oid = int(order.id)
+    if check_bot_enabled():   # кнопки обрабатывает бот для чеков, он не знает ключей конкретного бота-магазина
+        ok, no = f"{CHECK_PREFIX}:ok:{oid}", f"{CHECK_PREFIX}:no:{oid}"
+    else:
+        ok, no = keys.cb("ok", oid), keys.cb("no", oid)
     return [
-        [(f"✅ Выдать {int(order.candies)}🍬 за {money(order.fiat_amount)}₽", keys.cb("ok", int(order.id)), None, "success")],
-        [("❌ Отказать", keys.cb("no", int(order.id)), None, "danger")],
+        [(f"✅ Выдать {int(order.candies)}🍬 за {money(order.fiat_amount)}₽", ok, None, "success")],
+        [("❌ Отказать", no, None, "danger")],
     ]
+
+
+def _disabled_marker():
+    """Значение поля `disabled` (тип DisabledButton без полей). В свежем aiogram (3.31+) это его класс; в более старом
+    класса нет — тогда уходит пустой объект {}: модели aiogram пропускают неизвестные поля, и Telegram получает то же."""
+    try:
+        from aiogram.types import DisabledButton
+
+        return DisabledButton()
+    except ImportError:
+        return {}
 
 
 def markup(rows: list[Row]):
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
     def btn(text, cb, url, style):
+        if style == DISABLED:
+            return InlineKeyboardButton(text=text, disabled=_disabled_marker())
         kw: dict[str, Any] = {"text": text}
         if cb is not None:
             kw["callback_data"] = cb
@@ -322,6 +354,9 @@ _poll_task: asyncio.Task | None = None
 _stars_task: asyncio.Task | None = None
 _stars_bot: Any = None
 _stars_dp: Any = None
+_check_task: asyncio.Task | None = None
+_check_bot: Any = None
+_check_dp: Any = None
 _recovered = False
 
 
@@ -497,11 +532,147 @@ def _ensure_stars_bot():
     return _stars_bot
 
 
+async def _answer(call, text: str | None = None, alert: bool = False) -> None:
+    try:
+        if text:
+            await call.answer(text, show_alert=alert)
+        else:
+            await call.answer()
+    except Exception:
+        pass
+
+
+async def _strip_buttons(bot, msg) -> None:
+    try:
+        await bot.edit_message_reply_markup(chat_id=msg.chat.id, message_id=msg.message_id, reply_markup=None)
+    except Exception:
+        pass
+
+
+async def _is_admin(bot, chat_id: int, user_id: int) -> bool:
+    if chat_id > 0:
+        return user_id == chat_id
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except Exception:
+        return False
+    return getattr(member, "status", "") in ("creator", "administrator")
+
+
+async def _admin_mentions(bot, chat_id: int) -> str:
+    if chat_id > 0:   # личный чат владельца — пинговать некого
+        return ""
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+    except Exception:
+        return ""
+    names = []
+    for m in admins:
+        u = getattr(m, "user", None)
+        if u and not getattr(u, "is_bot", False) and getattr(u, "username", None):
+            names.append(f"@{u.username}")
+    return " ".join(dict.fromkeys(names))
+
+
+async def _decide(call, bot, action: str, order_id: int | None, expected_bot_id: int | None = None) -> None:
+    """«Выдать» / «Отказать» под чеком. `bot` — тот бот, который отправил чек в чат админов (бот для чеков или, без
+    CHECK_BOT_TOKEN, сам бот-магазин): им проверяем права нажавшего и правим сообщение с чеком. Пользователю сообщает
+    бот-магазин, чей это заказ (ACTIVE[order.bot_id])."""
+    msg = call.message
+    if msg is None or order_id is None:
+        await _answer(call)
+        return
+    if not await _is_admin(bot, msg.chat.id, call.from_user.id):
+        await _answer(call, "Подтверждать оплату могут только администраторы.", True)
+        return
+    order = await repo.get_topup_order(order_id)
+    if order is None or order.method != M_CARD or (expected_bot_id is not None and int(order.bot_id) != expected_bot_id):
+        await _answer(call, "Заказ не найден.", True)
+        return
+    who = f"@{call.from_user.username}" if call.from_user.username else html.escape(call.from_user.full_name or str(call.from_user.id))
+    if order.status != "review":
+        await _answer(call, "Этот чек уже обработан.", True)
+        await _strip_buttons(bot, msg)
+        return
+    if action == "ok":
+        if await repo.mark_topup_paid(order_id):
+            await finalize(order_id)
+        fresh = await repo.get_topup_order(order_id)
+        done = fresh is not None and fresh.status == "credited"
+        line = (f"✅ Выдано {int(order.candies)}{CANDY} за {money(order.fiat_amount)}₽ ({who})" if done
+                else "⚠️ Оплата отмечена, но конфеты пока не начислены (пользователя нет в базе?).")
+    else:
+        if await repo.finish_topup_order(order_id, "rejected"):
+            mod = ACTIVE.get(int(order.bot_id))
+            if mod is not None:
+                await mod._notify(mod.bot, order, "❌ Чек не подтверждён. Если вы действительно оплатили, свяжитесь с поддержкой.")
+        line = f"❌ Отказано ({who})"
+    try:
+        await bot.edit_message_caption(chat_id=msg.chat.id, message_id=msg.message_id, caption=line, reply_markup=None)
+    except Exception:
+        await _strip_buttons(bot, msg)
+    await _answer(call)
+
+
+def _ensure_check_bot():
+    """Бот для чеков по карте: шлёт чеки в чат админов и принимает нажатия «Выдать / Отказать» (только callback_query)."""
+    global _check_bot, _check_dp
+    if _check_bot is not None:
+        return _check_bot
+    if not CHECK_BOT_TOKEN:
+        raise RuntimeError("CHECK_BOT_TOKEN is not set")
+    from aiogram import Bot, Dispatcher, F
+    from aiogram.types import CallbackQuery
+
+    _check_bot, _check_dp = Bot(token=CHECK_BOT_TOKEN), Dispatcher()
+
+    @_check_dp.callback_query(F.data.startswith(CHECK_PREFIX + ":"))
+    async def _on_check_decision(call: CallbackQuery, bot: Bot) -> None:
+        parts = (call.data or "").split(":")
+        if len(parts) != 3 or parts[1] not in ("ok", "no") or not parts[2].isdigit():
+            await _answer(call)
+            return
+        try:
+            await _decide(call, bot, parts[1], int(parts[2]))
+        except Exception:
+            log.exception("Бот для чеков: не удалось обработать нажатие %s", call.data)
+            await _answer(call, "❌ Ошибка, попробуйте ещё раз.", True)
+
+    return _check_bot
+
+
+def _input_file(data: bytes, filename: str):
+    from aiogram.types import BufferedInputFile
+
+    return BufferedInputFile(data, filename=filename)
+
+
 def ensure_started() -> None:
     """Запускает фоновые задачи (один раз на приложение): опрос оплат и, если задан токен, приём оплат Stars."""
-    global _poll_task, _stars_task
+    global _poll_task, _stars_task, _check_task
     if _poll_task is None or _poll_task.done():
+        for ok, what in ((bool(CRYPTO_PAY_TOKEN), "CryptoBot: не задан CRYPTO_PAY_TOKEN"),
+                         (admin_chat_id() is not None, "карта: не задан чат админов (TOPUP_ADMIN_GROUP_ID / GROUP_ID / ADMIN_CHAT_ID)")):
+            if not ok:
+                log.warning("Способ оплаты выключен — %s", what)
         _poll_task = asyncio.create_task(_poll_loop(), name="topup-poll")
+    if CHECK_BOT_TOKEN and (_check_task is None or _check_task.done()):
+        try:
+            check_bot = _ensure_check_bot()
+        except Exception:
+            log.exception("Не удалось запустить бота для чеков (CHECK_BOT_TOKEN)")
+        else:
+            async def run_check() -> None:
+                try:
+                    await _check_dp.start_polling(check_bot, handle_signals=False, allowed_updates=["callback_query"])
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("Polling бота для чеков остановился")
+
+            _check_task = asyncio.create_task(run_check(), name="topup-check")
+    elif not CHECK_BOT_TOKEN:
+        log.warning("CHECK_BOT_TOKEN не задан — чеки по карте уходят через бота-магазин, он должен состоять в чате админов")
     if STARS_BOT_TOKEN and (_stars_task is None or _stars_task.done()):
         try:
             bot = _ensure_stars_bot()
@@ -525,22 +696,24 @@ def ensure_started() -> None:
 
 
 async def shutdown() -> None:
-    global _poll_task, _stars_task, _stars_bot, _stars_dp
-    if _stars_dp is not None and _stars_task is not None and not _stars_task.done():
-        try:
-            await _stars_dp.stop_polling()
-        except Exception:
-            pass
-    for task in (_poll_task, _stars_task):
+    global _poll_task, _stars_task, _stars_bot, _stars_dp, _check_task, _check_bot, _check_dp
+    for dp, task in ((_stars_dp, _stars_task), (_check_dp, _check_task)):
+        if dp is not None and task is not None and not task.done():
+            try:
+                await dp.stop_polling()
+            except Exception:
+                pass
+    for task in (_poll_task, _stars_task, _check_task):
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-    if _stars_bot is not None:
-        try:
-            await _stars_bot.session.close()
-        except Exception:
-            pass
-    _poll_task = _stars_task = _stars_bot = _stars_dp = None
+    for b in (_stars_bot, _check_bot):
+        if b is not None:
+            try:
+                await b.session.close()
+            except Exception:
+                pass
+    _poll_task = _stars_task = _stars_bot = _stars_dp = _check_task = _check_bot = _check_dp = None
 
 
 # ---------- модуль одного бота ----------
@@ -629,7 +802,7 @@ class TopupModule:
         st.message_id = call.message.message_id if call.message else None
 
     async def _methods(self, call, bot, st: UserState) -> None:
-        await self._screen(call, bot, st, "methods", methods_text(st.amount), methods_rows(self.keys, st.amount is not None))
+        await self._screen(call, bot, st, "methods", methods_text(st.amount), methods_rows(self.keys, st.amount))
 
     async def _alert(self, call, text: str) -> None:
         try:
@@ -681,6 +854,7 @@ class TopupModule:
         amount = int(st.amount or 0)
         if action == "card":
             if admin_chat_id() is None:
+                log.warning("Оплата картой недоступна: не задан чат админов (TOPUP_ADMIN_GROUP_ID / GROUP_ID / ADMIN_CHAT_ID)")
                 await self._alert(call, "❌ Оплата картой сейчас недоступна.")
                 return
             await self._screen(call, bot, st, "card", card_text(amount), card_rows(self.keys))
@@ -689,6 +863,14 @@ class TopupModule:
         elif action == "info":
             await self._screen(call, bot, st, "info", CRYPTO_INSTRUCTION_TEXT, crypto_info_rows(self.keys))
         else:
+            if action == "stars" and not STARS_BOT_TOKEN:
+                log.warning("Оплата Stars недоступна: не задана переменная окружения STARS_BOT_TOKEN")
+                await self._alert(call, "❌ Оплата через Telegram Stars сейчас недоступна.")
+                return
+            if action == "crypto" and not CRYPTO_PAY_TOKEN:
+                log.warning("Оплата CryptoBot недоступна: не задана переменная окружения CRYPTO_PAY_TOKEN")
+                await self._alert(call, "❌ Оплата через CryptoBot сейчас недоступна.")
+                return
             if st.busy:   # быстрые повторные нажатия не создают второй счёт
                 await self._alert(call, "Секунду, счёт создаётся…")
                 return
@@ -776,7 +958,7 @@ class TopupModule:
             return True
         st.amount, st.screen = amount, "methods"
         st.method = st.order_id = st.invoice_url = st.invoice_amount = None
-        await self._send_new(bot, user_id, st, methods_text(amount), methods_rows(self.keys, True))
+        await self._send_new(bot, user_id, st, methods_text(amount), methods_rows(self.keys, amount))
         await self._delete(bot, user_id, message.message_id)   # число пользователя убираем, чтобы не копились в чате
         return True
 
@@ -796,11 +978,8 @@ class TopupModule:
         order = await repo.get_topup_order(order_id)
         if order is None:
             return
-        caption = receipt_caption(order, await self._admin_mentions(bot, target))
         try:
-            send = bot.send_photo if message.photo else bot.send_document
-            kwargs = {"photo": file_id} if message.photo else {"document": file_id}
-            await send(target, caption=caption, reply_markup=markup(receipt_rows(self.keys, order)), parse_mode="HTML", **kwargs)
+            await self._send_receipt(message, bot, order, file_id, target)
         except Exception:
             log.exception("Не удалось отправить чек админам")
             await repo.finish_topup_order(order_id, "rejected")
@@ -817,79 +996,26 @@ class TopupModule:
             except Exception:
                 pass
 
-    @staticmethod
-    async def _admin_mentions(bot, chat_id: int) -> str:
-        if chat_id > 0:   # личный чат владельца — пинговать некого
-            return ""
-        try:
-            admins = await bot.get_chat_administrators(chat_id)
-        except Exception:
-            return ""
-        names = []
-        for m in admins:
-            u = getattr(m, "user", None)
-            if u and not getattr(u, "is_bot", False) and getattr(u, "username", None):
-                names.append(f"@{u.username}")
-        return " ".join(dict.fromkeys(names))
-
-    async def _is_admin(self, bot, chat_id: int, user_id: int) -> bool:
-        if chat_id > 0:
-            return user_id == chat_id
-        try:
-            member = await bot.get_chat_member(chat_id, user_id)
-        except Exception:
-            return False
-        return getattr(member, "status", "") in ("creator", "administrator")
+    async def _send_receipt(self, message, bot, order, file_id: str, target: int) -> None:
+        """Отправляет чек в чат админов. С CHECK_BOT_TOKEN — ботом для чеков: file_id выдан боту-магазину и чужому боту
+        не подойдёт, поэтому файл скачивается ботом-магазином и загружается заново."""
+        is_photo = bool(message.photo)
+        if check_bot_enabled():
+            sender_bot = _ensure_check_bot()
+            buf = io.BytesIO()
+            await bot.download(file_id, destination=buf)
+            name = "receipt.jpg" if is_photo else (getattr(message.document, "file_name", None) or "receipt")
+            media: Any = _input_file(buf.getvalue(), name)
+        else:
+            sender_bot, media = bot, file_id
+        caption = receipt_caption(order, await _admin_mentions(sender_bot, target))
+        send = sender_bot.send_photo if is_photo else sender_bot.send_document
+        kwargs = {"photo": media} if is_photo else {"document": media}
+        await send(target, caption=caption, reply_markup=markup(receipt_rows(self.keys, order)), parse_mode="HTML", **kwargs)
 
     async def _admin_decision(self, call, bot, action: str, order_id: int | None) -> None:
-        msg = call.message
-        if msg is None or order_id is None:
-            return
-        if not await self._is_admin(bot, msg.chat.id, call.from_user.id):
-            await self._alert(call, "Подтверждать оплату могут только администраторы.")
-            return
-        order = await repo.get_topup_order(order_id)
-        if order is None or order.method != M_CARD or int(order.bot_id) != self.bot_id:
-            await self._alert(call, "Заказ не найден.")
-            return
-        who = f"@{call.from_user.username}" if call.from_user.username else html.escape(call.from_user.full_name or str(call.from_user.id))
-        if action == "ok":
-            if order.status != "review":
-                await self._alert(call, "Этот чек уже обработан.")
-                await self._strip_buttons(bot, msg)
-                return
-            if await repo.mark_topup_paid(order_id):
-                await finalize(order_id)
-            fresh = await repo.get_topup_order(order_id)
-            done = fresh is not None and fresh.status == "credited"
-            line = (f"✅ Выдано {int(order.candies)}{CANDY} за {money(order.fiat_amount)}₽ ({who})" if done
-                    else "⚠️ Оплата отмечена, но конфеты пока не начислены (пользователя нет в базе?).")
-        else:
-            if order.status != "review":
-                await self._alert(call, "Этот чек уже обработан.")
-                await self._strip_buttons(bot, msg)
-                return
-            if await repo.finish_topup_order(order_id, "rejected"):
-                await self._notify(bot, order, "❌ Чек не подтверждён. Если вы действительно оплатили, свяжитесь с поддержкой.")
-            line = f"❌ Отказано ({who})"
-        try:
-            await bot.edit_message_caption(chat_id=msg.chat.id, message_id=msg.message_id, caption=line, reply_markup=None)
-        except Exception:
-            try:
-                await bot.edit_message_reply_markup(chat_id=msg.chat.id, message_id=msg.message_id, reply_markup=None)
-            except Exception:
-                pass
-        try:
-            await call.answer()
-        except Exception:
-            pass
-
-    @staticmethod
-    async def _strip_buttons(bot, msg) -> None:
-        try:
-            await bot.edit_message_reply_markup(chat_id=msg.chat.id, message_id=msg.message_id, reply_markup=None)
-        except Exception:
-            pass
+        """Нажатие под чеком, пришедшее боту-магазину (чек был отправлен без CHECK_BOT_TOKEN)."""
+        await _decide(call, bot, action, order_id, expected_bot_id=self.bot_id)
 
     # --- сообщения пользователю после оплаты ---
     async def _notify(self, bot, order, text: str) -> None:

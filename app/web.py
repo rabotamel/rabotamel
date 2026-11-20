@@ -110,6 +110,10 @@ class ShopImportIn(BaseModel):
     confirm: bool = False   # False — только проверить файл и показать, что будет заменено; True — применить
 
 
+class AboutIn(BaseModel):
+    about: str = ""
+
+
 class ProductIn(BaseModel):
     name: str = ""
     price: int | str = ""       # целое число конфет (строкой тоже можно)
@@ -550,6 +554,17 @@ async def add_shop_product(body: ProductIn):
     )
     bus.publish({"type": "changed"})
     return {"ok": True, "product": _product_dict(row)}
+
+
+@api.post("/shop/about-length")
+async def shop_about_length(body: AboutIn):
+    """Счётчик под полем «О товаре»: сколько символов введено на сайте (со скобками вариантов и значками оформления)
+    и сколько займёт в Telegram в худшем случае (в каждой [а/б] самый длинный вариант, без значков оформления)."""
+    about = body.about.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return {
+        "site": len(about), "site_max": shop.MAX_ABOUT_RAW,
+        "telegram": shop.telegram_about_length(about), "telegram_max": shop.MAX_ABOUT,
+    }
 
 
 @api.post("/shop/products/reorder")

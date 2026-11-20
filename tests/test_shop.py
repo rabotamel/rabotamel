@@ -264,7 +264,67 @@ class ShopInputTests(unittest.TestCase):
                 shop.normalize_name(bad)
         self.assertEqual(shop.normalize_about("  **a**\r\nb \n"), "**a**\nb")
         with self.assertRaises(ValueError):
-            shop.normalize_about("x" * 3901)
+            shop.normalize_about("x" * 5001)
+
+    def test_about_limits_site_vs_telegram(self):
+        self.assertEqual((shop.MAX_ABOUT, shop.MAX_ABOUT_RAW), (5000, 20000))
+        self.assertEqual(len(shop.normalize_about("x" * 5000)), 5000)
+        # скобки вариантов Telegram не видит: на сайте текст длиннее 5000, а в Telegram — нет
+        text = "[привет/здравствуй] " * 200
+        self.assertGreater(len(text), 3000)
+        self.assertEqual(shop.telegram_about_length(text), 200 * len("здравствуй ") - 1)
+        self.assertEqual(shop.normalize_about(text), text.strip())
+        many = "[а/бб]" * 4000                       # на сайте 24000 знаков — больше поля
+        with self.assertRaises(ValueError):
+            shop.normalize_about(many)
+        mid = "[" + "а" * 3000 + "/б]" + "в" * 2500   # на сайте ~5500, в Telegram в худшем случае 5500 — больше 5000
+        with self.assertRaises(ValueError):
+            shop.normalize_about(mid)
+        ok = "[" + "а" * 100 + "/б]" * 1 + "в" * 4000  # в Telegram максимум 4100
+        self.assertEqual(shop.normalize_about(ok), ok)
+        # значки оформления в длину Telegram не входят
+        self.assertEqual(shop.telegram_about_length("**" + "ж" * 10 + "**"), 10)
+
+    def test_longest_variant_mode_does_not_change_normal_choice(self):
+        raw = "Привет [товарищ/друг]! Как [твои дела/поживаешь]?"
+        self.assertEqual(shop.resolve_variants(raw, "t", 1), shop.resolve_variants(raw, "t", 1))
+        self.assertEqual(shop.resolve_variants(raw, "t", 1, longest=True), "Привет товарищ! Как твои дела?")
+        self.assertEqual(shop.resolve_variants("[а/б [вв/г]]", "t", 1, longest=True), "б вв")
+
+
+class SplitHtmlTests(unittest.TestCase):
+    def test_short_text_is_one_part(self):
+        self.assertEqual(shop.split_html("<b>коротко</b>"), ["<b>коротко</b>"])
+
+    def test_long_card_is_split_into_valid_parts(self):
+        import random
+        import re
+        rng = random.Random(7)
+        words = ["слово", "текст", "a&b", "<тест>", "🍬", "длинное_слово" * 4]
+        for _ in range(120):
+            raw = "".join(rng.choice(words) + rng.choice([" ", " ", "\n", "\n\n"]) for _ in range(rng.randint(40, 900)))
+            raw = raw.replace("текст", "**текст**", 3).replace("слово", "__слово *ит*__", 2)
+            marked = shop.format_about(raw)
+            limit = rng.choice([60, 200, 900])
+            parts = shop.split_html(marked, limit)
+            for part in parts:
+                self.assertTrue(shop._balanced(part), part)
+                self.assertLessEqual(shop.visible_length(part), limit)
+            plain = lambda t: re.sub(r"\s+", "", html.unescape(re.sub(r"<[^>]+>", "", t)))   # noqa: E731
+            self.assertEqual(plain(marked), "".join(plain(p) for p in parts))
+
+    def test_five_thousand_chars_fit_in_telegram_messages(self):
+        p = shop.Product(1, "Товар", 100, about=("строка текста для проверки\n" * 200)[:5000])
+        parts = shop.render_product_parts(p, "seed")
+        self.assertGreaterEqual(len(parts), 2)
+        self.assertTrue(all(shop.visible_length(x) <= 4096 for x in parts))
+        self.assertEqual(shop.render_product_parts(shop.Product(2, "Т", 1, about="кратко"), "s"), [shop.render_product(shop.Product(2, "Т", 1, about="кратко"), "s")])
+
+    def test_open_tags_are_closed_and_reopened_between_parts(self):
+        parts = shop.split_html("<b>" + "слово " * 60 + "</b>", 100)
+        self.assertGreater(len(parts), 1)
+        for part in parts:
+            self.assertTrue(part.startswith("<b>") and part.endswith("</b>"), part)
 
 
 class ShopKeyboardTests(unittest.TestCase):

@@ -54,6 +54,9 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
     # user_id -> id служебного сообщения с клавиатурой «Меню» (в памяти). Клавиатура в Telegram постоянная, поэтому
     # шлём её один раз за запуск: после капчи и (для тех, кто прошёл капчу раньше) при первом /start.
     menu_kb: dict[int, int] = {}
+    # user_id -> id «верхних» частей длинной карточки товара (в памяти). Карточка длиннее лимита Telegram уходит
+    # несколькими сообщениями; кнопки — под последним, а эти части убираются, как только пользователь уходит с карточки.
+    product_parts: dict[int, list[int]] = {}
 
     async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> None:
         try:
@@ -123,6 +126,10 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         """Кнопки под приветствием: «Магазин» / «Галерея» (рандомизированные) и ниже «Купить конфеты»."""
         return shop_buttons.build_keyboard(texts.shop_buttons, extra_rows=topup_module.menu_rows())
 
+    async def drop_product_parts(bot: Bot, user_id: int) -> None:
+        for old_id in product_parts.pop(user_id, []):
+            await safe_delete(bot, user_id, old_id)
+
     async def drop_last_gallery(bot: Bot, user_id: int, keep: int | None = None) -> None:
         old_id = last_gallery.pop(user_id, None)
         if old_id is not None and old_id != keep:
@@ -146,6 +153,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         last_gallery.pop(user_id, None)
         suggest_menu.pop(user_id, None)
         menu_kb.pop(user_id, None)
+        product_parts.pop(user_id, None)
         topup_module.reset(user_id)
         shown.pop(user_id, None)
         if stats.remove(user_id):
@@ -184,6 +192,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
     async def send_greeting(bot: Bot, user_id: int, balance: int) -> None:
         await drop_last_gallery(bot, user_id)  # приветствие и раздел галереи одновременно не висят
         await drop_suggest(bot, user_id)       # и меню предложки тоже (/start закрывает его)
+        await drop_product_parts(bot, user_id)  # и верхние части длинной карточки товара
         topup_module.reset(user_id)            # и раздел «Купить конфеты» закрывается
         text = greeting.render(texts.greeting, profile.name, balance)
         try:
@@ -385,10 +394,11 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         except TelegramAPIError as e:
             log.warning("Раздел галереи пользователю %s не доставлен: %s", user_id, e)
 
-    async def show_screen(call: CallbackQuery, bot: Bot, user_id: int, text: str, markup) -> None:
+    async def show_screen(call: CallbackQuery, bot: Bot, user_id: int, text: str, markup) -> int | None:
         """Раздел «Магазин» живёт в ОДНОМ сообщении: приветствие -> меню магазина -> карточка товара и обратно
         обновляются на месте (текст или подпись к фото, картинка остаётся). Если обновить нельзя (сообщение удалено
-        или слишком старое) — присылается новое, а старое убирается."""
+        или слишком старое) — присылается новое, а старое убирается. Возвращает id сообщения с экраном."""
+        await drop_product_parts(bot, user_id)   # уходим с длинной карточки товара — её верхние части убираем
         msg = call.message
         if msg is not None:
             try:
@@ -396,24 +406,51 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                     bot, msg.chat.id, msg.message_id, text, markup, has_photo=bool(getattr(msg, "photo", None))
                 )
                 last_greeting.setdefault(user_id, msg.message_id)  # это же сообщение — «главное меню»: /start его заменит
-                return
+                return msg.message_id
             except TelegramForbiddenError as e:
                 await on_forbidden(e, user_id)
-                return
+                return None
             except TelegramAPIError as e:
                 log.warning("Сообщение магазина у %s не обновилось (%s), отправляю новое", user_id, e)
         try:
             sent = await messaging.send_message(bot, user_id, text, profile.message_image_url, reply_markup=markup)
         except TelegramForbiddenError as e:
             await on_forbidden(e, user_id)
-            return
+            return None
         except TelegramAPIError as e:
             log.warning("Раздел магазина пользователю %s не доставлен: %s", user_id, e)
-            return
+            return None
         stale = {last_greeting.get(user_id), msg.message_id if msg is not None else None}
         last_greeting[user_id] = sent.message_id
         for old_id in stale - {None, sent.message_id}:
             await safe_delete(bot, user_id, old_id)
+        return sent.message_id
+
+    async def show_product_card(call: CallbackQuery, bot: Bot, user_id: int, parts: list[str], markup) -> None:
+        """Карточка товара. Короткая — как раньше, одним сообщением. Длиннее лимита Telegram (описание до 5000 символов) —
+        несколькими: первая часть заменяет сообщение магазина, остальные идут следом, кнопки — под последней."""
+        if len(parts) == 1:
+            await show_screen(call, bot, user_id, parts[0], markup)
+            return
+        first_id = await show_screen(call, bot, user_id, parts[0], None)
+        if first_id is None:
+            return
+        upper = [first_id]
+        for i, part in enumerate(parts[1:], start=1):
+            last = i == len(parts) - 1
+            try:
+                sent = await messaging.send_message(bot, user_id, part, None, reply_markup=markup if last else None)
+            except TelegramForbiddenError as e:
+                await on_forbidden(e, user_id)
+                return
+            except TelegramAPIError as e:
+                log.warning("Часть карточки товара пользователю %s не доставлена: %s", user_id, e)
+                return
+            if last:
+                last_greeting[user_id] = sent.message_id   # сообщение с кнопками — «главное меню»: /start его заменит
+            else:
+                upper.append(sent.message_id)
+        product_parts[user_id] = upper
 
     async def show_shop_menu(call: CallbackQuery, bot: Bot, user_id: int) -> None:
         """Меню магазина: заголовок жирным, баланс из БД, кнопки видимых товаров из БД и «Назад» (товаров нет — только «Назад»)."""
@@ -483,8 +520,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                 return
             product = shop.product_from_row(row)
             seed = str(getattr(profile, "token", None) or stats.bot_id)   # seed бота: токен (как у остальных текстов)
-            await show_screen(call, bot, user_id, shop.render_product(product, seed),
-                              shop.build_product_keyboard(texts.shop_menu, product))
+            await show_product_card(call, bot, user_id, shop.render_product_parts(product, seed),
+                                    shop.build_product_keyboard(texts.shop_menu, product))
         elif action == "product_back":
             await show_shop_menu(call, bot, user_id)
         elif action == "back":
