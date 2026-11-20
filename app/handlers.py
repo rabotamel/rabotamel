@@ -6,7 +6,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramFor
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
-from . import captcha, gallery, greeting, messaging, moderation, repo, shop_buttons, suggest, video_pool
+from . import captcha, gallery, greeting, messaging, moderation, repo, shop, shop_buttons, suggest, video_pool
 from .metrics import metrics
 from .models import BotProfile
 from .stats import UserStats
@@ -333,6 +333,49 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         except TelegramAPIError as e:
             log.warning("Раздел галереи пользователю %s не доставлен: %s", user_id, e)
 
+    async def show_screen(call: CallbackQuery, bot: Bot, user_id: int, text: str, markup) -> None:
+        """Раздел «Магазин» живёт в ОДНОМ сообщении: приветствие -> меню магазина -> карточка товара и обратно
+        обновляются на месте (текст или подпись к фото, картинка остаётся). Если обновить нельзя (сообщение удалено
+        или слишком старое) — присылается новое, а старое убирается."""
+        msg = call.message
+        if msg is not None:
+            try:
+                await messaging.edit_message(
+                    bot, msg.chat.id, msg.message_id, text, markup, has_photo=bool(getattr(msg, "photo", None))
+                )
+                last_greeting.setdefault(user_id, msg.message_id)  # это же сообщение — «главное меню»: /start его заменит
+                return
+            except TelegramForbiddenError as e:
+                await on_forbidden(e, user_id)
+                return
+            except TelegramAPIError as e:
+                log.warning("Сообщение магазина у %s не обновилось (%s), отправляю новое", user_id, e)
+        try:
+            sent = await messaging.send_message(bot, user_id, text, profile.message_image_url, reply_markup=markup)
+        except TelegramForbiddenError as e:
+            await on_forbidden(e, user_id)
+            return
+        except TelegramAPIError as e:
+            log.warning("Раздел магазина пользователю %s не доставлен: %s", user_id, e)
+            return
+        stale = {last_greeting.get(user_id), msg.message_id if msg is not None else None}
+        last_greeting[user_id] = sent.message_id
+        for old_id in stale - {None, sent.message_id}:
+            await safe_delete(bot, user_id, old_id)
+
+    async def show_shop_menu(call: CallbackQuery, bot: Bot, user_id: int) -> None:
+        """Меню магазина: заголовок жирным, баланс из БД, кнопки видимых товаров из БД и «Назад» (товаров нет — только «Назад»)."""
+        balance = await repo.get_candies(stats.bot_id, user_id)
+        products = [shop.product_from_row(r) for r in await repo.list_shop_products(limit=shop.MAX_PRODUCTS)]
+        text = shop.render_menu(texts.shop_buttons.shop_heading, balance)
+        await show_screen(call, bot, user_id, text, shop.build_menu_keyboard(texts.shop_menu, products))
+
+    async def show_main_menu(call: CallbackQuery, bot: Bot, user_id: int) -> None:
+        """Главное меню = приветствие с кнопками «Магазин» / «Галерея» (то же сообщение, обновлённое на месте)."""
+        balance = await repo.get_candies(stats.bot_id, user_id)
+        text = greeting.render(texts.greeting, profile.name, balance)
+        await show_screen(call, bot, user_id, text, shop_buttons.build_keyboard(texts.shop_buttons))
+
     @router.callback_query(F.data.startswith((shop_buttons.SHOP_PREFIX, shop_buttons.GALLERY_PREFIX)))
     async def on_shop_button(call: CallbackQuery, bot: Bot) -> None:
         # Действие определяется по callback_data ЭТОГО бота (texts.shop_buttons читается в момент нажатия).
@@ -349,7 +392,33 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             last_greeting.pop(user_id, None)
             await drop_last_gallery(bot, user_id, keep=None)
             await send_gallery(bot, user_id)
-        # TODO: action == "shop" — логика магазина (продажа пачками)
+        elif action == "shop":
+            await show_shop_menu(call, bot, user_id)
+
+    @router.callback_query(F.data.startswith(shop.PREFIXES))
+    async def on_shop_menu_button(call: CallbackQuery, bot: Bot) -> None:
+        """Кнопки раздела «Магазин»: товар, «Купить», «Назад». Действие определяется по callback_data ЭТОГО бота
+        (texts.shop_menu читается в момент нажатия): кнопки устаревших или чужих сообщений просто гасят «часики»."""
+        parsed = shop.parse_callback(texts.shop_menu, call.data)
+        await safe_answer(call)
+        user_id = call.from_user.id
+        if parsed is None or not stats.has(user_id):
+            return
+        action, product_id = parsed
+        if action == "product":
+            row = await repo.get_shop_product(product_id) if product_id is not None else None
+            if row is None:
+                # товар скрыт или удалён (или это кнопка старого сообщения без id) — вместо карточки актуальное меню
+                await show_shop_menu(call, bot, user_id)
+                return
+            product = shop.product_from_row(row)
+            await show_screen(call, bot, user_id, shop.render_product(product),
+                              shop.build_product_keyboard(texts.shop_menu, product))
+        elif action == "product_back":
+            await show_shop_menu(call, bot, user_id)
+        elif action == "back":
+            await show_main_menu(call, bot, user_id)
+        # TODO: action == "buy" — покупка товара product_id за его цену (repo.spend_candies); пока заглушка, ничего не делает
 
     @router.callback_query(
         F.data.startswith((

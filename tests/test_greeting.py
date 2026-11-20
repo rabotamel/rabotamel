@@ -41,6 +41,41 @@ class GreetingTests(unittest.TestCase):
             for slot, emo in zip(("hello", "anon", "nolog", "balance"), pal):
                 self.assertIn(emo, g.EMOJI_SETS[slot])
 
+    def test_emoji_are_static_for_every_bot(self):
+        self.assertEqual(g.PALETTES, (("💖", "🤍", "💫", "🍫"),))
+        for i in range(300):
+            out = g.render(g.generate_config(f"st{i}"), "Тест", 3)
+            lines = out.splitlines()
+            self.assertTrue(lines[0].startswith("<b>💖 "))             # заголовок
+            self.assertTrue(lines[-1].startswith("🍫 ") and lines[-1].endswith("3🍬"))  # баланс
+            self.assertIn("🤍 ", out)
+            self.assertIn("💫 ", out)
+            for old in sum(g._LEGACY_EMOJI.values(), ()):
+                self.assertNotIn(old, out)
+
+    def test_texts_by_seed_are_unchanged_by_the_emoji_switch(self):
+        # значения сняты ДО перехода на статичные эмодзи
+        c = g.generate_config("seed0")
+        self.assertEqual((c.layout, c.variant, c.order), (3, "quote_points", "anon_first"))
+        self.assertEqual((c.hello, c.anon_key, c.pay, c.nolog_key, c.chats, c.history, c.balance_label),
+                         (2, 3, 2, 3, 2, 1, 0))
+        c = g.generate_config("seed2")
+        self.assertEqual((c.layout, c.variant, c.order), (1, "plain", "nolog_first"))
+        self.assertEqual((c.hello, c.anon_key, c.pay, c.nolog_key, c.chats, c.history, c.balance_label),
+                         (1, 3, 0, 1, 3, 2, 0))
+
+    def test_template_saved_with_old_random_emoji_is_normalized(self):
+        import json
+        c = g.generate_config("legacy")
+        d = json.loads(c.to_json())
+        d["template"] = ("<b>✨ Рады видеть вас в {name}</b>\n\n🕶️ Приватность — оплата без привязок и без риска\n"
+                         "🙈 Без следов — чаты не хранятся, историю никто не увидит.\n\n🍭 Ваш баланс: {balance}🍬")
+        d["palette"] = 3
+        n = g.GreetingConfig.from_json(json.dumps(d, ensure_ascii=False))
+        self.assertEqual(n.template, ("<b>💖 Рады видеть вас в {name}</b>\n\n🤍 Приватность — оплата без привязок и без риска\n"
+                                      "💫 Без следов — чаты не хранятся, историю никто не увидит.\n\n🍫 Ваш баланс: {balance}🍬"))
+        self.assertEqual(g.GreetingConfig.from_json(n.to_json()), n)   # повторное чтение ничего не меняет
+
     def test_all_layouts_and_variants_are_reachable(self):
         seen = {(g.LAYOUTS[c.layout].key, c.variant) for c in (g.generate_config(f"x{i}") for i in range(600))}
         expected = {(lay.key, v) for lay in g.LAYOUTS for v in lay.variants}

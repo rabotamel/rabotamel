@@ -55,6 +55,10 @@ def _is_parse_error(e: TelegramBadRequest) -> bool:
     return "parse entities" in str(e).lower()
 
 
+def _is_not_modified(e: TelegramBadRequest) -> bool:
+    return "message is not modified" in str(e).lower()
+
+
 def _prepare_jpeg(data: bytes) -> bytes:
     """Приводит скачанную картинку к виду, который Telegram точно примет как фото (JPEG, стороны до 2560 px).
     Подходящий JPEG остаётся как есть, без повторного сжатия. Бросает ValueError, если это не изображение."""
@@ -178,3 +182,33 @@ async def send_message(bot, chat_id: int, text: str, image_url: str | None = Non
             raise
         log.warning("Сообщение не ушло с разметкой (%s), отправляю без неё", e)
         return await bot.send_message(chat_id, plain(text), parse_mode=None, **extra)
+
+
+async def edit_message(bot, chat_id: int, message_id: int, text: str, reply_markup=None, *, has_photo: bool = False):
+    """Обновляет уже отправленное сообщение на месте: текст (или подпись, если сообщение — фото) и кнопки.
+    Картинка остаётся прежней. Если содержимое не изменилось — тихо ничего не делает (возвращает None).
+    Остальные ошибки Telegram (сообщение удалено, слишком старое и т. п.) пробрасываются: вызывающий решает,
+    слать ли новое сообщение. Разметку метод страхует так же, как send_message."""
+    async def _do(body: str, parse_mode: str | None):
+        if has_photo:
+            return await bot.edit_message_caption(
+                chat_id=chat_id, message_id=message_id, caption=body, parse_mode=parse_mode, reply_markup=reply_markup
+            )
+        return await bot.edit_message_text(
+            text=body, chat_id=chat_id, message_id=message_id, parse_mode=parse_mode, reply_markup=reply_markup
+        )
+
+    try:
+        return await _do(text, "HTML")
+    except TelegramBadRequest as e:
+        if _is_not_modified(e):
+            return None
+        if not _is_parse_error(e):
+            raise
+        log.warning("Сообщение не обновилось с разметкой (%s), обновляю без неё", e)
+        try:
+            return await _do(plain(text), None)
+        except TelegramBadRequest as e2:
+            if _is_not_modified(e2):
+                return None
+            raise

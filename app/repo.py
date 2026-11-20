@@ -22,6 +22,7 @@ from .models import (
     KeyValue,
     Moderator,
     PushSubscription,
+    ShopProduct,
     SubmissionMessage,
     VideoSubmission,
 )
@@ -565,6 +566,71 @@ async def reset_gallery_on_switch(bot_id: int) -> int:
         deleted = await delete_gallery_videos()  # file_id действует только у бота, получившего видео
     await kv_set(GALLERY_OWNER_KEY, str(bot_id))
     return deleted
+
+
+# ---------- товары магазина ----------
+
+async def list_shop_products(only_visible: bool = True, limit: int | None = None) -> list[ShopProduct]:
+    """Товары в порядке показа. only_visible=True — только выбранные для показа в магазине (запрос меню в боте);
+    False — весь каталог (панель). Один запрос по индексу."""
+    q = select(ShopProduct).order_by(ShopProduct.position, ShopProduct.id)
+    if only_visible:
+        q = q.where(ShopProduct.is_visible.is_(True))
+    if limit:
+        q = q.limit(limit)
+    async with db.SessionLocal() as s:
+        return list((await s.execute(q)).scalars())
+
+
+async def get_shop_product(product_id: int, only_visible: bool = True) -> ShopProduct | None:
+    q = select(ShopProduct).where(ShopProduct.id == product_id)
+    if only_visible:
+        q = q.where(ShopProduct.is_visible.is_(True))
+    async with db.SessionLocal() as s:
+        return (await s.execute(q)).scalar_one_or_none()
+
+
+async def add_shop_product(name: str, price: int, about: str, color: str, visible: bool = True) -> ShopProduct:
+    """Новый товар — в конец списка."""
+    async with db.SessionLocal() as s, s.begin():
+        last = (await s.execute(select(func.max(ShopProduct.position)))).scalar_one_or_none() or 0
+        row = ShopProduct(name=name, price=price, about=about, color=color, position=last + 1, is_visible=visible)
+        s.add(row)
+        await s.flush()
+        return row
+
+
+async def update_shop_product(product_id: int, **values) -> ShopProduct | None:
+    """Меняет переданные поля (name, price, about, color, is_visible). None — товара нет."""
+    allowed = {k: v for k, v in values.items() if k in {"name", "price", "about", "color", "is_visible"}}
+    async with db.SessionLocal() as s, s.begin():
+        row = (
+            await s.execute(select(ShopProduct).where(ShopProduct.id == product_id).with_for_update())
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        for key, val in allowed.items():
+            setattr(row, key, val)
+        return row
+
+
+async def delete_shop_product(product_id: int) -> bool:
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(delete(ShopProduct).where(ShopProduct.id == product_id))
+        return res.rowcount > 0
+
+
+async def reorder_shop_products(ids: list[int]) -> None:
+    """Порядок каталога: перечисленные id — первыми в заданном порядке, остальные следом в прежнем."""
+    async with db.SessionLocal() as s, s.begin():
+        rows = list((await s.execute(
+            select(ShopProduct).order_by(ShopProduct.position, ShopProduct.id).with_for_update()
+        )).scalars())
+        by_id = {r.id: r for r in rows}
+        ordered = [by_id[i] for i in dict.fromkeys(ids) if i in by_id]
+        seen = {r.id for r in ordered}
+        for pos, r in enumerate(ordered + [r for r in rows if r.id not in seen], start=1):
+            r.position = pos
 
 
 # ---------- рандомизируемые сообщения и аватарки ----------

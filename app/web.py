@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import auth, avatars, moderation, push, repo, sandbox
+from . import auth, avatars, moderation, push, repo, sandbox, shop
 from .metrics import metrics
 from .events import bus
 from .models import STATUS_ACTIVE, STATUS_QUEUED
@@ -101,6 +101,14 @@ class ConfirmIn(BaseModel):
 
 class ModeratorIn(BaseModel):
     target: str = ""  # @username, username или Telegram user_id
+
+
+class ProductIn(BaseModel):
+    name: str = ""
+    price: int | str = ""       # целое число конфет (строкой тоже можно)
+    about: str = ""             # «О товаре» как есть: **жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~ и т. д.
+    color: str = ""             # стандартный | красный | зелёный | синий (или default/red/green/blue)
+    visible: bool = True        # показывать ли товар в магазине
 
 
 # ---------- хелперы ----------
@@ -493,6 +501,70 @@ async def delete_moderator(mod_id: int):
     if not await repo.delete_moderator(mod_id):
         raise HTTPException(404, "Модератор не найден")
     moderation.cache.invalidate()
+    bus.publish({"type": "changed"})
+    return {"ok": True}
+
+
+# ---------- товары магазина ----------
+
+def _product_dict(row) -> dict:
+    p = shop.product_from_row(row)
+    return {
+        "id": p.id, "name": p.name, "price": p.price,
+        "about": p.about, "about_html": shop.format_about(p.about),  # как введено / как увидит пользователь
+        "color": p.color, "visible": bool(row.is_visible), "position": row.position,
+    }
+
+
+def _clean_product(body: ProductIn) -> dict:
+    try:
+        return {
+            "name": shop.normalize_name(body.name), "price": shop.normalize_price(body.price),
+            "about": shop.normalize_about(body.about), "color": shop.normalize_color(body.color),
+            "is_visible": bool(body.visible),
+        }
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@api.get("/shop/products")
+async def list_shop_products():
+    """Весь каталог (и скрытые товары) в порядке показа."""
+    return {"products": [_product_dict(r) for r in await repo.list_shop_products(only_visible=False)]}
+
+
+@api.post("/shop/products")
+async def add_shop_product(body: ProductIn):
+    values = _clean_product(body)
+    if len(await repo.list_shop_products(only_visible=False)) >= 500:
+        raise HTTPException(400, "Слишком много товаров")
+    row = await repo.add_shop_product(
+        values["name"], values["price"], values["about"], values["color"], values["is_visible"]
+    )
+    bus.publish({"type": "changed"})
+    return {"ok": True, "product": _product_dict(row)}
+
+
+@api.post("/shop/products/reorder")
+async def reorder_shop_products(body: ReorderIn):
+    await repo.reorder_shop_products(body.ids)
+    bus.publish({"type": "changed"})
+    return {"ok": True}
+
+
+@api.post("/shop/products/{product_id}/edit")
+async def edit_shop_product(product_id: int, body: ProductIn):
+    row = await repo.update_shop_product(product_id, **_clean_product(body))
+    if row is None:
+        raise HTTPException(404, "Товар не найден")
+    bus.publish({"type": "changed"})
+    return {"ok": True, "product": _product_dict(row)}
+
+
+@api.delete("/shop/products/{product_id}")
+async def delete_shop_product(product_id: int):
+    if not await repo.delete_shop_product(product_id):
+        raise HTTPException(404, "Товар не найден")
     bus.publish({"type": "changed"})
     return {"ok": True}
 

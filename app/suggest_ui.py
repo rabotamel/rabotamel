@@ -1,13 +1,15 @@
 """Рандомизируемые тексты «Предложки»: подпись кнопки в меню «Галерея» и текст самого меню предложки.
 
-Подбираются один раз для бота (seed = токен), хранятся в БД готовым результатом (вид `suggest` в `texts_config`) и
-не меняются при перезапусках; единственный способ сменить — «Перенаписать текста» в «Песочнице». Схема та же, что у
-приветствия и галереи (см. NOTES.md, «Рандомизация сообщений»).
+Названия и описания подбираются один раз для бота (seed = токен), хранятся в БД готовым результатом (вид `suggest` в
+`texts_config`) и не меняются при перезапусках; единственный способ сменить — «Перенаписать текста» в «Песочнице».
+Схема та же, что у приветствия и галереи (см. NOTES.md, «Рандомизация сообщений»).
 
-Кнопка: «{левый эмодзи} {название} {правый эмодзи}» — название и каждый из эмодзи выбираются независимо.
-Меню: заголовок = та же подпись, ниже одно из синонимичных описаний (+2🍬 за каждое принятое видео), обрамлённое
-выбранным декоративным эмодзи с обеих сторон. Ключевое условие (награда) есть в каждом варианте.
-Индексы в списках только ДОБАВЛЯЮТСЯ в конец, не переставляются и не удаляются.
+ЭМОДЗИ СТАТИЧНЫ и по seed не подбираются:
+  * кнопка: «📩 {название} 🤍» (LEFT_EMOJI / RIGHT_EMOJI);
+  * меню: заголовок = та же подпись, ниже одно из синонимичных описаний (+2🍬 за каждое принятое видео) в обрамлении
+    «💫 … 💫» (DECO_EMOJI). Ключевое условие (награда) есть в каждом варианте.
+Подписи, сохранённые у работающих ботов со случайными эмодзи, приводятся к статичным при чтении (`SuggestConfig.from_json`).
+Индексы в списках текстов только ДОБАВЛЯЮТСЯ в конец, не переставляются и не удаляются.
 """
 import hashlib
 import html
@@ -22,9 +24,14 @@ REWARD_TEXT = f"+{REWARD}{CANDY}"
 TITLES: tuple[str, ...] = (
     "Предложка", "Предложить видео", "Прислать видео", "Предложить контент", "Поделиться видео",
 )
-LEFT_EMOJI: tuple[str, ...] = ("📩", "📥", "💌", "📤")
-RIGHT_EMOJI: tuple[str, ...] = ("🤍", "✨", "💫", "🫧", "🌸", "💎", "🕊️")
-DECO_EMOJI: tuple[str, ...] = ("💫", "✨", "🌟", "💎", "🤍", "🫧")
+# Статичные эмодзи (индексы left / right / deco в конфиге остаются ради совместимости и всегда 0).
+LEFT_EMOJI: tuple[str, ...] = ("📩",)
+RIGHT_EMOJI: tuple[str, ...] = ("🤍",)
+DECO_EMOJI: tuple[str, ...] = ("💫",)
+
+# Сколько вариантов эмодзи было раньше: при генерации ГСЧ продвигается на столько же, поэтому выбор названия и
+# описания по seed остаётся прежним, а меняются только эмодзи.
+_LEGACY_LEFT_COUNT, _LEGACY_RIGHT_COUNT, _LEGACY_DECO_COUNT = 4, 7, 6
 
 BODIES: tuple[str, ...] = (
     f"Отправьте видео в предложку и получите {REWARD_TEXT} за каждое принятое видео",
@@ -56,9 +63,9 @@ class SuggestConfig:
     right: int
     body: int
     deco: int
-    label: str   # «📩 Предложка 🤍» — подпись кнопки и заголовок меню
+    label: str   # «📩 Предложка 🤍» — подпись кнопки и заголовок меню (эмодзи статичны)
     text: str    # описание без обрамления (с +2🍬)
-    mark: str    # декоративный эмодзи вокруг описания
+    mark: str    # декоративный эмодзи вокруг описания (статичный 💫)
 
     @property
     def name(self) -> str:
@@ -82,9 +89,12 @@ class SuggestConfig:
     @classmethod
     def from_json(cls, raw: str) -> "SuggestConfig":
         d = json.loads(raw)
+        # эмодзи статичны: у работающих ботов подпись и маркер со случайными эмодзи приводятся к текущим (без записи в БД)
+        parts = str(d["label"]).split(" ")
+        label = f"{LEFT_EMOJI[0]} {' '.join(parts[1:-1])} {RIGHT_EMOJI[0]}" if len(parts) > 2 else str(d["label"])
         cfg = cls(
-            title=int(d["title"]), left=int(d["left"]), right=int(d["right"]), body=int(d["body"]),
-            deco=int(d["deco"]), label=str(d["label"]), text=str(d["text"]), mark=str(d["mark"]),
+            title=int(d["title"]), left=0, right=0, body=int(d["body"]),
+            deco=0, label=label, text=str(d["text"]), mark=DECO_EMOJI[0],
         )
         cfg.validate()
         return cfg
@@ -105,16 +115,19 @@ class SuggestConfig:
 
 
 def generate_config(seed: str, taken: set[str] | None = None) -> SuggestConfig:
-    """Детерминированно по seed; название, левый и правый эмодзи, описание и обрамление выбираются независимо."""
+    """Детерминированно по seed; название и описание выбираются независимо, эмодзи статичны."""
     rng = random.Random(hashlib.sha256(("suggest:" + seed).encode()).digest())
     taken = taken or set()
     cfg = None
     for _ in range(300):
-        t, l, r = rng.randrange(len(TITLES)), rng.randrange(len(LEFT_EMOJI)), rng.randrange(len(RIGHT_EMOJI))
-        b, dc = rng.randrange(len(BODIES)), rng.randrange(len(DECO_EMOJI))
+        t = rng.randrange(len(TITLES))
+        rng.randrange(_LEGACY_LEFT_COUNT)    # эмодзи статичны; шаги ГСЧ сохранены, чтобы тексты по seed не сдвинулись
+        rng.randrange(_LEGACY_RIGHT_COUNT)
+        b = rng.randrange(len(BODIES))
+        rng.randrange(_LEGACY_DECO_COUNT)
         cfg = SuggestConfig(
-            title=t, left=l, right=r, body=b, deco=dc,
-            label=f"{LEFT_EMOJI[l]} {TITLES[t]} {RIGHT_EMOJI[r]}", text=BODIES[b], mark=DECO_EMOJI[dc],
+            title=t, left=0, right=0, body=b, deco=0,
+            label=f"{LEFT_EMOJI[0]} {TITLES[t]} {RIGHT_EMOJI[0]}", text=BODIES[b], mark=DECO_EMOJI[0],
         )
         if cfg.signature() not in taken:
             break

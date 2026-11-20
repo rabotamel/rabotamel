@@ -96,12 +96,40 @@ class GalleryHintTests(unittest.TestCase):
         self.assertIn("&lt;b&gt;", gallery.hint_line(g, "<b>"))
 
 
+class SuggestStaticEmojiTests(unittest.TestCase):
+    def test_button_and_menu_emoji_are_the_same_for_every_bot(self):
+        for i in range(300):
+            c = suggest_ui.generate_config(f"se{i}")
+            self.assertTrue(c.label.startswith("📩 ") and c.label.endswith(" 🤍"))      # кнопка: 📩 … 🤍
+            menu = c.render_menu()
+            self.assertTrue(menu.startswith(f"<b>{c.label}</b>\n\n💫 "))               # заголовок 📩 … 🤍, текст 💫 …
+            self.assertTrue(menu.endswith(" 💫"))                                          # … 💫
+            self.assertIn("+2🍬", menu)
+
+    def test_texts_by_seed_are_unchanged_by_the_emoji_switch(self):
+        # значения сняты ДО перехода на статичные эмодзи
+        self.assertEqual((suggest_ui.generate_config("seed0").title, suggest_ui.generate_config("seed0").body), (0, 4))
+        self.assertEqual((suggest_ui.generate_config("seed1").title, suggest_ui.generate_config("seed1").body), (1, 2))
+        self.assertEqual((suggest_ui.generate_config("seed2").title, suggest_ui.generate_config("seed2").body), (4, 1))
+
+    def test_saved_config_with_old_random_emoji_is_normalized(self):
+        c = suggest_ui.generate_config("legacy")
+        raw = json.loads(c.to_json())
+        raw.update(label="📥 Предложить видео ✨", mark="🌟", left=1, right=1, deco=2)
+        n = suggest_ui.SuggestConfig.from_json(json.dumps(raw, ensure_ascii=False))
+        self.assertEqual(n.label, "📩 Предложить видео 🤍")
+        self.assertEqual(n.name, "Предложить видео")          # название для подсказки в галерее осталось
+        self.assertEqual(n.mark, "💫")
+        self.assertEqual((n.left, n.right, n.deco), (0, 0, 0))
+        self.assertEqual(suggest_ui.SuggestConfig.from_json(n.to_json()), n)
+
+
 class SuggestUiTests(unittest.TestCase):
     def test_pools_match_the_spec(self):
         self.assertEqual(suggest_ui.TITLES, ("Предложка", "Предложить видео", "Прислать видео", "Предложить контент", "Поделиться видео"))
-        self.assertEqual(suggest_ui.LEFT_EMOJI, ("📩", "📥", "💌", "📤"))
-        self.assertEqual(suggest_ui.RIGHT_EMOJI, ("🤍", "✨", "💫", "🫧", "🌸", "💎", "🕊️"))
-        self.assertEqual(suggest_ui.DECO_EMOJI, ("💫", "✨", "🌟", "💎", "🤍", "🫧"))
+        self.assertEqual(suggest_ui.LEFT_EMOJI, ("📩",))   # эмодзи статичны
+        self.assertEqual(suggest_ui.RIGHT_EMOJI, ("🤍",))
+        self.assertEqual(suggest_ui.DECO_EMOJI, ("💫",))
         self.assertEqual(len(suggest_ui.BODIES), 5)
 
     def test_deterministic_per_seed_and_json_roundtrip(self):
@@ -113,11 +141,9 @@ class SuggestUiTests(unittest.TestCase):
     def test_every_pool_value_is_reachable_and_independent(self):
         cfgs = [suggest_ui.generate_config(f"s{i}") for i in range(600)]
         self.assertEqual({c.title for c in cfgs}, set(range(5)))
-        self.assertEqual({c.left for c in cfgs}, set(range(4)))
-        self.assertEqual({c.right for c in cfgs}, set(range(7)))
         self.assertEqual({c.body for c in cfgs}, set(range(5)))
-        self.assertEqual({c.deco for c in cfgs}, set(range(6)))
-        self.assertGreater(len({(c.title, c.left, c.right) for c in cfgs}), 100)  # выбор независимый
+        self.assertEqual({(c.left, c.right, c.deco) for c in cfgs}, {(0, 0, 0)})   # эмодзи статичны
+        self.assertEqual(len({(c.title, c.body) for c in cfgs}), 25)               # название и описание — независимо
 
     def test_label_shape_and_candy_untouched(self):
         for i in range(300):
@@ -127,11 +153,16 @@ class SuggestUiTests(unittest.TestCase):
             self.assertNotIn("---", c.label + c.text)
 
     def test_new_bot_avoids_taken_combinations(self):
+        # эмодзи статичны, поэтому различаются только название и описание: всего 5 × 5 = 25 комбинаций
+        total = len(suggest_ui.TITLES) * len(suggest_ui.BODIES)
         taken = set()
-        for i in range(300):
+        for i in range(total):
             c = suggest_ui.generate_config(f"bot{i}", taken)
             self.assertNotIn(c.signature(), taken)
             taken.add(c.signature())
+        self.assertEqual(len(taken), total)
+        # комбинации кончились — бот всё равно получает рабочий вариант (повтор допустим, падения нет)
+        suggest_ui.generate_config("one-more", taken).validate()
 
     def test_registered_in_texts_and_gallery_uses_its_label(self):
         from app import texts

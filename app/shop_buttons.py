@@ -4,14 +4,16 @@
 
 Что подбирается для бота ОДИН раз (детерминированно по seed = токен бота) и хранится в БД
 (`bot_profiles.texts_config`, вид «shop_buttons») до перерандомизации или бана/создания нового бота:
-  * текст и эмодзи каждой кнопки — независимо друг от друга, из отдельных списков;
-  * сторона эмодзи: слева, справа или с обеих сторон («🛍️ Магазин 🏩»);
+  * текст каждой кнопки — из отдельного списка синонимов (эмодзи СТАТИЧНЫ и не подбираются: «🍫 Магазин 💫»,
+    «🎥 Галерея 💖», у всех ботов одни и те же — см. SHOP_EMOJI / GALLERY_EMOJI);
+  * сторона эмодзи: всегда с обеих сторон;
   * взаимный порядок кнопок (магазин → галерея или наоборот);
   * раскладка: обе кнопки в одном ряду или в двух рядах;
   * уникальные callback_data (префикс действия + хэш бота), не совпадающие у разных ботов.
 
-Хранится ГОТОВЫЙ результат (итоговые подписи и callback_data), поэтому правки списков в коде не меняют
-кнопки уже работающих ботов. Индексы в списках только добавляются в конец.
+Хранится ГОТОВЫЙ результат (итоговые подписи и callback_data), поэтому правки списков текстов в коде не меняют
+кнопки уже работающих ботов. Индексы в списках только добавляются в конец. Исключение — эмодзи: у уже сохранённых
+подписей они приводятся к статичным при чтении (`_migrate_legacy`), без перезаписи БД.
 """
 import hashlib
 import json
@@ -19,15 +21,21 @@ import random
 from dataclasses import dataclass
 
 # ---------- списки ----------
-# Эмодзи заданы парами «левый ... правый»: подпись собирается как «<левый> <текст> <правый>».
+# Эмодзи заданы парой «левый ... правый»: подпись собирается как «<левый> <текст> <правый>».
+# Пара ОДНА на кнопку (статичная, по seed не подбирается): допустимый набор оформления бота —
+# 🎥 💖 💫 🍫 🍬 📩 🤍 ✅ ❌ 🚫 ⬅️. Индекс эмодзи (shop_emoji / gallery_emoji) в конфиге остаётся ради совместимости и всегда 0.
 SHOP_TEXTS: tuple[str, ...] = ("Магазин", "Каталог", "Наш ассортимент")
-SHOP_EMOJI: tuple[tuple[str, str], ...] = (("🛍️", "🏩"), ("🛒", "🏬"), ("📦", "🛍️"))
+SHOP_EMOJI: tuple[tuple[str, str], ...] = (("🍫", "💫"),)
 
 GALLERY_TEXTS: tuple[str, ...] = ("Галерея", "Случайное видео", "Видео-рулетка", "Смотреть видео")
-GALLERY_EMOJI: tuple[tuple[str, str], ...] = (("🖼️", "🩷"), ("🎬", "✨"), ("🎞️", "💫"), ("🎥", "💖"))
+GALLERY_EMOJI: tuple[tuple[str, str], ...] = (("🎥", "💖"),)
 
-# Как показываем эмодзи пары: оба, только левый или только правый («левый/правый акцент»).
-# Одиночный эмодзи (только слева или только справа) не допускается: всегда по эмодзи с обеих сторон.
+# Сколько вариантов эмодзи было раньше: при генерации генератор случайных чисел продвигается на столько же,
+# поэтому выбор ТЕКСТОВ (и callback_data) по seed остаётся прежним, а меняются только эмодзи.
+_LEGACY_SHOP_EMOJI_COUNT = 3
+_LEGACY_GALLERY_EMOJI_COUNT = 4
+
+# Как показываем эмодзи пары. Одиночный эмодзи (только слева или только справа) не допускается: всегда с обеих сторон.
 ACCENTS: tuple[str, ...] = ("both",)
 LAYOUTS: tuple[str, ...] = ("row", "column")      # row — в один ряд, column — по кнопке в ряд
 ORDERS: tuple[str, ...] = ("shop_first",)   # «Магазин» всегда идёт раньше «Галереи»
@@ -52,7 +60,7 @@ validate_tables()
 
 
 def label(text: str, emoji: tuple[str, str], accent: str) -> str:
-    """Итоговая подпись кнопки без разделителей: «🛍️ Магазин 🏩», «🛍️ Магазин» или «Магазин 🏩»."""
+    """Итоговая подпись кнопки без разделителей: «🍫 Магазин 💫», «🍫 Магазин» или «Магазин 💫»."""
     left, right = emoji
     parts = [text]
     if accent in ("both", "left"):
@@ -65,9 +73,18 @@ def label(text: str, emoji: tuple[str, str], accent: str) -> str:
 _LEGACY_TEXTS = {"Ассортимент": "Наш ассортимент"}
 
 
+def _static_label(lbl: str, emoji: tuple[str, str]) -> str:
+    """Подпись «<левый> <текст> <правый>» со статичной парой эмодзи; текст между эмодзи сохраняется как есть."""
+    parts = lbl.split(" ")
+    if len(parts) < 3:
+        return lbl
+    return f"{emoji[0]} {' '.join(parts[1:-1])} {emoji[1]}"
+
+
 def _migrate_legacy(d: dict) -> dict:
     """Приводит конфиги, уже сохранённые в БД, к текущим правилам (без перезаписи в БД):
-    только эмодзи с обеих сторон, «Магазин» первым, «Наш ассортимент» вместо «Ассортимент»."""
+    только эмодзи с обеих сторон, «Магазин» первым, «Наш ассортимент» вместо «Ассортимент»,
+    статичные эмодзи вместо случайно подобранных раньше."""
     d = dict(d)
     for key, texts, emojis in (("shop", SHOP_TEXTS, SHOP_EMOJI), ("gallery", GALLERY_TEXTS, GALLERY_EMOJI)):
         lbl = str(d[f"{key}_label"])
@@ -75,11 +92,12 @@ def _migrate_legacy(d: dict) -> dict:
             if old in lbl and new not in lbl:
                 lbl = lbl.replace(old, new)
         if d.get(f"{key}_accent") != "both":
-            idx_t, idx_e = int(d[f"{key}_text"]), int(d[f"{key}_emoji"])
-            if idx_t < len(texts) and idx_e < len(emojis):
-                lbl = label(texts[idx_t], emojis[idx_e], "both")
+            idx_t = int(d[f"{key}_text"])
+            if idx_t < len(texts):
+                lbl = label(texts[idx_t], emojis[0], "both")
             d[f"{key}_accent"] = "both"
-        d[f"{key}_label"] = lbl
+        d[f"{key}_label"] = _static_label(lbl, emojis[0])
+        d[f"{key}_emoji"] = 0
     d["order"] = "shop_first"
     return d
 
@@ -108,6 +126,11 @@ class ShopButtonsConfig:
     def gallery_heading(self) -> str:
         """Заголовок раздела «Галерея»: ровно подпись кнопки, по которой пользователь сюда перешёл (с её эмодзи)."""
         return self.gallery_label
+
+    @property
+    def shop_heading(self) -> str:
+        """Заголовок раздела «Магазин»: ровно подпись кнопки, по которой пользователь сюда перешёл (с её эмодзи)."""
+        return self.shop_label
 
     def signature(self) -> str:
         """По чему сравниваем «одинаковость» ботов: подписи, порядок, раскладка и callback_data."""
@@ -162,16 +185,18 @@ class ShopButtonsConfig:
 
 def generate_config(seed: str, taken: set[str] | None = None) -> ShopButtonsConfig:
     """Детерминированно по seed. Если итог совпал с чужим из `taken`, берётся следующая попытка
-    (последовательность попыток тоже детерминирована). Текст и эмодзи каждой кнопки выбираются независимо."""
+    (последовательность попыток тоже детерминирована). Текст кнопки выбирается по seed, эмодзи статичны."""
     rng = random.Random(hashlib.sha256(("shop_buttons:" + seed).encode()).digest())
     taken = taken or set()
     cfg = None
     for _ in range(300):
         shop_text = rng.randrange(len(SHOP_TEXTS))
-        shop_emoji = rng.randrange(len(SHOP_EMOJI))
+        rng.randrange(_LEGACY_SHOP_EMOJI_COUNT)      # эмодзи статичны; шаг ГСЧ сохранён, чтобы тексты по seed не сдвинулись
+        shop_emoji = 0
         shop_accent = rng.choice(ACCENTS)
         gallery_text = rng.randrange(len(GALLERY_TEXTS))
-        gallery_emoji = rng.randrange(len(GALLERY_EMOJI))
+        rng.randrange(_LEGACY_GALLERY_EMOJI_COUNT)
+        gallery_emoji = 0
         gallery_accent = rng.choice(ACCENTS)
         order = rng.choice(ORDERS)
         layout = rng.choice(LAYOUTS)

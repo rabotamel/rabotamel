@@ -122,8 +122,8 @@
   .field{margin-top:14px}
   .field label{font-size:15px;color:var(--text);margin:0 0 6px}
   .field .fhint{font-size:13px;color:var(--muted);margin-top:6px}
-  input,textarea{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
-  input:focus,textarea:focus{outline:2px solid var(--blue);outline-offset:-1px}
+  input,textarea,select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font:inherit}
+  input:focus,textarea:focus,select:focus{outline:2px solid var(--blue);outline-offset:-1px}
   textarea{resize:vertical;min-height:70px}
   .err{color:var(--red);font-size:13px;min-height:18px;margin-top:12px}
   .row{display:flex;gap:10px;justify-content:flex-end;margin-top:14px}
@@ -154,6 +154,9 @@
   .dd-list .dd-btn{box-shadow:0 6px 18px rgba(0,0,0,.22)}
   .conv{margin-top:8px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
   .sb-submit-row .btn{min-width:120px}
+  .chk{display:flex;align-items:center;gap:8px;margin-top:12px}
+  .chk input{width:auto}
+  .btn.sm{padding:6px 10px;font-size:13px}
   .mod-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
   .mod-row:first-child{border-top:0}
   .mod-row .grow{flex:1;min-width:0}
@@ -182,6 +185,7 @@
   <button class="tab active" data-tab="bot">Бот</button>
   <button class="tab" data-tab="tokens">Токены</button>
   <button class="tab" data-tab="moderators">Модераторы</button>
+  <button class="tab" data-tab="shop">Магазин</button>
   <button class="tab" data-tab="sandbox">Песочница</button>
 </nav>
 
@@ -208,6 +212,37 @@
     <div class="card sb">
       <h3>Модераторы</h3>
       <div id="mod-list"></div>
+    </div>
+  </section>
+
+  <section id="tab-shop" hidden>
+    <div class="card sb">
+      <h3 id="shop-form-title">Добавить товар</h3>
+      <p class="hint">Товары показываются в меню магазина бота. Цена — в конфетах 🍬.</p>
+      <label for="shop-name">Название</label>
+      <input id="shop-name" maxlength="64" autocomplete="off" placeholder="Название товара">
+      <label for="shop-price">Цена</label>
+      <input id="shop-price" type="text" inputmode="numeric" autocomplete="off" placeholder="100">
+      <label for="shop-about">О товаре</label>
+      <textarea id="shop-about" maxlength="3000" placeholder="**Жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~"></textarea>
+      <p class="hint">Оформление: **жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~, ||спойлер||, `код`, [текст](https://адрес), «# Заголовок» в начале строки. В боте это превращается в настоящее форматирование.</p>
+      <label for="shop-color">Цвет кнопки товара</label>
+      <select id="shop-color">
+        <option value="">Стандартный</option>
+        <option value="danger">Красный</option>
+        <option value="success">Зелёный</option>
+        <option value="primary">Синий</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="shop-visible" checked> Показывать в магазине</label>
+      <div class="msg" id="shop-msg"></div>
+      <div class="row">
+        <button type="button" class="btn" id="shop-cancel" hidden>Отмена</button>
+        <button type="button" class="btn green" id="shop-save">Добавить</button>
+      </div>
+    </div>
+    <div class="card sb">
+      <h3>Товары</h3>
+      <div id="shop-list"></div>
     </div>
   </section>
 
@@ -523,7 +558,9 @@ document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () 
   $('#tab-bot').hidden = tab !== 'bot';
   $('#tab-tokens').hidden = tab !== 'tokens';
   $('#tab-moderators').hidden = tab !== 'moderators';
+  $('#tab-shop').hidden = tab !== 'shop';
   $('#tab-sandbox').hidden = tab !== 'sandbox';
+  if (tab === 'shop') loadShop();
 }));
 
 $('#btn-edit').addEventListener('click', () => { editing = !editing; if (S) renderList(); });
@@ -736,6 +773,103 @@ $('#mod-list').addEventListener('click', async (e) => {
   try {
     await api('DELETE', '/api/moderators/' + btn.dataset.modDel);
     await loadState();
+  } catch (err) { toast(err.message); }
+});
+
+/* ---------- вкладка «Магазин» ---------- */
+const SHOP_COLORS = {'': 'стандартная', danger: 'красная', success: 'зелёная', primary: 'синяя'};
+let shopItems = [];
+let shopEditId = null;
+
+async function loadShop() {
+  try {
+    shopItems = (await api('GET', '/api/shop/products')).products;
+    renderShop();
+  } catch (err) { toast(err.message); }
+}
+
+function renderShop() {
+  $('#shop-list').innerHTML = shopItems.length ? shopItems.map((p, i) => {
+    const about = p.about ? esc(p.about.length > 80 ? p.about.slice(0, 80) + '…' : p.about).replace(/\n/g, ' ') : 'без описания';
+    return `<div class="mod-row"><div class="grow"><div class="name">${esc(p.name)} — ${esc(fmtNum(p.price))}🍬${p.visible ? '' : ' · скрыт'}</div>` +
+      `<div class="sub">кнопка ${SHOP_COLORS[p.color] || 'стандартная'} · ${about}</div></div>` +
+      `<button type="button" class="btn sm" data-shop-up="${p.id}" ${i === 0 ? 'disabled' : ''}>↑</button>` +
+      `<button type="button" class="btn sm" data-shop-down="${p.id}" ${i === shopItems.length - 1 ? 'disabled' : ''}>↓</button>` +
+      `<button type="button" class="btn sm" data-shop-edit="${p.id}">Изменить</button>` +
+      `<button type="button" class="btn sm" data-shop-vis="${p.id}">${p.visible ? 'Скрыть' : 'Показать'}</button>` +
+      `<button type="button" class="btn red sm" data-shop-del="${p.id}">Удалить</button></div>`;
+  }).join('') : '<p class="hint">Товаров пока нет.</p>';
+}
+
+function shopFormReset() {
+  shopEditId = null;
+  $('#shop-name').value = ''; $('#shop-price').value = ''; $('#shop-about').value = '';
+  $('#shop-color').value = ''; $('#shop-visible').checked = true;
+  $('#shop-form-title').textContent = 'Добавить товар';
+  $('#shop-save').textContent = 'Добавить';
+  $('#shop-cancel').hidden = true;
+}
+
+function shopBody(p) {
+  return {name: p.name, price: String(p.price), about: p.about, color: p.color, visible: p.visible};
+}
+
+$('#shop-save').addEventListener('click', async () => {
+  setMsg('#shop-msg', '');
+  const body = {
+    name: $('#shop-name').value, price: $('#shop-price').value, about: $('#shop-about').value,
+    color: $('#shop-color').value, visible: $('#shop-visible').checked,
+  };
+  $('#shop-save').disabled = true;
+  try {
+    if (shopEditId) await api('POST', '/api/shop/products/' + shopEditId + '/edit', body);
+    else await api('POST', '/api/shop/products', body);
+    const edited = !!shopEditId;
+    shopFormReset();
+    setMsg('#shop-msg', edited ? 'Товар сохранён' : 'Товар добавлен');
+    await loadShop();
+  } catch (err) { setMsg('#shop-msg', err.message, true); }
+  $('#shop-save').disabled = false;
+});
+
+$('#shop-cancel').addEventListener('click', () => { shopFormReset(); setMsg('#shop-msg', ''); });
+
+$('#shop-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const d = btn.dataset;
+  const id = Number(d.shopUp || d.shopDown || d.shopEdit || d.shopVis || d.shopDel);
+  const idx = shopItems.findIndex((p) => p.id === id);
+  if (idx < 0) return;
+  const p = shopItems[idx];
+  try {
+    if (d.shopEdit) {
+      shopEditId = p.id;
+      $('#shop-name').value = p.name; $('#shop-price').value = p.price; $('#shop-about').value = p.about;
+      $('#shop-color').value = p.color; $('#shop-visible').checked = p.visible;
+      $('#shop-form-title').textContent = 'Изменить товар';
+      $('#shop-save').textContent = 'Сохранить';
+      $('#shop-cancel').hidden = false;
+      setMsg('#shop-msg', '');
+      $('#shop-name').scrollIntoView({behavior: 'smooth', block: 'center'});
+    } else if (d.shopVis) {
+      await api('POST', '/api/shop/products/' + p.id + '/edit', {...shopBody(p), visible: !p.visible});
+      await loadShop();
+    } else if (d.shopUp || d.shopDown) {
+      const to = idx + (d.shopUp ? -1 : 1);
+      const ids = shopItems.map((x) => x.id);
+      [ids[idx], ids[to]] = [ids[to], ids[idx]];
+      await api('POST', '/api/shop/products/reorder', {ids});
+      await loadShop();
+    } else if (d.shopDel) {
+      const ok = await askConfirm({
+        title: 'Удалить товар?', text: `«${p.name}» исчезнет из магазина.`, ok: 'Удалить', danger: true,
+      });
+      if (!ok) return;
+      await api('DELETE', '/api/shop/products/' + p.id);
+      if (shopEditId === p.id) shopFormReset();
+      await loadShop();
+    }
   } catch (err) { toast(err.message); }
 });
 

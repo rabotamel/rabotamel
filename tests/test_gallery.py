@@ -27,10 +27,11 @@ class GalleryTests(unittest.TestCase):
 
     def test_independent_choice_and_all_values_reachable(self):
         cfgs = [gl.generate_config(f"x{i}") for i in range(800)]
-        self.assertEqual({(c.buy_text, c.buy_emoji) for c in cfgs}, {(a, b) for a in range(4) for b in range(4)})
-        self.assertEqual({(c.premium_text, c.premium_emoji) for c in cfgs}, {(a, b) for a in range(len(gl.PREMIUM_TEXTS)) for b in range(4)})
+        # тексты кнопок по-прежнему выбираются по seed, эмодзи статичны (индекс всегда 0)
+        self.assertEqual({(c.buy_text, c.buy_emoji) for c in cfgs}, {(a, 0) for a in range(len(gl.BUY_TEXTS))})
+        self.assertEqual({(c.premium_text, c.premium_emoji) for c in cfgs}, {(a, 0) for a in range(len(gl.PREMIUM_TEXTS))})
         self.assertEqual({c.desc for c in cfgs}, set(range(len(gl.DESCRIPTIONS))))
-        self.assertEqual({deco.generate_config(f"d{i}").left for i in range(300)}, set(deco.EMOJI))
+        self.assertEqual({deco.generate_config(f"d{i}").left for i in range(300)}, {"💫"})
 
     def test_callbacks_unique_and_valid(self):
         seen = set()
@@ -56,6 +57,66 @@ class GalleryTests(unittest.TestCase):
             self.assertEqual(lines[-1], greeting.render(g, "x", 12).rstrip().splitlines()[-1])
             self.assertTrue(out.endswith(f"12{greeting.CANDY}"))
             self.assertFalse(any(bad in out for bad in FORBIDDEN))
+
+class StaticEmojiTests(unittest.TestCase):
+    """Эмодзи галереи статичны: у всех ботов одни и те же, по seed не подбираются."""
+
+    def test_gallery_emoji_are_fixed_for_every_bot(self):
+        for i in range(300):
+            c = gl.generate_config(f"st{i}")
+            self.assertTrue(c.buy_label.startswith("🎥 ") and c.buy_label.endswith(" 💖"))
+            self.assertTrue(c.premium_label.startswith("💫 ") and c.premium_label.endswith(" 💖"))
+            self.assertEqual(gl.layout_rows(c)[2][0][0], "📩 Предложка 🤍")
+            self.assertEqual(gl.layout_rows(c)[3][0][0], "⬅️ Назад")
+
+    def test_menu_matches_the_spec_for_every_bot(self):
+        for i in range(300):
+            s, g = sb.generate_config(f"m{i}"), greeting.generate_config(f"m{i}")
+            out = gl.render(gl.generate_config(f"m{i}"), deco.generate_config(f"m{i}"), s.gallery_heading,
+                            g.template, 7, "Предложка")
+            title, desc, hint, balance = out.split("\n\n")
+            self.assertEqual(title, f"<b>🎥 {s.gallery_title} 💖</b>")            # заголовок: 🎥 … 💖
+            self.assertTrue(desc.startswith("💫 ") and desc.endswith(" 💫"))      # описание: 💫 … 💫
+            self.assertTrue(hint.startswith("🤍 ") and hint.endswith(" 🍬"))      # подсказка через название предложки
+            self.assertIn("«Предложка»", hint)
+            self.assertTrue(balance.startswith("🍫 ") and balance.endswith("7🍬"))  # баланс: 🍫 … 🍬
+
+    def test_hint_templates_carry_no_emoji_and_stay_varied(self):
+        for h in gl.HINTS:
+            self.assertEqual(gl._strip_lead(h), h)
+        self.assertEqual({gl.generate_config(f"h{i}").hint for i in range(300)}, set(gl.HINTS))
+
+    def test_texts_by_seed_are_unchanged_by_the_emoji_switch(self):
+        # значения сняты ДО перехода на статичные эмодзи: выбор текстов и callback_data по seed не сдвинулся
+        c = gl.generate_config("seed0")
+        self.assertEqual((c.desc, c.buy_text, c.premium_text), (3, 2, 1))
+        self.assertEqual((c.buy_cb, c.premium_cb, c.back_cb), ("gb:43bb275893", "gp:b45dca5bc8", "gk:592ce89bcf"))
+        self.assertEqual(c.hint, "Заработать конфеты можно через «{proposal_title}»")
+        c = gl.generate_config("seed2")
+        self.assertEqual((c.desc, c.buy_text, c.premium_text), (1, 3, 0))
+        self.assertEqual(c.buy_cb, "gb:89bb13f879")
+
+    def test_saved_config_with_old_random_emoji_is_normalized(self):
+        import json
+        d = json.loads(gl.generate_config("old2").to_json())
+        d.update(buy_label="🎬 Смотреть видео (3🍬) ✨", premium_label="💎 VIP-подписка 👑",
+                 hint="✨ Нажмите «{proposal_title}», чтобы заработать конфеты", buy_emoji=1, premium_emoji=2)
+        n = gl.GalleryConfig.from_json(json.dumps(d, ensure_ascii=False))
+        self.assertEqual(n.buy_label, "🎥 Смотреть видео (3🍬) 💖")     # цена 3🍬 в тексте кнопки сохранена
+        self.assertEqual(n.premium_label, "💫 VIP-подписка 💖")
+        self.assertEqual(n.hint_template, "Нажмите «{proposal_title}», чтобы заработать конфеты")
+        self.assertEqual((n.buy_emoji, n.premium_emoji), (0, 0))
+        self.assertEqual(gl.GalleryConfig.from_json(n.to_json()), n)   # повторное чтение ничего не меняет
+
+    def test_old_deco_marker_from_db_becomes_static(self):
+        import json
+        for old in ("🌸", "✨", "🌷", "🪻"):
+            n = deco.DecoConfig.from_json(json.dumps({"v": 1, "left": old, "right": old}, ensure_ascii=False))
+            self.assertEqual((n.left, n.right), ("💫", "💫"))
+            self.assertEqual(n.wrap("текст"), "💫 текст 💫")
+        with self.assertRaises(ValueError):
+            deco.DecoConfig.from_json(json.dumps({"v": 1, "left": "🍬", "right": "🍬"}, ensure_ascii=False))
+
 
 class _FakeAiogramTypes:
     """Подмена aiogram.types на время теста: запоминает kwargs кнопок (aiogram может быть не установлен)."""

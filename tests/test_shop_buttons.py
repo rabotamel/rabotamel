@@ -142,5 +142,33 @@ class LegacyMigrationTests(unittest.TestCase):
         d = json.loads(c.to_json())
         d.update(shop_accent="both", shop_label="🛒 Ассортимент 🏬")
         n = sb.ShopButtonsConfig.from_json(json.dumps(d, ensure_ascii=False))
-        self.assertEqual(n.shop_label, "🛒 Наш ассортимент 🏬")
+        self.assertEqual(n.shop_label, "🍫 Наш ассортимент 💫")  # переименование сохраняется, эмодзи — статичные
+
+    def test_old_random_emoji_become_static(self):
+        import json
+        c = sb.generate_config("legacy3")
+        d = json.loads(c.to_json())
+        d.update(shop_label="📦 Каталог 🛍️", gallery_label="🖼️ Видео-рулетка 🩷", shop_emoji=2, gallery_emoji=0)
+        n = sb.ShopButtonsConfig.from_json(json.dumps(d, ensure_ascii=False))
+        self.assertEqual(n.shop_label, "🍫 Каталог 💫")
+        self.assertEqual(n.gallery_label, "🎥 Видео-рулетка 💖")
+        self.assertEqual(n.gallery_heading, n.gallery_label)
+        self.assertEqual(sb.ShopButtonsConfig.from_json(n.to_json()), n)
+
+
+class StaticEmojiTests(unittest.TestCase):
+    def test_emoji_are_the_same_for_every_bot(self):
+        for i in range(300):
+            c = sb.generate_config(f"e{i}")
+            self.assertTrue(c.shop_label.startswith("🍫 ") and c.shop_label.endswith(" 💫"))
+            self.assertTrue(c.gallery_label.startswith("🎥 ") and c.gallery_label.endswith(" 💖"))
+            self.assertEqual((c.shop_emoji, c.gallery_emoji), (0, 0))
+
+    def test_texts_and_callbacks_by_seed_are_unchanged_by_the_emoji_switch(self):
+        # значения сняты ДО перехода на статичные эмодзи
+        c = sb.generate_config("seed0")
+        self.assertEqual((c.shop_text, c.gallery_text, c.layout), (0, 1, "column"))
+        self.assertEqual((c.shop_cb, c.gallery_cb), ("sh:f38c245d7f", "gl:0087e0a48a"))
+        c = sb.generate_config("seed2")
+        self.assertEqual((c.shop_text, c.gallery_text, c.layout), (2, 0, "column"))
         self.assertNotIn("Ассортимент", sb.SHOP_TEXTS)

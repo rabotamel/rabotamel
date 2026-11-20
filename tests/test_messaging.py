@@ -165,6 +165,46 @@ class MessagingTests(unittest.TestCase):
             run(messaging.send_message(bot, 1, "t", "https://x/y.jpg"))
 
 
+class EditMessageTests(unittest.TestCase):
+    def _bot(self, errors):
+        calls = []
+
+        class Bot:
+            async def edit_message_text(self, **kw):
+                calls.append(("text", kw))
+                if errors:
+                    raise errors.pop(0)
+
+            async def edit_message_caption(self, **kw):
+                calls.append(("caption", kw))
+                if errors:
+                    raise errors.pop(0)
+
+        return Bot(), calls
+
+    def test_text_and_caption(self):
+        bot, calls = self._bot([])
+        asyncio.run(messaging.edit_message(bot, 5, 10, "<b>x</b>", "KB"))
+        asyncio.run(messaging.edit_message(bot, 5, 10, "<b>x</b>", "KB", has_photo=True))
+        self.assertEqual([c[0] for c in calls], ["text", "caption"])
+        self.assertEqual(calls[0][1]["text"], "<b>x</b>")
+        self.assertEqual(calls[1][1]["caption"], "<b>x</b>")
+        self.assertEqual((calls[0][1]["parse_mode"], calls[0][1]["reply_markup"]), ("HTML", "KB"))
+
+    def test_parse_error_falls_back_to_plain_text(self):
+        bot, calls = self._bot([TelegramBadRequest("Bad Request: can't parse entities")])
+        asyncio.run(messaging.edit_message(bot, 5, 10, "<b>a &amp; b</b>", None))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((calls[1][1]["text"], calls[1][1]["parse_mode"]), ("a & b", None))
+
+    def test_not_modified_is_silent_other_errors_propagate(self):
+        bot, _ = self._bot([TelegramBadRequest("Bad Request: message is not modified: exactly the same")])
+        self.assertIsNone(asyncio.run(messaging.edit_message(bot, 5, 10, "x")))
+        bot, _ = self._bot([TelegramBadRequest("Bad Request: message to edit not found")])
+        with self.assertRaises(TelegramBadRequest):
+            asyncio.run(messaging.edit_message(bot, 5, 10, "x"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

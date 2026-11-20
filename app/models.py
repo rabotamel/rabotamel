@@ -161,3 +161,23 @@ class BlockedAuthor(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     blocked_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ShopProduct(Base):
+    """Товар раздела «Магазин». Каталог общий для всех токенов бота (как модераторы): при ротации токена товары остаются.
+
+    `about` хранится так, как его ввели (с `**...**` и другими маркерами) — в HTML Telegram оно переводится при показе
+    (shop.format_about). `color` — значение `style` кнопки Telegram: '' (стандартная), 'danger', 'success', 'primary'.
+    Показываются только товары с is_visible = true, в порядке (position, id)."""
+
+    __tablename__ = "shop_products"
+    __table_args__ = (Index("ix_shop_products_order", "is_visible", "position", "id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64))
+    price: Mapped[int] = mapped_column(BigInteger)
+    about: Mapped[str] = mapped_column(Text, default="", server_default="")
+    color: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    position: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    is_visible: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

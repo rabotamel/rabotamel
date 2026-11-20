@@ -1,16 +1,16 @@
-"""Общий декоративный маркер бота: эмодзи, обрамляющие описания разделов («🌸 описание 🌸»).
+"""Общий декоративный маркер бота: эмодзи, обрамляющие описания разделов («💫 описание 💫»).
 
-Подбирается один раз для бота (seed = токен) и хранится в БД как отдельный вид сообщений «deco». Сейчас им
-пользуется раздел «Галерея»; другие разделы должны брать маркер отсюда (`texts.deco`), чтобы оформление
-описаний во всём боте было единым. Хранятся левый и правый эмодзи отдельно — на будущее; сейчас оба равны.
-Только добавлять в конец списка EMOJI, не переставлять.
+Маркер СТАТИЧЕН: у всех ботов это одно и то же `MARKER` (💫), по seed он больше не подбирается. Вид «deco» остаётся в
+БД и в `texts.KINDS` ради совместимости; сейчас им пользуется раздел «Галерея», другие разделы должны брать маркер
+отсюда (`texts.deco`), чтобы оформление описаний во всём боте было единым. Хранятся левый и правый эмодзи отдельно — на
+будущее; сейчас оба равны. Маркер, сохранённый в БД у уже работающих ботов (🌸 ✨ 🌷 🪻 …), приводится к 💫 при чтении
+(`DecoConfig.from_json`), без перезаписи БД.
 """
-import hashlib
 import json
-import random
 from dataclasses import dataclass
 
-EMOJI: tuple[str, ...] = ("🌸", "✨", "🌷", "🪻", "💫")
+MARKER = "💫"
+EMOJI: tuple[str, ...] = (MARKER,)   # единственный допустимый маркер (раньше было пять вариантов по seed)
 
 
 @dataclass(frozen=True)
@@ -27,19 +27,15 @@ class DecoConfig:
     @classmethod
     def from_json(cls, raw: str) -> "DecoConfig":
         d = json.loads(raw)
-        cfg = cls(left=str(d["left"]), right=str(d["right"]))
-        if not cfg.left.strip() or not cfg.right.strip() or "🍬" in (cfg.left + cfg.right):
+        if not str(d["left"]).strip() or not str(d["right"]).strip() or "🍬" in (str(d["left"]) + str(d["right"])):
             raise ValueError("некорректный декоративный маркер")
-        return cfg
+        return cls(left=MARKER, right=MARKER)  # старый маркер из БД заменяется статичным
 
     def wrap(self, text: str) -> str:
-        """«🌸 текст 🌸»."""
+        """«💫 текст 💫»."""
         return f"{self.left} {text} {self.right}"
 
 
 def generate_config(seed: str, taken: set[str] | None = None) -> DecoConfig:
-    """Детерминированно по seed. `taken` игнорируется: вариантов всего пять, уникальность между ботами
-    здесь невозможна (и не нужна — маркер лишь часть общего оформления)."""
-    rng = random.Random(hashlib.sha256(("deco:" + seed).encode()).digest())
-    emoji = rng.choice(EMOJI)
-    return DecoConfig(left=emoji, right=emoji)
+    """Маркер статичен — не зависит от seed. Параметры оставлены ради единого интерфейса `TextKind.generate`."""
+    return DecoConfig(left=MARKER, right=MARKER)

@@ -2,16 +2,16 @@
 
 Базовый смысл (обязательные элементы, меняется только форма):
 
-    **🌸 Добро пожаловать в <название бота>**
+    **💖 Добро пожаловать в <название бота>**
 
-    🛜 Анонимность — оплата без привязок и без риска
-    📘 Никаких следов — чаты не хранятся, историю никто не увидит.
+    🤍 Анонимность — оплата без привязок и без риска
+    💫 Никаких следов — чаты не хранятся, историю никто не увидит.
 
-    🍭 Ваш баланс: 0🍬
+    🍫 Ваш баланс: 0🍬
 
 Что здесь устроено:
-  * SYNONYMS / EMOJI_SETS — словари синонимов и эмодзи по позициям (расширяются добавлением в конец);
-  * PALETTES  — согласованные наборы эмодзи, чтобы в одном сообщении они сочетались по стилю;
+  * HELLO / ANON_KEY / … — словари синонимов (расширяются добавлением в конец);
+  * PALETTES  — эмодзи сообщения. СТАТИЧНЫ: одна палитра (💖 🤍 💫 🍫), по seed больше не подбираются;
   * LAYOUTS   — структурные шаблоны (компоновка блоков), без разделителей и рамок;
   * GreetingConfig / generate_config — детерминированный выбор варианта по seed (токен бота);
   * GreetingConfig.template — ГОТОВЫЙ текст-шаблон с плейсхолдерами {name} и {balance}. Именно он хранится в БД
@@ -22,7 +22,9 @@
   * 🍬 в конце строки баланса — валюта бота, ни при каких условиях не заменяется (проверяется в validate()).
   * Формат разметки — Telegram HTML (parse_mode="HTML"): <b> для жирного, <blockquote> для цитаты (только у пунктов).
     Цитата всегда отделена пустой строкой от заголовка сверху и от баланса снизу (см. _space_quote()).
-  * Индексы в словарях только добавляются в конец, не переставляются и не удаляются.
+  * Индексы в словарях текстов только добавляются в конец, не переставляются и не удаляются.
+  * Шаблоны, сохранённые в БД у работающих ботов со случайными эмодзи, приводятся к статичным при чтении
+    (`_static_emoji`, без перезаписи БД).
 """
 import hashlib
 import html
@@ -94,24 +96,31 @@ BALANCE_LABEL: tuple[str, ...] = (
     "Ваш текущий баланс",
 )
 
-# ---------- эмодзи ----------
-# Наборы по позициям (из них собираются палитры; проверка в validate_tables()).
+# ---------- эмодзи (статичные) ----------
+# По одному эмодзи на позицию: в приветствии у всех ботов одни и те же 💖 🤍 💫 🍫 (по seed не подбираются).
 EMOJI_SETS: dict[str, tuple[str, ...]] = {
+    "hello": ("💖",),
+    "anon": ("🤍",),
+    "nolog": ("💫",),
+    "balance": ("🍫",),
+}
+
+# Единственная палитра: (hello, anon, nolog, balance). Индекс палитры в конфиге остаётся ради совместимости и всегда 0.
+PALETTES: tuple[tuple[str, str, str, str], ...] = (
+    ("💖", "🤍", "💫", "🍫"),
+)
+
+# Сколько палитр было раньше: при генерации ГСЧ продвигается на столько же, поэтому выбор текстовых вариантов по seed
+# остаётся прежним, а меняются только эмодзи.
+_LEGACY_PALETTE_COUNT = 6
+
+# Эмодзи, которые подбирались раньше (по позициям): в шаблонах, уже сохранённых в БД, они заменяются на статичные.
+_LEGACY_EMOJI: dict[str, tuple[str, ...]] = {
     "hello": ("🌸", "✨", "🌷", "🪻"),
     "anon": ("🛜", "🛡️", "🕶️", "🔐"),
     "nolog": ("📘", "📓", "🙈", "🤐"),
-    "balance": ("🍭", "🧁", "🍫", "🍨"),
+    "balance": ("🍭", "🧁", "🍨"),   # 🍫 уже статичный
 }
-
-# Согласованные наборы: (hello, anon, nolog, balance). Подбираются по общему настроению.
-PALETTES: tuple[tuple[str, str, str, str], ...] = (
-    ("🌸", "🛜", "📘", "🍭"),  # нежная классика (исходный вариант)
-    ("🌷", "🛡️", "📓", "🧁"),  # весенняя, мягкая
-    ("🪻", "🔐", "📘", "🍨"),  # сиреневая, спокойная
-    ("✨", "🕶️", "🙈", "🍭"),  # лёгкая, «спрятано от глаз»
-    ("✨", "🔐", "🤐", "🍫"),  # строгая, тёмные тона
-    ("🌸", "🛡️", "📓", "🧁"),  # розово-бежевая
-)
 
 # ---------- компоновка ----------
 # order: "anon_first" | "nolog_first" | "any" (выбирается по seed)
@@ -154,6 +163,9 @@ def validate_tables() -> None:
     for slot_set in EMOJI_SETS.values():
         if CANDY in slot_set:
             raise AssertionError("🍬 нельзя включать в наборы эмодзи")
+    legacy = [e for slot in _LEGACY_EMOJI.values() for e in slot]
+    if len(set(legacy)) != len(legacy) or any(e in legacy for slot in EMOJI_SETS.values() for e in slot):
+        raise AssertionError("старые и новые эмодзи не должны пересекаться (иначе замена в шаблонах неоднозначна)")
 
 
 validate_tables()
@@ -181,6 +193,16 @@ def _tighten_points(template: str, variant: str) -> str:
     if len(blocks) == 4:   # заголовок, пункт, пункт, баланс
         blocks = [blocks[0], blocks[1] + "\n" + blocks[2], blocks[3]]
     return "\n\n".join(blocks)
+
+
+def _static_emoji(template: str) -> str:
+    """Заменяет эмодзи, подобранные раньше случайно, на статичные (по позициям). У шаблонов, уже собранных
+    с текущей палитрой, ничего не меняется, поэтому повторный вызов безопасен. Без перезаписи в БД."""
+    for slot, olds in _LEGACY_EMOJI.items():
+        new = EMOJI_SETS[slot][0]
+        for old in olds:
+            template = template.replace(old, new)
+    return template
 
 
 @dataclass(frozen=True)
@@ -225,8 +247,8 @@ class GreetingConfig:
             layout=int(d["layout"]), variant=str(d["variant"]), order=str(d["order"]),
             hello=int(d["hello"]), anon_key=int(d["anon_key"]), pay=int(d["pay"]),
             nolog_key=int(d["nolog_key"]), chats=int(d["chats"]), history=int(d["history"]),
-            balance_label=int(d["balance_label"]), palette=int(d["palette"]),
-            template=_space_quote(str(d["template"])),
+            balance_label=int(d["balance_label"]), palette=0,
+            template=_static_emoji(_space_quote(str(d["template"]))),
         )
         cfg.validate()
         return cfg
@@ -283,9 +305,15 @@ def build_template(
     return f"{title}\n\n{points}\n\n{balance}"
 
 
+def _pick_palette(rng: random.Random) -> int:
+    """Палитра статична (всегда 0); шаг ГСЧ сохранён, чтобы текстовые варианты по seed остались прежними."""
+    rng.randrange(_LEGACY_PALETTE_COUNT)
+    return 0
+
+
 def generate_config(seed: str, taken: set[str] | None = None) -> GreetingConfig:
     """Детерминированно по seed. Если итоговый текст совпал с чужим из `taken`, берётся следующая попытка
-    (последовательность попыток тоже детерминирована)."""
+    (последовательность попыток тоже детерминирована). Тексты выбираются по seed, эмодзи статичны."""
     rng = random.Random(hashlib.sha256(("greeting:" + seed).encode()).digest())
     taken = taken or set()
     cfg = None
@@ -303,7 +331,7 @@ def generate_config(seed: str, taken: set[str] | None = None) -> GreetingConfig:
             chats=rng.randrange(len(CHATS)),
             history=rng.randrange(len(HISTORY)),
             balance_label=rng.randrange(len(BALANCE_LABEL)),
-            palette=rng.randrange(len(PALETTES)),
+            palette=_pick_palette(rng),
         )
         cfg = GreetingConfig(**choice, template=build_template(**choice))
         if cfg.signature() not in taken:

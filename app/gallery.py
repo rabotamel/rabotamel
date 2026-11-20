@@ -5,12 +5,16 @@
 
     {маркер} {описание} {маркер}
 
+    {подсказка: как заработать конфеты}
+
     {строка баланса из приветствия этого бота}
 
-  * название — текст кнопки «Галерея» из shop_buttons (без эмодзи); подставляется при отправке;
-  * маркер — общий декоративный эмодзи бота (app/deco.py);
-  * строка баланса — ровно последняя строка шаблона приветствия бота (та же формулировка, эмодзи и 🍬).
-Описание, подписи и callback_data кнопок подбираются один раз по seed (токен) и хранятся в БД.
+  * название — подпись кнопки «Галерея» из shop_buttons («🎥 Галерея 💖»; эмодзи статичны);
+  * маркер — статичный 💫 (app/deco.py): «💫 описание 💫»;
+  * подсказка — «🤍 <фраза с названием предложки> 🍬» (HINT_LEFT / HINT_RIGHT, статичные);
+  * строка баланса — ровно последняя строка шаблона приветствия бота («🍫 Ваш баланс: N🍬»).
+ЭМОДЗИ ВО ВСЕХ ЭЛЕМЕНТАХ СТАТИЧНЫ (по seed не подбираются). Тексты описания/подсказки/кнопок и callback_data подбираются
+один раз по seed (токен) и хранятся в БД; у уже сохранённых конфигов эмодзи приводятся к статичным при чтении.
 Цена видео фиксирована — 3🍬 (PRICE), входит в тексты кнопки покупки и не меняется.
 Кнопка «⬅️ Назад» без рандомизации текста; её callback_data уникален для бота.
 Кнопка «Предложка» стоит перед «Назад», её подпись рандомизируется отдельно (suggest_ui.py); её callback_data и callback_data
@@ -21,6 +25,7 @@ import hashlib
 import html
 import json
 import random
+import re
 from dataclasses import dataclass
 
 PRICE = 3
@@ -40,27 +45,43 @@ BUY_TEXTS: tuple[str, ...] = (
     f"Купить видео ({PRICE}{CANDY})", f"Открыть видео ({PRICE}{CANDY})",
     f"Случайное видео ({PRICE}{CANDY})", f"Смотреть видео ({PRICE}{CANDY})",
 )
-BUY_EMOJI: tuple[tuple[str, str], ...] = (("🎥", "🖤"), ("🎬", "✨"), ("🎞️", "💫"), ("📹", "🤍"))
+# Эмодзи кнопок статичны: одна пара на кнопку (индекс buy_emoji / premium_emoji в конфиге остаётся ради совместимости и всегда 0).
+BUY_EMOJI: tuple[tuple[str, str], ...] = (("🎥", "💖"),)
 
 # Подписка: бесплатный просмотр видео + можно скачивать и пересылать контент из бота
 PREMIUM_TEXTS: tuple[str, ...] = ("Премиум подписка", "Премиум-доступ", "VIP-подписка")
-PREMIUM_EMOJI: tuple[tuple[str, str], ...] = (("💝", "👑"), ("👑", "✨"), ("💎", "👑"), ("🌟", "💎"))
+PREMIUM_EMOJI: tuple[tuple[str, str], ...] = (("💫", "💖"),)
+
+# Сколько вариантов эмодзи было раньше: при генерации ГСЧ продвигается на столько же, поэтому выбор текстов
+# и callback_data по seed остаётся прежним, а меняются только эмодзи.
+_LEGACY_BUY_EMOJI_COUNT = 4
+_LEGACY_PREMIUM_EMOJI_COUNT = 4
 
 # Подсказка под описанием: как заработать конфеты. {proposal_title} подставляется при отправке — это название
 # кнопки предложки ЭТОГО бота (suggest_ui, без эмодзи), поэтому подсказка всегда совпадает с кнопкой на экране.
-# Количество конфет не указывается. Только добавлять в конец.
+# Количество конфет не указывается. Только добавлять в конец. Эмодзи в шаблонах нет: на экране подсказка
+# обрамлена статичной парой HINT_LEFT / HINT_RIGHT («🤍 Заработать конфеты можно, нажав «Предложка» 🍬»).
 HINT_TITLE = "{proposal_title}"
+HINT_LEFT, HINT_RIGHT = "🤍", CANDY
 HINTS: tuple[str, ...] = (
-    "🤍 Заработать конфеты можно, нажав «{proposal_title}»",
-    "🍬 Заработать конфеты можно через «{proposal_title}»",
-    "✨ Нажмите «{proposal_title}», чтобы заработать конфеты",
-    "💫 Зарабатывайте конфеты, выбрав «{proposal_title}»",
+    "Заработать конфеты можно, нажав «{proposal_title}»",
+    "Заработать конфеты можно через «{proposal_title}»",
+    "Нажмите «{proposal_title}», чтобы заработать конфеты",
+    "Зарабатывайте конфеты, выбрав «{proposal_title}»",
 )
 DEFAULT_SUGGEST_NAME = "Предложка"
 
 BUY_PREFIX, PREMIUM_PREFIX, BACK_PREFIX = "gb:", "gp:", "gk:"
 SUGGEST_PREFIX, SUGGEST_BACK_PREFIX = "gs:", "gx:"
 HASH_LEN = 10
+
+
+_LEAD_NOISE = re.compile(r"^[^\w«{]+")
+
+
+def _strip_lead(text: str) -> str:
+    """Убирает эмодзи и пробелы в начале шаблона подсказки («🍬 Заработать…» -> «Заработать…»)."""
+    return _LEAD_NOISE.sub("", text)
 
 
 def validate_tables() -> None:
@@ -70,6 +91,8 @@ def validate_tables() -> None:
     for h in HINTS:
         if HINT_TITLE not in h or any(ch.isdigit() for ch in h):
             raise AssertionError("в подсказке должно быть название предложки и не должно быть чисел")
+        if _strip_lead(h) != h:
+            raise AssertionError("эмодзи в шаблон подсказки не входят: их ставит hint_line (HINT_LEFT / HINT_RIGHT)")
     for t in BUY_TEXTS:
         if f"({PRICE}{CANDY})" not in t:
             raise AssertionError("цена должна быть в каждом тексте кнопки покупки")
@@ -83,8 +106,16 @@ _LEGACY_PREMIUM = {"Безлимит и скачивание": "Премиум �
 
 
 def label(text: str, emoji: tuple[str, str]) -> str:
-    """«🎥 Купить видео (3🍬) 🖤» — эмодзи по обе стороны, без разделителей."""
+    """«🎥 Купить видео (3🍬) 💖» — эмодзи по обе стороны, без разделителей."""
     return f"{emoji[0]} {text} {emoji[1]}"
+
+
+def _static_label(lbl: str, emoji: tuple[str, str]) -> str:
+    """Подпись из БД со статичной парой эмодзи: текст между эмодзи (в том числе «(3🍬)») сохраняется как есть."""
+    parts = lbl.split(" ")
+    if len(parts) < 3:
+        return lbl
+    return label(" ".join(parts[1:-1]), emoji)
 
 
 @dataclass(frozen=True)
@@ -143,13 +174,15 @@ class GalleryConfig:
         for old, new in _LEGACY_PREMIUM.items():
             if old in str(d.get("premium_label", "")):
                 d["premium_label"] = str(d["premium_label"]).replace(old, new)
+        # эмодзи статичны: подписи, сохранённые у работающих ботов со случайной парой, приводятся к текущей (без записи в БД)
         cfg = cls(
-            desc=int(d["desc"]), buy_text=int(d["buy_text"]), buy_emoji=int(d["buy_emoji"]),
-            premium_text=int(d["premium_text"]), premium_emoji=int(d["premium_emoji"]),
-            description=str(d["description"]), buy_label=str(d["buy_label"]),
-            premium_label=str(d["premium_label"]),
+            desc=int(d["desc"]), buy_text=int(d["buy_text"]), buy_emoji=0,
+            premium_text=int(d["premium_text"]), premium_emoji=0,
+            description=str(d["description"]),
+            buy_label=_static_label(str(d["buy_label"]), BUY_EMOJI[0]),
+            premium_label=_static_label(str(d["premium_label"]), PREMIUM_EMOJI[0]),
             buy_cb=str(d["buy_cb"]), premium_cb=str(d["premium_cb"]), back_cb=str(d["back_cb"]),
-            hint=str(d.get("hint") or ""),
+            hint=_strip_lead(str(d.get("hint") or "")),
         )
         cfg.validate()
         return cfg
@@ -175,15 +208,18 @@ class GalleryConfig:
 
 
 def generate_config(seed: str, taken: set[str] | None = None) -> GalleryConfig:
-    """Детерминированно по seed; текст и эмодзи каждой кнопки выбираются независимо."""
+    """Детерминированно по seed; тексты (описание, подсказка, кнопки) выбираются независимо, эмодзи статичны."""
     rng = random.Random(hashlib.sha256(("gallery:" + seed).encode()).digest())
     taken = taken or set()
     cfg = None
     for _ in range(300):
         desc = rng.randrange(len(DESCRIPTIONS))
         hint = HINTS[rng.randrange(len(HINTS))]
-        buy_text, buy_emoji = rng.randrange(len(BUY_TEXTS)), rng.randrange(len(BUY_EMOJI))
-        premium_text, premium_emoji = rng.randrange(len(PREMIUM_TEXTS)), rng.randrange(len(PREMIUM_EMOJI))
+        buy_text = rng.randrange(len(BUY_TEXTS))
+        rng.randrange(_LEGACY_BUY_EMOJI_COUNT)        # эмодзи статичны; шаг ГСЧ сохранён, чтобы тексты по seed не сдвинулись
+        premium_text = rng.randrange(len(PREMIUM_TEXTS))
+        rng.randrange(_LEGACY_PREMIUM_EMOJI_COUNT)
+        buy_emoji = premium_emoji = 0
         digest = hashlib.sha256(f"gcb:{seed}:{rng.getrandbits(64)}".encode()).hexdigest()
         cfg = GalleryConfig(
             desc=desc, buy_text=buy_text, buy_emoji=buy_emoji,
@@ -209,8 +245,10 @@ def balance_line(greeting_template: str, balance_text: str) -> str:
 
 
 def hint_line(cfg: GalleryConfig, suggest_name: str) -> str:
-    """Подсказка «как заработать конфеты» с названием кнопки предложки этого бота (экранируется)."""
-    return cfg.hint_template.replace(HINT_TITLE, html.escape(suggest_name, quote=False))
+    """Подсказка «как заработать конфеты» с названием кнопки предложки этого бота (экранируется), в статичной
+    обрамляющей паре: «🤍 Заработать конфеты можно, нажав «Предложка» 🍬»."""
+    text = cfg.hint_template.replace(HINT_TITLE, html.escape(suggest_name, quote=False))
+    return f"{HINT_LEFT} {text} {HINT_RIGHT}"
 
 
 def render(
