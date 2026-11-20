@@ -15,6 +15,13 @@ from app import messaging, topup  # noqa: E402
 NS = types.SimpleNamespace
 
 
+def _const(value):
+    """Заглушка для async-функции, всегда возвращающей value."""
+    async def f():
+        return value
+    return f
+
+
 class PureTests(unittest.TestCase):
     def test_rates_and_formatting(self):
         self.assertEqual((topup.to_rub(100), topup.to_usd(100), topup.to_stars(100)), (Decimal("80.0"), Decimal("1.00"), Decimal(100)))
@@ -25,24 +32,20 @@ class PureTests(unittest.TestCase):
         self.assertEqual([topup.parse_amount(t) for t in ("100", " 1 000 ", "500 конфет", "x", "", None, "0", "-5", "1000001")],
                          [100, 1000, 500, None, None, None, None, 5, None])
 
-    def test_receipt_targets_from_env(self):
-        names = ("CHECK_ADMIN_IDS", "ADMIN_CHAT_ID", "GROUP_ID", "TOPUP_ADMIN_GROUP_ID")
-        saved = {n: os.environ.pop(n, None) for n in names}
+    def test_receipt_targets_come_from_moderators_tab(self):
+        from app import moderation
+
+        orig = moderation.cache.recipients
+
+        async def fake(ids):
+            return ids
+
         try:
-            self.assertEqual(topup.receipt_targets(), [])
-            os.environ["TOPUP_ADMIN_GROUP_ID"] = "-100123"
-            self.assertEqual(topup.receipt_targets(), [-100123])
-            os.environ["ADMIN_CHAT_ID"] = "555"                       # запасные имена: ADMIN_CHAT_ID главнее
-            self.assertEqual(topup.receipt_targets(), [555])
-            os.environ["CHECK_ADMIN_IDS"] = "11, 22;33 abc 11 0"      # свой список главнее; мусор и повторы отбрасываются
-            self.assertEqual(topup.receipt_targets(), [11, 22, 33])
-            os.environ["CHECK_ADMIN_IDS"] = "oops"
-            self.assertEqual(topup.receipt_targets(), [555])
+            for rows, want in (([], []), ([11, 22, 11], [11, 22])):   # ID модераторов из БД; повторы отбрасываются
+                moderation.cache.recipients = lambda rows=rows: fake(rows)
+                self.assertEqual(asyncio.run(topup.receipt_targets()), want)
         finally:
-            for n, v in saved.items():
-                os.environ.pop(n, None)
-                if v is not None:
-                    os.environ[n] = v
+            moderation.cache.recipients = orig
 
     def test_keys_are_per_bot_and_checked(self):
         a, b = topup.Keys.for_seed("tokA"), topup.Keys.for_seed("tokB")
@@ -207,7 +210,7 @@ class FlowTests(unittest.TestCase):
                      topup.receipt_targets, topup.CHECK_BOT_TOKEN, topup._ensure_check_bot, topup._input_file)
         messaging.edit_message, messaging.send_message = fake_edit, fake_send
         topup.CRYPTO_PAY_TOKEN = "tok"
-        topup.receipt_targets = lambda: [101, 102]   # два админа в личных сообщениях
+        topup.receipt_targets = _const([101, 102])   # два админа в личных сообщениях
         topup.CHECK_BOT_TOKEN = "check-token"
         topup._ensure_check_bot = lambda: self.check
         topup._input_file = lambda data, name: NS(data=data, name=name)
@@ -345,7 +348,7 @@ class FlowTests(unittest.TestCase):
         self.run_(go())
 
     def test_group_is_optional_but_still_works(self):
-        topup.receipt_targets = lambda: [-100]
+        topup.receipt_targets = _const([-100])
         self._send_receipt()
         kind, chat, kw = self.check.sent[-1]
         self.assertEqual((kind, chat), ("photo", -100))
@@ -406,10 +409,10 @@ class FlowTests(unittest.TestCase):
         async def go():
             await self.mod.on_callback(self.call(k.cb("open")), self.bot)
             await self.mod.on_message(self.msg("100"), self.bot)
-            topup.receipt_targets = lambda: []
+            topup.receipt_targets = _const([])
             await self.mod.on_callback(self.call(k.cb("card")), self.bot)
             self.assertEqual(self.alerts[-1], "❌ Оплата картой сейчас недоступна.")
-            topup.receipt_targets = lambda: [101]
+            topup.receipt_targets = _const([101])
             topup.CHECK_BOT_TOKEN = ""
             await self.mod.on_callback(self.call(k.cb("card")), self.bot)
             self.assertEqual(self.alerts[-1], "❌ Оплата картой сейчас недоступна.")

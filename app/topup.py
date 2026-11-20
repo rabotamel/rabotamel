@@ -1,18 +1,18 @@
 """«🍭 Купить конфеты 🍬»: пополнение баланса картой, через CryptoBot и Telegram Stars.
 
 Переписанная версия отдельного модуля topup.py (данные для оплаты те же: номер карты, курс 1🍬 = 0,8₽ = 0,01$ = 1⭐,
-токены CryptoBot / Stars-бота, админы для чеков). Отличия от прежнего кода:
+токены CryptoBot / Stars-бота; админы для чеков — модераторы из вкладки «Модераторы» на сайте). Отличия от прежнего кода:
   * заказы лежат в таблице `topup_orders` (SQLAlchemy, как всё остальное в проекте), без своего пула asyncpg и
     без самописных миграций; начисление — один условный UPDATE (`repo.credit_topup_order`), двойного начисления нет;
   * баланс общий с остальным ботом: `bot_users.candies` ЭТОГО бота (заказ помнит bot_id);
   * один экран на всё меню: каждый переход — новое сообщение, прежнее удаляется (как во всём боте), картинка — картинка бота;
   * фоновый опрос CryptoBot работает, только пока есть неоплаченные счета (иначе база не просыпалась бы зря);
-  * чеки по карте принимает отдельный бот (CHECK_BOT_TOKEN) в личных сообщениях админов — группа не нужна: кнопки «Выдать / Отказать»,
+  * чеки по карте принимает отдельный бот (CHECK_BOT_TOKEN) в личных сообщениях модераторов — группа не нужна: кнопки «Выдать / Отказать»,
     /pending (повторно прислать чеки на проверке) и /start; решает любой из админов, у остальных копии чека обновляются.
 
 Переменные окружения (те же имена): CRYPTO_PAY_TOKEN (или CRYPTO_BOT_TOKEN), STARS_BOT_TOKEN, TOPUP_CARD_NUMBER,
-CHECK_BOT_TOKEN (бот для чеков: весь разбор оплат картой происходит в нём) и CHECK_ADMIN_IDS (Telegram ID админов; запасные имена —
-ADMIN_CHAT_ID, GROUP_ID, TOPUP_ADMIN_GROUP_ID), а также CRYPTO_PAY_BASE_URL, CRYPTO_PAY_FIAT,
+CHECK_BOT_TOKEN (бот для чеков: весь разбор оплат картой происходит в нём; кому слать чеки — решает вкладка «Модераторы», переменные
+для админов не нужны), а также CRYPTO_PAY_BASE_URL, CRYPTO_PAY_FIAT,
 CRYPTO_PAY_ACCEPTED_ASSETS, TOPUP_INVOICE_EXPIRES, TOPUP_POLL_INTERVAL, STARS_BOT_TITLE, STARS_BOT_DESCRIPTION.
 Всё, что связано с aiogram / aiohttp, импортируется внутри функций: чистая логика (тексты, расчёты) проверяется без них.
 """
@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Awaitable, Callable
 
-from . import messaging, repo
+from . import messaging, moderation, repo
 from .config import _secret
 from .currency import format_money
 
@@ -46,7 +46,7 @@ STARS_BOT_TOKEN = _secret("STARS_BOT_TOKEN").strip()
 STARS_TITLE = os.environ.get("STARS_BOT_TITLE", "Покупка конфет").strip()
 STARS_DESCRIPTION = os.environ.get("STARS_BOT_DESCRIPTION", "Оплата покупки конфет через Telegram Stars").strip()
 # Бот для чеков по карте: именно он (а не бот-магазин, который крутится в ротации) отправляет чек админам и
-# принимает «Выдать / Отказать», /start и /pending в личных сообщениях админов (CHECK_ADMIN_IDS). Без токена оплата картой выключена.
+# принимает «Выдать / Отказать», /start и /pending в личных сообщениях модераторов (вкладка «Модераторы»). Без токена оплата картой выключена.
 CHECK_BOT_TOKEN = _secret("CHECK_BOT_TOKEN").strip()
 CHECK_PREFIX = "tpchk"        # callback_data кнопок под чеком (общий для всех ботов-магазинов: «tpchk:ok:<id заказа>»)
 
@@ -60,28 +60,26 @@ M_CARD, M_CRYPTO, M_STARS = "card", "cryptobot", "stars"
 SYMBOLS = {"USD": "$", "RUB": "₽", "XTR": "⭐"}
 
 
-def receipt_targets() -> list[int]:
-    """Кому бот для чеков шлёт чеки по карте и кто может их разбирать: Telegram ID админов из CHECK_ADMIN_IDS (через запятую
-    или пробел). Если не задано — запасные имена ADMIN_CHAT_ID, GROUP_ID, TOPUP_ADMIN_GROUP_ID (одно значение; отрицательный ID —
-    группа, но она не обязательна). Каждый админ должен один раз нажать /start у бота для чеков: писать первым бот не может."""
-    ids: list[int] = []
-    for part in re.split(r"[,;\s]+", os.environ.get("CHECK_ADMIN_IDS", "")):
-        if part.lstrip("-").isdigit() and int(part) != 0 and int(part) not in ids:
-            ids.append(int(part))
-    if ids:
-        return ids
-    for name in ("ADMIN_CHAT_ID", "GROUP_ID", "TOPUP_ADMIN_GROUP_ID"):
-        raw = os.environ.get(name, "").strip()
-        if raw.lstrip("-").isdigit() and int(raw) != 0:
-            return [int(raw)]
-    return []
+async def receipt_targets() -> list[int]:
+    """Кому бот для чеков шлёт чеки по карте и кто может их разбирать: модераторы из вкладки «Модераторы» на сайте
+    (у кого уже известен Telegram ID). Переменные окружения для этого больше не нужны. Модератор, добавленный по @юзернейму,
+    получает ID, когда один раз нажмёт /start у бота для чеков (или напишет любому боту-магазину). Писать первым бот не может."""
+    return list(dict.fromkeys(await moderation.cache.recipients()))
 
 
-def card_available() -> bool:
-    return bool(CHECK_BOT_TOKEN) and bool(receipt_targets())
+async def card_available() -> bool:
+    return bool(CHECK_BOT_TOKEN) and bool(await receipt_targets())
 
 
-CARD_OFF_REASON = "карта: нужны CHECK_BOT_TOKEN и CHECK_ADMIN_IDS (ID админов; запасной вариант — ADMIN_CHAT_ID)"
+async def card_off_reason() -> str:
+    """Что именно мешает оплате картой (для лога): токен бота для чеков и/или отсутствие модераторов."""
+    missing = []
+    if not CHECK_BOT_TOKEN:
+        missing.append("не задан CHECK_BOT_TOKEN")
+    if not await receipt_targets():
+        missing.append("нет модераторов с известным Telegram ID (добавьте во вкладке «Модераторы» и пусть нажмёт /start "
+                       "у бота для чеков)")
+    return "карта: " + "; ".join(missing) if missing else "карта доступна"
 
 
 # ---------- расчёты ----------
@@ -299,6 +297,21 @@ def _disabled_marker():
         return DisabledButton()
     except ImportError:
         return {}
+
+
+def _log_disabled_support() -> None:
+    """Серые кнопки (поле `disabled`, Bot API 10.3) нужны aiogram 3.31+: в старой версии класса DisabledButton нет."""
+    try:
+        import aiogram
+        from aiogram.types import InlineKeyboardButton
+
+        has_class = "disabled" in getattr(InlineKeyboardButton, "model_fields", {})
+        if has_class:
+            log.info("aiogram %s: поле disabled у InlineKeyboardButton поддерживается", aiogram.__version__)
+        else:
+            log.warning("aiogram %s не знает поле disabled — серые кнопки не заработают, обновите aiogram до 3.31+", aiogram.__version__)
+    except Exception:
+        log.exception("Не удалось проверить поддержку disabled-кнопок")
 
 
 def markup(rows: list[Row]):
@@ -562,9 +575,9 @@ async def _strip_buttons(bot, chat_id: int, message_id: int) -> None:
 
 
 async def _is_admin(bot, chat_id: int, user_id: int) -> bool:
-    """Личный чат: админ — тот, чей ID указан в списке получателей. Группа (если задана): администраторы группы."""
+    """Личный чат: админ — модератор из вкладки «Модераторы». Группа (если задана): администраторы группы."""
     if chat_id > 0:
-        return user_id == chat_id and user_id in receipt_targets()
+        return user_id == chat_id and user_id in await receipt_targets()
     try:
         member = await bot.get_chat_member(chat_id, user_id)
     except Exception:
@@ -698,13 +711,18 @@ def _ensure_check_bot():
     @_check_dp.message(Command("start"))
     async def _on_start(message: Message, bot: Bot) -> None:
         uid = message.from_user.id if message.from_user else 0
-        if message.chat.type == "private" and uid in receipt_targets():
+        if message.chat.type == "private" and message.from_user:
+            try:   # модератор, добавленный по юзернейму, получает ID при первом обращении
+                await moderation.cache.touch(uid, message.from_user.username)
+            except Exception:
+                log.exception("Бот для чеков: не удалось проверить модератора %s", uid)
+        if message.chat.type == "private" and uid in await receipt_targets():
             text = ("👮 <b>Бот для чеков</b>\n\nСюда приходят чеки об оплате конфет картой. Под каждым чеком — кнопки "
                     "«Выдать» и «Отказать». Решает первый нажавший, у остальных админов чек обновится.\n\n"
                     f"🧾 Сейчас на проверке: {await count_pending()}\n/pending — прислать чеки на проверке ещё раз.")
         else:
             text = (f"⛔ Нет доступа. Ваш Telegram ID: <code>{uid}</code>\n"
-                    "Чтобы получать чеки, владелец должен добавить этот ID в CHECK_ADMIN_IDS.")
+                    "Чтобы получать чеки, добавьте себя (этот ID или @юзернейм) во вкладке «Модераторы» на сайте и нажмите /start ещё раз.")
         try:
             await bot.send_message(message.chat.id, text, parse_mode="HTML")
         except Exception:
@@ -713,7 +731,7 @@ def _ensure_check_bot():
     @_check_dp.message(Command("pending"))
     async def _on_pending(message: Message, bot: Bot) -> None:
         uid = message.from_user.id if message.from_user else 0
-        if message.chat.type != "private" or uid not in receipt_targets():
+        if message.chat.type != "private" or uid not in await receipt_targets():
             return
         try:
             sent = await _send_pending(bot, message.chat.id)
@@ -747,10 +765,11 @@ def ensure_started() -> None:
     """Запускает фоновые задачи (один раз на приложение): опрос оплат и, если задан токен, приём оплат Stars."""
     global _poll_task, _stars_task, _check_task
     if _poll_task is None or _poll_task.done():
-        for ok, what in ((bool(CRYPTO_PAY_TOKEN), "CryptoBot: не задан CRYPTO_PAY_TOKEN"),
-                         (card_available(), CARD_OFF_REASON)):
-            if not ok:
-                log.warning("Способ оплаты выключен — %s", what)
+        _log_disabled_support()
+        if not CRYPTO_PAY_TOKEN:
+            log.warning("Способ оплаты выключен — CryptoBot: не задан CRYPTO_PAY_TOKEN")
+        if not CHECK_BOT_TOKEN:
+            log.warning("Способ оплаты выключен — карта: не задан CHECK_BOT_TOKEN")
         _poll_task = asyncio.create_task(_poll_loop(), name="topup-poll")
     if CHECK_BOT_TOKEN and (_check_task is None or _check_task.done()):
         try:
@@ -951,8 +970,8 @@ class TopupModule:
     async def _pay_action(self, call, bot, st: UserState, action: str) -> None:
         amount = int(st.amount or 0)
         if action == "card":
-            if not card_available():
-                log.warning("Оплата картой недоступна — %s", CARD_OFF_REASON)
+            if not await card_available():
+                log.warning("Оплата картой недоступна — %s", await card_off_reason())
                 await self._alert(call, "❌ Оплата картой сейчас недоступна.")
                 return
             await self._screen(call, bot, st, "card", card_text(amount), card_rows(self.keys))
@@ -1067,7 +1086,7 @@ class TopupModule:
 
     # --- чек по карте ---
     async def _receipt(self, message, bot, st: UserState) -> None:
-        user_id, amount, targets = message.from_user.id, int(st.amount or 0), receipt_targets()
+        user_id, amount, targets = message.from_user.id, int(st.amount or 0), await receipt_targets()
         if not amount or not targets or not CHECK_BOT_TOKEN:
             return
         user = message.from_user
