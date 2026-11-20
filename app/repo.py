@@ -16,6 +16,15 @@ from .models import (
     SUB_APPROVED,
     SUB_PENDING,
     SUB_REJECTED,
+    TOPUP_ACTIVE,
+    TOPUP_CANCELED,
+    TOPUP_CREATING,
+    TOPUP_CREDITED,
+    TOPUP_EXPIRED,
+    TOPUP_FAILED,
+    TOPUP_PAID,
+    TOPUP_REJECTED,
+    TOPUP_REVIEW,
     BlockedAuthor,
     BotProfile,
     BotUser,
@@ -24,6 +33,7 @@ from .models import (
     PushSubscription,
     ShopProduct,
     SubmissionMessage,
+    TopupOrder,
     VideoSubmission,
 )
 
@@ -815,3 +825,107 @@ async def kv_set(key: str, value: str) -> None:
     async with db.SessionLocal() as s, s.begin():
         stmt = pg_insert(KeyValue).values(key=key, value=value)
         await s.execute(stmt.on_conflict_do_update(index_elements=["key"], set_={"value": value}))
+
+
+# ---------- пополнение («Купить конфеты») ----------
+
+class _NoUser(Exception):
+    pass
+
+
+async def create_topup_order(
+    bot_id: int, user_id: int, candies: int, method: str, currency: str, fiat_amount, *,
+    status: str = TOPUP_CREATING, screen_chat_id: int | None = None, screen_message_id: int | None = None,
+    receipt_file_id: str | None = None, receipt_sender: str | None = None,
+) -> int:
+    async with db.SessionLocal() as s, s.begin():
+        order = TopupOrder(
+            bot_id=bot_id, user_id=user_id, candies=candies, method=method, currency=currency,
+            fiat_amount=fiat_amount, status=status, screen_chat_id=screen_chat_id,
+            screen_message_id=screen_message_id, receipt_file_id=receipt_file_id, receipt_sender=receipt_sender,
+        )
+        s.add(order)
+        await s.flush()
+        return int(order.id)
+
+
+async def get_topup_order(order_id: int) -> TopupOrder | None:
+    async with db.SessionLocal() as s:
+        return await s.get(TopupOrder, order_id)
+
+
+async def set_topup_invoice(order_id: int, invoice_id: int | None, url: str | None, expires_at: datetime | None) -> None:
+    async with db.SessionLocal() as s, s.begin():
+        await s.execute(
+            update(TopupOrder).where(TopupOrder.id == order_id)
+            .values(invoice_id=invoice_id, invoice_url=url, expires_at=expires_at, status=TOPUP_ACTIVE)
+        )
+
+
+async def set_topup_screen(order_id: int, chat_id: int, message_id: int) -> None:
+    async with db.SessionLocal() as s, s.begin():
+        await s.execute(
+            update(TopupOrder).where(TopupOrder.id == order_id)
+            .values(screen_chat_id=chat_id, screen_message_id=message_id)
+        )
+
+
+async def finish_topup_order(order_id: int, status: str) -> bool:
+    """Закрывает заказ без начисления (canceled / failed / expired / rejected); только из ещё «живых» статусов."""
+    allowed = {
+        TOPUP_CANCELED: (TOPUP_CREATING, TOPUP_ACTIVE),
+        TOPUP_FAILED: (TOPUP_CREATING,),
+        TOPUP_EXPIRED: (TOPUP_ACTIVE,),
+        TOPUP_REJECTED: (TOPUP_REVIEW,),
+    }[status]
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(
+            update(TopupOrder).where(TopupOrder.id == order_id, TopupOrder.status.in_(allowed))
+            .values(status=status).returning(TopupOrder.id)
+        )
+        return res.scalar_one_or_none() is not None
+
+
+async def mark_topup_paid(order_id: int, charge_id: str | None = None) -> bool:
+    """Оплата подтверждена (CryptoBot / Stars / админ по карте). True — статус изменился."""
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(
+            update(TopupOrder)
+            .where(TopupOrder.id == order_id, TopupOrder.status.in_((TOPUP_CREATING, TOPUP_ACTIVE, TOPUP_REVIEW)))
+            .values(status=TOPUP_PAID, paid_at=_now(), charge_id=charge_id)
+            .returning(TopupOrder.id)
+        )
+        return res.scalar_one_or_none() is not None
+
+
+async def credit_topup_order(order_id: int) -> TopupOrder | None:
+    """Начисляет конфеты за оплаченный заказ ОДНОЙ транзакцией: статус paid -> credited и +🍬 пользователю.
+    Возвращает заказ, если начислили сейчас; None — уже начислено раньше или пользователя нет в базе
+    (тогда транзакция откатывается и заказ остаётся оплаченным)."""
+    try:
+        async with db.SessionLocal() as s, s.begin():
+            res = await s.execute(
+                update(TopupOrder).where(TopupOrder.id == order_id, TopupOrder.status == TOPUP_PAID)
+                .values(status=TOPUP_CREDITED, credited_at=_now())
+                .returning(TopupOrder.id, TopupOrder.bot_id, TopupOrder.user_id, TopupOrder.candies)
+            )
+            row = res.first()
+            if row is None:
+                return None
+            added = await s.execute(
+                update(BotUser).where(BotUser.bot_id == row.bot_id, BotUser.user_id == row.user_id)
+                .values(candies=BotUser.candies + row.candies).returning(BotUser.candies)
+            )
+            if added.scalar_one_or_none() is None:
+                raise _NoUser  # откат: заказ остаётся оплаченным
+    except _NoUser:
+        return None
+    return await get_topup_order(order_id)
+
+
+async def list_topup_orders(status: str, method: str | None = None) -> list[TopupOrder]:
+    async with db.SessionLocal() as s:
+        q = select(TopupOrder).where(TopupOrder.status == status)
+        if method:
+            q = q.where(TopupOrder.method == method)
+        return list((await s.execute(q.order_by(TopupOrder.id).limit(200))).scalars())

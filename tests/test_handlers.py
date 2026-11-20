@@ -79,6 +79,7 @@ def _install_stubs():
 
     mods["aiogram.types"].InlineKeyboardButton = _Simple
     mods["aiogram.types"].InlineKeyboardMarkup = _Simple
+    mods["aiogram.types"].KeyboardButton = mods["aiogram.types"].ReplyKeyboardMarkup = _Simple
     mods["aiogram"].exceptions, mods["aiogram"].filters, mods["aiogram"].types = (
         mods["aiogram.exceptions"], mods["aiogram.filters"], mods["aiogram.types"])
     sys.modules.update(mods)
@@ -127,9 +128,15 @@ class FakeBot:
     def __init__(self):
         self.next_id = 100
         self.deleted = []
+        self.plain = []   # служебные сообщения «в лоб» через bot.send_message (клавиатура «Меню»)
 
     async def delete_message(self, chat_id, message_id):
         self.deleted.append(message_id)
+
+    async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
+        self.next_id += 1
+        self.plain.append((chat_id, text, reply_markup))
+        return types.SimpleNamespace(message_id=self.next_id)
 
 
 class FakeStats:
@@ -185,6 +192,81 @@ class StartDeletesPreviousTests(unittest.TestCase):
             messaging.send_message = orig_send
             if orig_candies is not None:
                 handlers.repo.get_candies = orig_candies
+
+
+class MenuButtonTests(unittest.TestCase):
+    """Постоянная кнопка «Меню» у клавиатуры и кнопка «Купить конфеты» под приветствием."""
+
+    def _setup(self):
+        from app import greeting
+
+        self.bot, self.sent = FakeBot(), []
+
+        async def fake_send(b, chat_id, text, image=None, reply_markup=None):
+            b.next_id += 1
+            self.sent.append((b.next_id, text, reply_markup))
+            return types.SimpleNamespace(message_id=b.next_id)
+
+        async def fake_candies(bot_id, uid):
+            return 12
+
+        orig_send, orig_candies = messaging.send_message, getattr(handlers.repo, "get_candies", None)
+        messaging.send_message = fake_send
+        handlers.repo.get_candies = fake_candies
+
+        def restore():
+            messaging.send_message = orig_send
+            if orig_candies is not None:
+                handlers.repo.get_candies = orig_candies
+        self.addCleanup(restore)
+        profile = types.SimpleNamespace(name="Бот", message_image_url=None)
+        self.texts = types.SimpleNamespace(
+            greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
+            deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
+            suggest=suggest_ui.generate_config("t"), version=1)
+        return handlers.build_router(FakeStats({5}), self.texts, profile)
+
+    @staticmethod
+    def _user(text=None):
+        return types.SimpleNamespace(text=text, message_id=900, from_user=types.SimpleNamespace(id=5, username="u"))
+
+    def test_start_gives_menu_keyboard_once(self):
+        router = self._setup()
+
+        async def go():
+            await router.handlers["on_start"](self._user("/start"), self.bot)
+            await router.handlers["on_start"](self._user("/start"), self.bot)
+        asyncio.run(go())
+        self.assertEqual(len(self.bot.plain), 1)                      # клавиатура постоянная — повторно не шлём
+        chat, text, kb = self.bot.plain[0]
+        self.assertEqual((chat, text), (5, handlers.MENU_KEYBOARD_CARRIER))
+        self.assertEqual(kb.keyboard[0][0].text, "Меню")
+        self.assertTrue(kb.resize_keyboard and kb.is_persistent)
+
+    def test_menu_button_acts_like_start_and_removes_old_message(self):
+        router = self._setup()
+
+        async def go():
+            await router.handlers["on_start"](self._user("/start"), self.bot)
+            first = self.sent[-1][0]
+            await router.handlers["on_private_message"](self._user("Меню"), self.bot)
+            self.assertEqual(self.bot.deleted, [900, first])           # нажатие «Меню» и прежнее приветствие убраны
+            self.assertIn("Бот", self.sent[-1][1])
+            self.assertIn("12🍬", self.sent[-1][1])
+        asyncio.run(go())
+
+    def test_greeting_has_buy_candies_button_below_shop_and_gallery(self):
+        router = self._setup()
+        asyncio.run(router.handlers["on_start"](self._user("/start"), self.bot))
+        rows = self.sent[-1][2].inline_keyboard
+        self.assertEqual(rows[-1][0].text, "🍭 Купить конфеты 🍬")
+        self.assertTrue(rows[-1][0].callback_data.startswith("tp"))
+        labels = [b.text for row in rows[:-1] for b in row]
+        self.assertEqual(sorted(labels), sorted([self.texts.shop_buttons.shop_label, self.texts.shop_buttons.gallery_label]))
+
+    def test_balance_line_uses_lollipop(self):
+        from app import greeting
+        self.assertTrue(greeting.render(greeting.generate_config("z"), "Бот", 3).splitlines()[-1].startswith("🍭 "))
 
 
 class GalleryNavigationTests(unittest.TestCase):

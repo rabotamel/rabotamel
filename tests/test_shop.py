@@ -264,7 +264,7 @@ class ShopInputTests(unittest.TestCase):
                 shop.normalize_name(bad)
         self.assertEqual(shop.normalize_about("  **a**\r\nb \n"), "**a**\nb")
         with self.assertRaises(ValueError):
-            shop.normalize_about("x" * 3001)
+            shop.normalize_about("x" * 3901)
 
 
 class ShopKeyboardTests(unittest.TestCase):

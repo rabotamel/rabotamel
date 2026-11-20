@@ -6,7 +6,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramFor
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
-from . import captcha, gallery, greeting, messaging, moderation, repo, shop, shop_buttons, suggest, video_pool
+from . import captcha, gallery, greeting, messaging, moderation, repo, shop, shop_buttons, suggest, topup, video_pool
 from .metrics import metrics
 from .models import BotProfile
 from .stats import UserStats
@@ -20,8 +20,14 @@ CAPTCHA_MIN_INTERVAL = 1.0
 # присылаем заново (вдруг человек её удалил у себя).
 CAPTCHA_RESEND_AFTER = 1800.0
 
+# Подпись постоянной кнопки у клавиатуры (под полем ввода) — по заданию владельца фиксированная
+MENU_BUTTON = "Меню"
+# Текст служебного сообщения, к которому крепится клавиатура с кнопкой «Меню» (клавиатуру нельзя повесить на
+# приветствие: у него уже есть inline-кнопки)
+MENU_KEYBOARD_CARRIER = "🍭"
 
-def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Router:
+
+def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bot | None = None) -> Router:
     """Каждый запуск polling получает свежий Router (один роутер нельзя подключить к двум Dispatcher).
 
     Логика: новый пользователь (его нет в БД) сначала проходит капчу; в БД он записывается только
@@ -45,6 +51,9 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
     # user_id -> id сообщения с открытым меню предложки (в памяти). Пока запись есть, всё, что пользователь
     # присылает, обрабатывается как предложка. Сбрасывается кнопкой «Назад» и /start.
     suggest_menu: dict[int, int] = {}
+    # user_id -> id служебного сообщения с клавиатурой «Меню» (в памяти). Клавиатура в Telegram постоянная, поэтому
+    # шлём её один раз за запуск: после капчи и (для тех, кто прошёл капчу раньше) при первом /start.
+    menu_kb: dict[int, int] = {}
 
     async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> None:
         try:
@@ -84,6 +93,36 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             shown.clear()
         shown[user_id] = (msg.message_id, order, now, texts.version, target)
 
+    async def ensure_menu_keyboard(bot: Bot, user_id: int, *, force: bool = False) -> None:
+        """Постоянная кнопка «Меню» у клавиатуры. Прежнее служебное сообщение заменяется новым (не копятся)."""
+        if user_id in menu_kb and not force:
+            return
+        from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+
+        try:
+            msg = await bot.send_message(
+                user_id, MENU_KEYBOARD_CARRIER,
+                reply_markup=ReplyKeyboardMarkup(
+                    keyboard=[[KeyboardButton(text=MENU_BUTTON)]], resize_keyboard=True, is_persistent=True
+                ),
+            )
+        except TelegramForbiddenError as e:
+            await on_forbidden(e, user_id)
+            return
+        except TelegramAPIError as e:
+            log.warning("Клавиатура «Меню» пользователю %s не доставлена: %s", user_id, e)
+            return
+        if len(menu_kb) > 5000:
+            menu_kb.clear()
+        old_id = menu_kb.get(user_id)
+        menu_kb[user_id] = msg.message_id
+        if old_id is not None and old_id != msg.message_id:
+            await safe_delete(bot, user_id, old_id)
+
+    def main_keyboard():
+        """Кнопки под приветствием: «Магазин» / «Галерея» (рандомизированные) и ниже «Купить конфеты»."""
+        return shop_buttons.build_keyboard(texts.shop_buttons, extra_rows=topup_module.menu_rows())
+
     async def drop_last_gallery(bot: Bot, user_id: int, keep: int | None = None) -> None:
         old_id = last_gallery.pop(user_id, None)
         if old_id is not None and old_id != keep:
@@ -106,6 +145,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         last_greeting.pop(user_id, None)
         last_gallery.pop(user_id, None)
         suggest_menu.pop(user_id, None)
+        menu_kb.pop(user_id, None)
+        topup_module.reset(user_id)
         shown.pop(user_id, None)
         if stats.remove(user_id):
             log.info("Пользователь %s заблокировал бота %s — удалён из базы", user_id, stats.bot_id)
@@ -143,13 +184,13 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
     async def send_greeting(bot: Bot, user_id: int, balance: int) -> None:
         await drop_last_gallery(bot, user_id)  # приветствие и раздел галереи одновременно не висят
         await drop_suggest(bot, user_id)       # и меню предложки тоже (/start закрывает его)
+        topup_module.reset(user_id)            # и раздел «Купить конфеты» закрывается
         text = greeting.render(texts.greeting, profile.name, balance)
         try:
             # кнопки «Магазин» / «Галерея» крепятся прямо под приветствием (отдельного меню нет);
             # конфиг читается в момент отправки, а сохранён в БД, поэтому /start их не меняет
             msg = await messaging.send_message(
-                bot, user_id, text, profile.message_image_url,
-                reply_markup=shop_buttons.build_keyboard(texts.shop_buttons),
+                bot, user_id, text, profile.message_image_url, reply_markup=main_keyboard(),
             )
             # подмена записи синхронная: при нескольких /start подряд прежнее приветствие удалит каждый следующий
             if len(last_greeting) > 5000:
@@ -221,8 +262,10 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
                 sub_id, file_id = pick
                 try:
                     # без подписи; кнопки: та же покупка и «Назад»; защита от пересылки и сохранения обязательна
+                    # подпись — строка баланса (как в приветствии и галерее), уже с учётом списания
                     await bot.send_video(
-                        user_id, file_id, reply_markup=gallery.build_video_keyboard(texts.gallery),
+                        user_id, file_id, caption=gallery.balance_line(texts.greeting.template, greeting.format_number(balance)),
+                        parse_mode="HTML", reply_markup=gallery.build_video_keyboard(texts.gallery),
                         protect_content=True,
                     )
                 except TelegramForbiddenError as e:
@@ -259,6 +302,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         await touch_moderator(user)
         if stats.has(user.id):
             stats.touch(user.id, user.username)
+            await ensure_menu_keyboard(bot, user.id)   # прошедшие капчу до обновления получают кнопку «Меню» при первом /start
             # баланс живёт только в БД (его меняют и «Песочница», и в будущем платежи) — один запрос по ключу
             await send_greeting(bot, user.id, await repo.get_candies(stats.bot_id, user.id))
         else:
@@ -275,7 +319,14 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         await touch_moderator(user)
         if stats.has(user.id):
             stats.touch(user.id, user.username)  # актуализируем юзернейм (в памяти)
-            if user.id in suggest_menu:
+            if getattr(message, "text", None) == MENU_BUTTON:
+                # кнопка «Меню»: как /start — приветствие приходит заново, прежнее меню (галерея, предложка, магазин,
+                # «Купить конфеты») убирается; само сообщение «Меню» стираем, чтобы не копились в чате
+                await safe_delete(bot, user.id, message.message_id)
+                await send_greeting(bot, user.id, await repo.get_candies(stats.bot_id, user.id))
+            elif topup_module.active(user.id):
+                await topup_module.on_message(message, bot)
+            elif user.id in suggest_menu:
                 await handle_suggestion(message, bot)
         else:
             # Любое другое сообщение от непрошедшего проверку — капча (если она уже в чате, повторно не шлём)
@@ -308,6 +359,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
             if stats.add(user_id, call.from_user.username):
                 await call.answer()
                 await stats.flush()  # одна транзакция на всех, кто прошёл одновременно
+                await ensure_menu_keyboard(bot, user_id, force=True)  # кнопка «Меню» у клавиатуры — после капчи всегда
                 await send_greeting(bot, user_id, 0)
             else:
                 await call.answer()
@@ -374,7 +426,25 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile) -> Rout
         """Главное меню = приветствие с кнопками «Магазин» / «Галерея» (то же сообщение, обновлённое на месте)."""
         balance = await repo.get_candies(stats.bot_id, user_id)
         text = greeting.render(texts.greeting, profile.name, balance)
-        await show_screen(call, bot, user_id, text, shop_buttons.build_keyboard(texts.shop_buttons))
+        await show_screen(call, bot, user_id, text, main_keyboard())
+
+    async def topup_go_main(call: CallbackQuery, bot: Bot, user_id: int) -> None:
+        await show_main_menu(call, bot, user_id)
+
+    def track_screen(user_id: int, message_id: int) -> None:
+        last_greeting[user_id] = message_id   # экран «Купить конфеты» — тоже «главное меню»: /start его заменит
+
+    topup_module = topup.TopupModule(
+        stats.bot_id, bot, profile, topup.Keys.for_seed(str(getattr(profile, "token", None) or stats.bot_id)),
+        show_screen=show_screen, safe_delete=safe_delete, track=track_screen, go_main=topup_go_main, is_user=stats.has,
+    )
+    if bot is not None:
+        topup.ensure_started()   # фоновая проверка оплат (один раз на приложение)
+
+    @router.callback_query(F.data.startswith(topup_module.keys.p))
+    async def on_topup(call: CallbackQuery, bot: Bot) -> None:
+        """«🍭 Купить конфеты 🍬»: экраны оплаты и кнопки админов под чеками (app/topup.py)."""
+        await topup_module.on_callback(call, bot)
 
     @router.callback_query(F.data.startswith((shop_buttons.SHOP_PREFIX, shop_buttons.GALLERY_PREFIX)))
     async def on_shop_button(call: CallbackQuery, bot: Bot) -> None:

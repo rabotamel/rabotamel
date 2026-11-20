@@ -13,7 +13,7 @@ from aiogram.exceptions import (
     TelegramUnauthorizedError,
 )
 
-from . import avatars, push, repo, video_pool
+from . import avatars, push, repo, topup, video_pool
 from .config import Settings
 from .events import bus
 from .handlers import build_router
@@ -288,7 +288,7 @@ class BotManager:
             loop = asyncio.get_running_loop()
             while not stop.is_set():
                 dp = Dispatcher()
-                dp.include_router(build_router(stats, texts, profile))
+                dp.include_router(build_router(stats, texts, profile, bot))
                 polling = asyncio.create_task(
                     dp.start_polling(
                         bot,
@@ -316,6 +316,7 @@ class BotManager:
 
         finally:
             self.bot = self.profile = self.texts = None
+            topup.detach(profile.id)
             forwarder.cancel()
             stopper.cancel()
             if polling is not None and not polling.done():

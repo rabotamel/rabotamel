@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from app import db, push
+from app import db, push, topup
 from app.config import get_settings
 from app.events import bus
 from app.manager import BotManager
@@ -78,6 +78,7 @@ async def lifespan(app: FastAPI):
             await asyncio.gather(task, return_exceptions=True)
         if app.state.manager is not None:
             await app.state.manager.stop()
+        await topup.shutdown()   # фоновые задачи «Купить конфеты» (проверка оплат, Stars-бот)
         if db.engine is not None:
             await metrics.flush()  # штатная остановка: сохраняем последние счётчики
         await db.close_db()

@@ -79,7 +79,7 @@ class StaticEmojiTests(unittest.TestCase):
             self.assertTrue(desc.startswith("💫 ") and desc.endswith(" 💫"))      # описание: 💫 … 💫
             self.assertTrue(hint.startswith("🤍 ") and hint.endswith(" 🍬"))      # подсказка через название предложки
             self.assertIn("«Предложка»", hint)
-            self.assertTrue(balance.startswith("🍫 ") and balance.endswith("7🍬"))  # баланс: 🍫 … 🍬
+            self.assertTrue(balance.startswith("🍭 ") and balance.endswith("7🍬"))  # баланс: 🍫 … 🍬
 
     def test_hint_templates_carry_no_emoji_and_stay_varied(self):
         for h in gl.HINTS:

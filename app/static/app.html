@@ -69,8 +69,11 @@
   .stat .value{font-size:30px;font-weight:650;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
   .stat .value.sm{font-size:19px;line-height:1.5;padding-top:6px}
   /* подвал: «живая» статистика за всё время */
-  .foot{padding-top:0;padding-bottom:40px}
-  .foot h2{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 10px;text-transform:uppercase;letter-spacing:.04em}
+  dialog.foot{width:min(560px,calc(100vw - 32px));overflow-y:auto}
+  .stats-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+  .foot h2{font-size:15px;font-weight:650;margin:0}
+  #stats-refresh{font-size:16px;line-height:1}
+  #stats-refresh.spin{opacity:.5;pointer-events:none}
   .foot-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .foot-cell{padding:14px 16px}
   .foot-cell .label{font-size:13px;font-weight:600}
@@ -179,8 +182,8 @@
     <button id="bell" class="icon-btn" title="Уведомления в браузере" hidden>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
     </button>
-    <button id="logout" class="icon-btn" title="Выйти">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+    <button id="stats-btn" class="icon-btn" title="Статистика">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M8 17v-5"/><path d="M13 17V8"/><path d="M18 17v-9"/></svg>
     </button>
   </div>
 </header>
@@ -188,9 +191,9 @@
 <nav class="wrap tabs">
   <button class="tab active" data-tab="bot">Бот</button>
   <button class="tab" data-tab="tokens">Токены</button>
+  <button class="tab" data-tab="sandbox">Песочница</button>
   <button class="tab" data-tab="moderators">Модераторы</button>
   <button class="tab" data-tab="shop">Магазин</button>
-  <button class="tab" data-tab="sandbox">Песочница</button>
 </nav>
 
 <main class="wrap">
@@ -228,7 +231,7 @@
       <label for="shop-price">Цена</label>
       <input id="shop-price" type="text" inputmode="numeric" autocomplete="off" placeholder="100">
       <label for="shop-about">О товаре</label>
-      <textarea id="shop-about" maxlength="3000" placeholder="**Жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~"></textarea>
+      <textarea id="shop-about" maxlength="3900" placeholder="**Жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~"></textarea>
       <p class="hint">Оформление: **жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~, ||спойлер||, `код`, [текст](https://адрес), «# Заголовок» в начале строки. В боте это превращается в настоящее форматирование.</p>
       <p class="hint">Варианты фраз: [вариант1/вариант2] — каждый бот получит свой постоянный вариант, например «Привет [товарищ/друг]! Как [твои дела/поживаешь]?». Можно несколько в тексте и вложенные: [а/б [в/г]]. Скобки без «/» остаются как есть.</p>
       <label for="shop-color">Цвет кнопки товара</label>
@@ -303,8 +306,11 @@
   </section>
 </main>
 
-<footer class="wrap foot" id="foot">
-  <h2>Статистика за всё время</h2>
+<dialog id="dlg-stats" class="foot">
+  <div class="stats-head">
+    <h2>Статистика за всё время</h2>
+    <button type="button" class="icon-btn" id="stats-refresh" title="Обновить">🔁</button>
+  </div>
   <div class="foot-grid">
     <div class="card foot-cell"><div class="label">Трафик сервера</div><div class="value" id="m-traffic">—</div>
       <div class="desc">Объём сетевого трафика, прошедшего через веб-сервер / Render за всё время</div></div>
@@ -316,7 +322,8 @@
       <div class="desc">Учтённые события предложки и выдачи контента</div></div>
   </div>
   <div class="foot-note">Счётчики ведутся на уровне приложения, это не биллинг Render или базы данных: цифры приближённо отражают расход ресурсов веб-сервера и БД и могут отличаться от счёта хостинга.</div>
-</footer>
+  <div class="row"><button type="button" class="btn" data-close="dlg-stats">Закрыть</button></div>
+</dialog>
 
 <dialog id="dlg-token">
   <form id="form-token" autocomplete="off">
@@ -1285,11 +1292,9 @@ async function initPush() {
   } catch (_) {}
 }
 
-/* ---------- выход ---------- */
-$('#logout').addEventListener('click', async () => {
-  try { await fetch('/logout', {method: 'POST', credentials: 'same-origin'}); } catch (_) {}
-  location.href = '/login';
-});
+/* ---------- статистика (по кнопке в шапке; обновляется только вручную кнопкой 🔁) ---------- */
+$('#stats-btn').addEventListener('click', () => { $('#dlg-stats').showModal(); pollMetrics(true); });
+$('#stats-refresh').addEventListener('click', () => pollMetrics(true));
 
 /* ---------- события в реальном времени (SSE) ---------- */
 function connect() {
@@ -1321,15 +1326,16 @@ function connect() {
   };
 }
 
-/* ---------- подвал: «живая» статистика (лёгкий опрос раз в 3 секунды, значения из памяти сервера) ---------- */
+/* ---------- статистика: значения из памяти сервера, запрос только по нажатию ---------- */
 function fmtBytes(n) {
   const u = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
   let i = 0, v = Number(n) || 0;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return v.toLocaleString('ru-RU', {useGrouping: false, maximumFractionDigits: i ? 2 : 0}) + ' ' + u[i];
 }
-async function pollMetrics() {
-  if (document.hidden) return;
+async function pollMetrics(manual) {
+  const btn = $('#stats-refresh');
+  btn.classList.add('spin');
   try {
     const m = await api('GET', '/api/metrics');
     $('#m-traffic').textContent = fmtBytes(m.traffic_bytes);
@@ -1338,11 +1344,9 @@ async function pollMetrics() {
     $('#m-http').textContent = fmtNum(m.http_requests);
     $('#m-events').textContent = fmtNum(m.events);
     $('#m-events').title = `Заявки: ${fmtNum(m.submissions)} · решения модераторов: ${fmtNum(m.decisions)} · выдано видео: ${fmtNum(m.videos_sent)}`;
-  } catch (_) {}   // сервис ещё запускается или нет сети — просто попробуем через 3 с
+  } catch (e) { if (manual) toast(e.message || 'Не удалось обновить статистику'); }
+  finally { btn.classList.remove('spin'); }
 }
-setInterval(pollMetrics, 3000);
-document.addEventListener('visibilitychange', pollMetrics);
-pollMetrics();
 
 /* ---------- старт ---------- */
 loadState().then(() => {

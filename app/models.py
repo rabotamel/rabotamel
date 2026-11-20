@@ -1,6 +1,7 @@
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -181,3 +182,43 @@ class ShopProduct(Base):
     position: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     is_visible: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# статусы заказов пополнения («Купить конфеты»)
+TOPUP_CREATING = "creating"   # счёт создаётся
+TOPUP_ACTIVE = "active"       # счёт выставлен, ждём оплату (CryptoBot / Stars)
+TOPUP_REVIEW = "review"       # чек по карте отправлен админам на проверку
+TOPUP_PAID = "paid"           # оплата подтверждена, конфеты ещё не начислены
+TOPUP_CREDITED = "credited"   # конфеты начислены (финальный статус)
+TOPUP_CANCELED = "canceled"
+TOPUP_REJECTED = "rejected"
+TOPUP_FAILED = "failed"
+TOPUP_EXPIRED = "expired"
+
+
+class TopupOrder(Base):
+    """Заказ «Купить конфеты». Привязан к боту (баланс 🍬 у каждого бота свой). Начисление идёт одним
+    условным UPDATE по статусу (repo.credit_topup_order), поэтому повторно конфеты за один заказ не начислятся."""
+
+    __tablename__ = "topup_orders"
+    __table_args__ = (Index("ix_topup_orders_status", "status", "method"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("bot_profiles.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    candies: Mapped[int] = mapped_column(BigInteger)
+    method: Mapped[str] = mapped_column(String(16))             # cryptobot | stars | card
+    currency: Mapped[str] = mapped_column(String(8))            # USD | XTR | RUB
+    fiat_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    status: Mapped[str] = mapped_column(String(16), default=TOPUP_CREATING, server_default=TOPUP_CREATING)
+    invoice_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    invoice_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    charge_id: Mapped[str | None] = mapped_column(String(128), nullable=True)   # Telegram Stars
+    receipt_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    receipt_sender: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    screen_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    screen_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    credited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

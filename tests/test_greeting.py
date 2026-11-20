@@ -42,12 +42,12 @@ class GreetingTests(unittest.TestCase):
                 self.assertIn(emo, g.EMOJI_SETS[slot])
 
     def test_emoji_are_static_for_every_bot(self):
-        self.assertEqual(g.PALETTES, (("💖", "🤍", "💫", "🍫"),))
+        self.assertEqual(g.PALETTES, (("💖", "🤍", "💫", "🍭"),))
         for i in range(300):
             out = g.render(g.generate_config(f"st{i}"), "Тест", 3)
             lines = out.splitlines()
             self.assertTrue(lines[0].startswith("<b>💖 "))             # заголовок
-            self.assertTrue(lines[-1].startswith("🍫 ") and lines[-1].endswith("3🍬"))  # баланс
+            self.assertTrue(lines[-1].startswith("🍭 ") and lines[-1].endswith("3🍬"))  # баланс
             self.assertIn("🤍 ", out)
             self.assertIn("💫 ", out)
             for old in sum(g._LEGACY_EMOJI.values(), ()):
@@ -73,7 +73,7 @@ class GreetingTests(unittest.TestCase):
         d["palette"] = 3
         n = g.GreetingConfig.from_json(json.dumps(d, ensure_ascii=False))
         self.assertEqual(n.template, ("<b>💖 Рады видеть вас в {name}</b>\n\n🤍 Приватность — оплата без привязок и без риска\n"
-                                      "💫 Без следов — чаты не хранятся, историю никто не увидит.\n\n🍫 Ваш баланс: {balance}🍬"))
+                                      "💫 Без следов — чаты не хранятся, историю никто не увидит.\n\n🍭 Ваш баланс: {balance}🍬"))
         self.assertEqual(g.GreetingConfig.from_json(n.to_json()), n)   # повторное чтение ничего не меняет
 
     def test_all_layouts_and_variants_are_reachable(self):

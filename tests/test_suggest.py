@@ -58,7 +58,7 @@ class GalleryHintTests(unittest.TestCase):
     def test_hint_is_between_description_and_balance_with_current_title(self):
         for i in range(300):
             g, c, d = gallery.generate_config(f"h{i}"), suggest_ui.generate_config(f"h{i}"), deco.generate_config(f"h{i}")
-            text = gallery.render(g, d, "Галерея", "Привет\n🍫 Баланс: {balance}🍬", 90, c.name)
+            text = gallery.render(g, d, "Галерея", "Привет\n🍭 Баланс: {balance}🍬", 90, c.name)
             parts = text.split("\n\n")
             self.assertEqual(len(parts), 4)
             self.assertEqual(parts[0], "<b>Галерея</b>")
@@ -66,7 +66,7 @@ class GalleryHintTests(unittest.TestCase):
             self.assertIn(f"«{c.name}»", parts[2])                               # актуальное название предложки
             self.assertNotIn("{proposal_title}", parts[2])
             self.assertFalse(any(ch.isdigit() for ch in parts[2]))               # без количества конфет
-            self.assertEqual(parts[3], "🍫 Баланс: 90🍬")                        # баланс внизу
+            self.assertEqual(parts[3], "🍭 Баланс: 90🍬")                        # баланс внизу
 
     def test_name_matches_the_button_on_screen(self):
         for i in range(300):
@@ -438,6 +438,10 @@ class Bot:
     async def delete_message(self, chat_id, message_id):
         self.deleted.append(message_id)
 
+    async def send_message(self, chat_id, text, **kw):   # служебное сообщение с клавиатурой «Меню»
+        self.next_id += 1
+        return NS(message_id=self.next_id)
+
     async def send_video(self, chat_id, video, **kw):
         if self.video_errors:
             raise self.video_errors.pop(0)
@@ -765,7 +769,8 @@ class Flow(unittest.TestCase):
             (v,) = self.bot.videos
             self.assertEqual((v["chat_id"], v["video"]), (5, "V1"))
             self.assertIs(v["protect_content"], True)
-            self.assertNotIn("caption", v)                          # подписи нет
+            self.assertEqual(v["caption"], gallery.balance_line(self.texts.greeting.template, "7"))   # подпись — строка баланса после списания
+            self.assertEqual(v["parse_mode"], "HTML")
             kb = v["reply_markup"].inline_keyboard
             self.assertEqual([[b.text for b in r] for r in kb], [[self.texts.gallery.buy_label], ["⬅️ Назад"]])
             self.assertEqual([r[0].callback_data for r in kb], [self.texts.gallery.buy_cb, self.texts.gallery.back_cb])

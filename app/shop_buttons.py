@@ -229,16 +229,15 @@ def layout_rows(cfg: ShopButtonsConfig) -> list[list[tuple[str, str]]]:
 BUTTON_STYLE = "primary"  # цвет кнопок под приветствием: синий (Bot API 9.4+, нужен aiogram >= 3.25)
 
 
-def build_keyboard(cfg: ShopButtonsConfig):
-    """Inline-клавиатура под приветствием: все кнопки синие."""
+def build_keyboard(cfg: ShopButtonsConfig, extra_rows=()):
+    """Inline-клавиатура под приветствием: все кнопки синие. extra_rows — дополнительные ряды ниже
+    [(подпись, callback_data, стиль), ...] (например, «Купить конфеты»); основные кнопки не меняются."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=t, callback_data=cb, style=BUTTON_STYLE) for t, cb in row]
-            for row in layout_rows(cfg)
-        ]
-    )
+    rows = [[InlineKeyboardButton(text=t, callback_data=cb, style=BUTTON_STYLE) for t, cb in row] for row in layout_rows(cfg)]
+    for t, cb, st in extra_rows:
+        rows.append([InlineKeyboardButton(text=t, callback_data=cb, style=st)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def parse_action(cfg: ShopButtonsConfig, data: str | None) -> str | None:
