@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import auth, avatars, moderation, push, repo, sandbox, shop, shop_io
+from . import auth, avatars, moderation, push, repo, sandbox, shop, shop_io, tasks
 from .metrics import metrics
 from .events import bus
 from .models import STATUS_ACTIVE, STATUS_QUEUED
@@ -97,6 +97,13 @@ class UserTargetIn(BaseModel):
     confirm: bool = False
 
 
+class BlockIn(BaseModel):
+    target: str = ""
+    scope: Literal["suggest", "receipts"]
+    action: Literal["block", "unblock"]
+    confirm: bool = False
+
+
 class ConfirmIn(BaseModel):
     confirm: bool = False
 
@@ -112,6 +119,14 @@ class ShopImportIn(BaseModel):
 
 class AboutIn(BaseModel):
     about: str = ""
+
+
+class TaskIn(BaseModel):
+    button_text: str = ""           # подпись кнопки задания в боте
+    about: str = ""                 # описание задания (оформление и [а/б] — как у товаров)
+    reward: int | str = ""          # награда в конфетах 🍬
+    screenshot: bool = False        # требовать ли прикрепить скриншот (награду тогда начисляет модератор)
+    visible: bool = True            # показывать ли задание в боте
 
 
 class ProductIn(BaseModel):
@@ -477,6 +492,14 @@ async def sandbox_delete_videos(body: ConfirmIn, request: Request):
     return res
 
 
+@api.post("/sandbox/block")
+async def sandbox_block(body: BlockIn, request: Request):
+    try:
+        return await sandbox.set_block(request.app.state.manager, body.target, body.scope, body.action == "block", body.confirm)
+    except sandbox.SandboxError as e:
+        raise HTTPException(e.status, e.message)
+
+
 @api.post("/sandbox/delete-user")
 async def sandbox_delete_user(body: UserTargetIn, request: Request):
     try:
@@ -621,6 +644,82 @@ async def import_shop_products(body: ShopImportIn):
         raise HTTPException(500, "Не удалось восстановить товары, текущие товары не изменены")
     bus.publish({"type": "changed"})
     return {"ok": True, "applied": True, "count": len(items), "current": current}
+
+
+# ---------- задания («Бесплатные конфеты»; настраиваются во вкладке «Магазин») ----------
+
+def _task_dict(row) -> dict:
+    t = tasks.task_from_row(row)
+    return {
+        "id": t.id, "button_text": t.button_text, "about": t.about, "reward": t.reward,
+        "screenshot": t.require_screenshot, "visible": bool(row.is_visible), "position": row.position,
+    }
+
+
+def _clean_task(body: TaskIn) -> dict:
+    try:
+        return {
+            "button_text": tasks.normalize_button_text(body.button_text), "about": tasks.normalize_description(body.about),
+            "reward": tasks.normalize_reward(body.reward), "require_screenshot": bool(body.screenshot),
+            "is_visible": bool(body.visible),
+        }
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@api.get("/tasks")
+async def list_tasks():
+    """Все задания (и скрытые) в порядке показа."""
+    return {
+        "tasks": [_task_dict(r) for r in await repo.list_tasks(only_visible=False)],
+        "daily_reward": tasks.DAILY_REWARD, "referral_reward": tasks.REFERRAL_REWARD,
+    }
+
+
+@api.post("/tasks")
+async def add_task(body: TaskIn):
+    values = _clean_task(body)
+    if len(await repo.list_tasks(only_visible=False)) >= 200:
+        raise HTTPException(400, "Слишком много заданий")
+    row = await repo.add_task(
+        values["button_text"], values["about"], values["reward"], values["require_screenshot"], values["is_visible"]
+    )
+    bus.publish({"type": "changed"})
+    return {"ok": True, "task": _task_dict(row)}
+
+
+@api.post("/tasks/about-length")
+async def task_about_length(body: AboutIn):
+    """Счётчик под полем «Описание задания» (те же правила подсчёта, что у товаров, но свои лимиты)."""
+    about = body.about.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return {
+        "site": len(about), "site_max": tasks.MAX_DESC_RAW,
+        "telegram": shop.telegram_about_length(about), "telegram_max": tasks.MAX_DESC,
+    }
+
+
+@api.post("/tasks/reorder")
+async def reorder_tasks(body: ReorderIn):
+    await repo.reorder_tasks(body.ids)
+    bus.publish({"type": "changed"})
+    return {"ok": True}
+
+
+@api.post("/tasks/{task_id}/edit")
+async def edit_task(task_id: int, body: TaskIn):
+    row = await repo.update_task(task_id, **_clean_task(body))
+    if row is None:
+        raise HTTPException(404, "Задание не найдено")
+    bus.publish({"type": "changed"})
+    return {"ok": True, "task": _task_dict(row)}
+
+
+@api.delete("/tasks/{task_id}")
+async def delete_task(task_id: int):
+    if not await repo.delete_task(task_id):
+        raise HTTPException(404, "Задание не найдено")
+    bus.publish({"type": "changed"})
+    return {"ok": True}
 
 
 @api.post("/push/subscribe")

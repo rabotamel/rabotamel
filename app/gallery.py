@@ -27,10 +27,23 @@ import json
 import random
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 PRICE = 3
 CANDY = "🍬"
 BACK_LABEL = "⬅️ Назад"
+
+# Премиум-подписка (по образцу присланного владельцем gallery.py): три тарифа, цена в 🍬; эмодзи заданы владельцем и статичны.
+# Премиум: видео из галереи бесплатно (0🍬) и без защиты от пересылки/сохранения.
+PREMIUM_OPTIONS: dict[str, dict] = {
+    "3": {"days": 3, "price": 650, "label": "💕 3 дня (650🍬) 👑"},
+    "7": {"days": 7, "price": 1250, "label": "🔥 Неделя (1250🍬) 👑"},
+    "forever": {"days": None, "price": 1750, "label": "💎 Безлимит (1750🍬) 👑"},
+}
+PREMIUM_KEYS = tuple(PREMIUM_OPTIONS)
+PREMIUM_BACK_KEY = "b"   # callback_data «Назад» в меню премиума: «<premium_cb>:b»; тарифы: «<premium_cb>:3|7|forever»
+PREMIUM_INFO = "🌸 С премиумом вы сможете <b>бесплатно</b> смотреть, скачивать и пересылать видео из галереи 🌸"
+PREMIUM_BOUGHT = {"3": "на 3 дня", "7": "на неделю", "forever": "навсегда"}
 SUGGEST_LABEL = "📩 Предложка 🤍"  # эталон; у каждого бота своя подпись из suggest_ui (хранится в БД)
 
 DESCRIPTIONS: tuple[str, ...] = (
@@ -265,10 +278,87 @@ def render(
     )
 
 
-def layout_rows(cfg: GalleryConfig, suggest_label: str = SUGGEST_LABEL) -> list[list[tuple[str, str]]]:
-    """Четыре кнопки по одной в ряд: покупка, премиум, предложка, назад (без aiogram — удобно для тестов)."""
+def premium_active(until: datetime | None, forever: bool, now: datetime | None = None) -> bool:
+    """Действует ли премиум: «навсегда» или дата окончания ещё впереди."""
+    if forever:
+        return True
+    if until is None:
+        return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    return until > (now or datetime.now(timezone.utc))
+
+
+def format_left(delta: timedelta) -> str:
+    total = int(delta.total_seconds())
+    if total <= 0:
+        return "0д 0ч 0м"
+    return f"{total // 86400}д {total % 86400 // 3600}ч {total % 3600 // 60}м"
+
+
+def premium_status(until: datetime | None, forever: bool, now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    if forever:
+        return "💎 Ваш премиум безлимитный"
+    if premium_active(until, False, now):
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        return f"❤️‍🔥 Ваш премиум истечёт через {format_left(until - now)}"
+    return "🤷🏻‍♀️ У вас нет премиума"
+
+
+def render_premium(
+    cfg: GalleryConfig, greeting_template: str, balance: int, until: datetime | None, forever: bool,
+    now: datetime | None = None,
+) -> str:
+    """Экран «Премиум подписка» (HTML): заголовок = подпись кнопки этого бота, описание, статус и баланс."""
+    return (
+        f"<b>{html.escape(cfg.premium_label, quote=False)}</b>\n\n"
+        f"{PREMIUM_INFO}\n\n"
+        f"<b>🔥 Статус 🩷</b>\n{premium_status(until, forever, now)}\n\n"
+        f"{balance_line(greeting_template, str(int(balance)))}"
+    )
+
+
+def premium_cb(cfg: GalleryConfig, key: str) -> str:
+    return f"{cfg.premium_cb}:{key}"
+
+
+def parse_premium_key(cfg: GalleryConfig, data: str | None) -> str | None:
+    """Тариф ('3' | '7' | 'forever') или PREMIUM_BACK_KEY по callback_data меню премиума ЭТОГО бота; иначе None."""
+    prefix = cfg.premium_cb + ":"
+    if not data or not data.startswith(prefix):
+        return None
+    key = data[len(prefix):]
+    return key if key in PREMIUM_KEYS or key == PREMIUM_BACK_KEY else None
+
+
+def premium_rows(cfg: GalleryConfig) -> list[list[tuple[str, str]]]:
+    """Меню премиума: три тарифа по одной кнопке в ряд и «Назад» (в галерею)."""
+    rows = [[(PREMIUM_OPTIONS[k]["label"], premium_cb(cfg, k))] for k in PREMIUM_KEYS]
+    rows.append([(BACK_LABEL, premium_cb(cfg, PREMIUM_BACK_KEY))])
+    return rows
+
+
+def build_premium_keyboard(cfg: GalleryConfig):
+    from aiogram.types import InlineKeyboardMarkup
+
+    styles = ("success",) * len(PREMIUM_KEYS) + ("danger",)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[_button(t, cb, style) for t, cb in row] for row, style in zip(premium_rows(cfg), styles)]
+    )
+
+
+def free_label(label: str) -> str:
+    """Подпись покупки видео для премиума: цена 0🍬 вместо 3🍬."""
+    return label.replace(f"({PRICE}{CANDY})", f"(0{CANDY})")
+
+
+def layout_rows(cfg: GalleryConfig, suggest_label: str = SUGGEST_LABEL, premium: bool = False) -> list[list[tuple[str, str]]]:
+    """Четыре кнопки по одной в ряд: покупка, премиум, предложка, назад (без aiogram — удобно для тестов).
+    У пользователя с премиумом в подписи покупки стоит (0🍬)."""
     return [
-        [(cfg.buy_label, cfg.buy_cb)],
+        [(free_label(cfg.buy_label) if premium else cfg.buy_label, cfg.buy_cb)],
         [(cfg.premium_label, cfg.premium_cb)],
         [(suggest_label, cfg.suggest_cb)],
         [(BACK_LABEL, cfg.back_cb)],
@@ -286,43 +376,46 @@ def _button(text: str, cb: str, style: str | None):
     return InlineKeyboardButton(text=text, callback_data=cb, **({"style": style} if style else {}))
 
 
-def build_keyboard(cfg: GalleryConfig, suggest_label: str = SUGGEST_LABEL):
+def build_keyboard(cfg: GalleryConfig, suggest_label: str = SUGGEST_LABEL, premium: bool = False):
     from aiogram.types import InlineKeyboardMarkup
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_button(t, cb, style) for t, cb in row]
-            for row, style in zip(layout_rows(cfg, suggest_label), ROW_STYLES)
+            for row, style in zip(layout_rows(cfg, suggest_label, premium), ROW_STYLES)
         ]
     )
 
 
-def video_rows(cfg: GalleryConfig) -> list[list[tuple[str, str]]]:
+def video_rows(cfg: GalleryConfig, premium: bool = False) -> list[list[tuple[str, str]]]:
     """Под купленным видео ровно две кнопки: та же покупка и «Назад» (callback_data те же, что в меню галереи)."""
-    return [[(cfg.buy_label, cfg.buy_cb)], [(BACK_LABEL, cfg.back_cb)]]
+    return [[(free_label(cfg.buy_label) if premium else cfg.buy_label, cfg.buy_cb)], [(BACK_LABEL, cfg.back_cb)]]
 
 
-def build_video_keyboard(cfg: GalleryConfig):
+def build_video_keyboard(cfg: GalleryConfig, premium: bool = False):
     from aiogram.types import InlineKeyboardMarkup
 
     styles = (ROW_STYLES[0], ROW_STYLES[3])  # те же цвета, что у этих кнопок в галерее
     return InlineKeyboardMarkup(
-        inline_keyboard=[[_button(t, cb, style) for t, cb in row] for row, style in zip(video_rows(cfg), styles)]
+        inline_keyboard=[[_button(t, cb, style) for t, cb in row] for row, style in zip(video_rows(cfg, premium), styles)]
     )
 
 
 def build_suggest_keyboard(cfg: GalleryConfig):
-    """Меню предложки: одна кнопка «Назад» (возвращает в меню галереи)."""
+    """Меню предложки: одна красная кнопка «Назад» (возвращает в меню галереи)."""
     from aiogram.types import InlineKeyboardMarkup
 
-    return InlineKeyboardMarkup(inline_keyboard=[[_button(BACK_LABEL, cfg.suggest_back_cb, None)]])
+    return InlineKeyboardMarkup(inline_keyboard=[[_button(BACK_LABEL, cfg.suggest_back_cb, "danger")]])
 
 
 def parse_action(cfg: GalleryConfig, data: str | None) -> str | None:
-    """'buy' / 'premium' / 'back' / 'suggest' / 'suggest_back' по callback_data ЭТОГО бота; None — чужие или устаревшие."""
+    """'buy' / 'premium' / 'premium_buy' / 'premium_back' / 'back' / 'suggest' / 'suggest_back' по callback_data ЭТОГО бота; None — чужие или устаревшие."""
     if not data:
         return None
-    return {
+    action = {
         cfg.buy_cb: "buy", cfg.premium_cb: "premium", cfg.back_cb: "back",
         cfg.suggest_cb: "suggest", cfg.suggest_back_cb: "suggest_back",
     }.get(data)
+    if action is None and (key := parse_premium_key(cfg, data)) is not None:
+        action = "premium_back" if key == PREMIUM_BACK_KEY else "premium_buy"   # какой тариф — parse_premium_key
+    return action

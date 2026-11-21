@@ -13,9 +13,21 @@ class FakeRepo(types.ModuleType):
         super().__init__("app.repo")
         self.calls = []
         self.fail = False
+        self.stored_activity = {}      # user_id -> unix-время, которое «лежит в БД» при load()
+        self.activity_calls = []       # каждый вызов touch_users_active (= один UPDATE в БД)
+        self.activity_fail = False
 
     async def load_users(self, bot_id):
         return {1: "old", 2: None}
+
+    async def load_last_active(self, bot_id):
+        return dict(self.stored_activity)
+
+    async def touch_users_active(self, bot_id, user_ids):
+        await asyncio.sleep(0.01)
+        if self.activity_fail:
+            raise RuntimeError("db down")
+        self.activity_calls.append(sorted(user_ids))
 
     async def save_users(self, bot_id, add, rename, remove):
         await asyncio.sleep(0.01)
@@ -40,6 +52,9 @@ class StatsTests(unittest.TestCase):
     def setUp(self):
         fake.calls.clear()
         fake.fail = False
+        fake.stored_activity = {}
+        fake.activity_calls.clear()
+        fake.activity_fail = False
 
     def test_only_added_users_are_counted_and_unknown_are_not_written(self):
         async def go():
@@ -115,6 +130,138 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(norm_username(" @Abc_1 "), "abc_1")
         self.assertIsNone(norm_username(""))
         self.assertIsNone(norm_username(None))
+
+
+class FakeClock:
+    def __init__(self, t=1_000_000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+HOUR = 3600
+
+
+class ActivityThrottleTests(unittest.TestCase):
+    """last_active_at пишется в БД с троттлингом: первое взаимодействие и далее не чаще раза в 6 часов."""
+
+    def setUp(self):
+        fake.calls.clear()
+        fake.activity_calls.clear()
+        fake.stored_activity = {}
+        fake.activity_fail = False
+        fake.fail = False
+
+    def test_first_interaction_is_written_once_and_repeats_within_6h_do_not_hit_db(self):
+        async def go():
+            clock = FakeClock()
+            st = UserStats(7, clock=clock)
+            await st.load()
+            self.assertTrue(st.touch_activity(1))           # первое взаимодействие — в очередь
+            await st.flush()
+            self.assertEqual(fake.activity_calls, [[1]])
+            for _ in range(200):                             # поток сообщений и нажатий кнопок
+                clock.t += 1
+                self.assertFalse(st.touch_activity(1))
+            clock.t += 5 * HOUR + 50 * 60                    # итого меньше 6 ч после первой записи — всё ещё мало
+            self.assertFalse(st.touch_activity(1))
+            self.assertFalse(st.dirty())                     # очередь пуста: flush не обратится к БД
+            await st.flush()
+            self.assertEqual(fake.activity_calls, [[1]])
+        run(go())
+
+    def test_written_again_after_more_than_6_hours(self):
+        async def go():
+            clock = FakeClock()
+            st = UserStats(7, clock=clock)
+            await st.load()
+            st.touch_activity(1)
+            await st.flush()
+            clock.t += 6 * HOUR + 1
+            self.assertTrue(st.touch_activity(1))
+            await st.flush()
+            self.assertEqual(fake.activity_calls, [[1], [1]])
+        run(go())
+
+    def test_many_users_go_in_one_batch_update(self):
+        async def go():
+            st = UserStats(7, clock=FakeClock())
+            await st.load()
+            for uid in range(100, 150):
+                st.add(uid, None)
+            st.touch_activity(1)
+            st.touch_activity(2)
+            await st.flush()
+            self.assertEqual(len(fake.activity_calls), 1)    # одним запросом на всех
+            self.assertEqual(fake.activity_calls[0], [1, 2])  # новые (add) получили last_active_at по умолчанию в БД
+        run(go())
+
+    def test_cache_is_seeded_from_db_so_restart_does_not_rewrite_everyone(self):
+        async def go():
+            clock = FakeClock()
+            fake.stored_activity = {1: clock.t - 2 * HOUR, 2: clock.t - 8 * HOUR, 999: clock.t}
+            st = UserStats(7, clock=clock)
+            await st.load()
+            self.assertFalse(st.touch_activity(1))           # записано 2 часа назад — БД не трогаем
+            self.assertTrue(st.touch_activity(2))            # 8 часов назад — пора обновить
+            await st.flush()
+            self.assertEqual(fake.activity_calls, [[2]])
+        run(go())
+
+    def test_force_bypasses_throttle(self):
+        async def go():
+            st = UserStats(7, clock=FakeClock())
+            await st.load()
+            st.touch_activity(1)
+            await st.flush()
+            self.assertTrue(st.touch_activity(1, force=True))   # критичное действие (например, оплата)
+            await st.flush()
+            self.assertEqual(fake.activity_calls, [[1], [1]])
+        run(go())
+
+    def test_unknown_user_is_ignored(self):
+        async def go():
+            st = UserStats(7, clock=FakeClock())
+            await st.load()
+            self.assertFalse(st.touch_activity(555))         # не прошёл капчу — в БД строки нет
+            self.assertFalse(st.dirty())
+        run(go())
+
+    def test_failed_activity_write_is_retried(self):
+        async def go():
+            st = UserStats(7, clock=FakeClock())
+            await st.load()
+            st.touch_activity(1)
+            fake.activity_fail = True
+            await st.flush()
+            self.assertTrue(st.dirty())
+            fake.activity_fail = False
+            await st.flush()
+            self.assertEqual(fake.activity_calls, [[1]])
+        run(go())
+
+    def test_removed_user_activity_is_not_written(self):
+        async def go():
+            st = UserStats(7, clock=FakeClock())
+            await st.load()
+            st.touch_activity(1)
+            st.remove(1)
+            await st.flush()
+            self.assertEqual(fake.activity_calls, [])
+            self.assertEqual(fake.calls, [({}, {}, {1})])
+        run(go())
+
+    def test_forget_drops_users_deleted_by_cleanup_without_queueing_delete(self):
+        async def go():
+            st = UserStats(7, clock=FakeClock())
+            await st.load()
+            st.touch_activity(1)
+            self.assertEqual(st.forget([1, 777]), 1)
+            self.assertFalse(st.has(1))
+            self.assertFalse(st.dirty())                      # DELETE в БД уже выполнила автоочистка
+            self.assertTrue(st.add(1, "again"))               # вернулся — проходит капчу как новый
+        run(go())
 
 
 if __name__ == "__main__":

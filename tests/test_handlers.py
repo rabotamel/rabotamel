@@ -121,7 +121,7 @@ def _import_handlers():
 
 
 handlers = _import_handlers()
-from app import deco, gallery, messaging, shop, shop_buttons, suggest_ui  # noqa: E402
+from app import deco, gallery, messaging, shop, shop_buttons, suggest_ui, tasks  # noqa: E402
 
 
 class FakeBot:
@@ -151,6 +151,10 @@ class FakeStats:
     def touch(self, *a):
         pass
 
+    def touch_activity(self, uid, force=False):
+        self.__dict__.setdefault("activity", []).append(uid)   # у подклассов может быть свой __init__
+        return True
+
 
 class StartDeletesPreviousTests(unittest.TestCase):
     def test_repeated_start_deletes_previous_greeting(self):
@@ -174,7 +178,7 @@ class StartDeletesPreviousTests(unittest.TestCase):
             texts = types.SimpleNamespace(
                 greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
                 deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
-                suggest=suggest_ui.generate_config("t"), version=1)
+                suggest=suggest_ui.generate_config("t"), tasks_menu=tasks.generate_config("t"), version=1)
             router = handlers.build_router(FakeStats({5}), texts, profile)
             on_start = router.handlers["on_start"]
             msg = types.SimpleNamespace(from_user=types.SimpleNamespace(id=5, username="u"))
@@ -223,7 +227,7 @@ class MenuButtonTests(unittest.TestCase):
         self.texts = types.SimpleNamespace(
             greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
             deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
-            suggest=suggest_ui.generate_config("t"), version=1)
+            suggest=suggest_ui.generate_config("t"), tasks_menu=tasks.generate_config("t"), version=1)
         return handlers.build_router(FakeStats({5}), self.texts, profile)
 
     @staticmethod
@@ -261,7 +265,10 @@ class MenuButtonTests(unittest.TestCase):
         rows = self.sent[-1][2].inline_keyboard
         self.assertEqual(rows[-1][0].text, "🍭 Купить конфеты 🍬")
         self.assertTrue(rows[-1][0].callback_data.startswith("tp"))
-        labels = [b.text for row in rows[:-1] for b in row]
+        # над «Купить конфеты» — «Бесплатные конфеты» (подпись и callback_data этого бота)
+        self.assertEqual(rows[-2][0].text, self.texts.tasks_menu.text("label"))
+        self.assertEqual(rows[-2][0].callback_data, self.texts.tasks_menu.cb["open"])
+        labels = [b.text for row in rows[:-2] for b in row]
         self.assertEqual(sorted(labels), sorted([self.texts.shop_buttons.shop_label, self.texts.shop_buttons.gallery_label]))
 
     def test_balance_line_uses_lollipop(self):
@@ -292,7 +299,7 @@ class GalleryNavigationTests(unittest.TestCase):
             texts = types.SimpleNamespace(
                 greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
                 deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
-                suggest=suggest_ui.generate_config("t"), version=1)
+                suggest=suggest_ui.generate_config("t"), tasks_menu=tasks.generate_config("t"), version=1)
             router = handlers.build_router(FakeStats({5}), texts, profile)
 
             def call(data, msg_id):
@@ -380,7 +387,7 @@ class ShopNavigationTests(unittest.TestCase):
         texts = types.SimpleNamespace(
             greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
             deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
-            suggest=suggest_ui.generate_config("t"), shop_menu=shop.generate_config("t"), version=1)
+            suggest=suggest_ui.generate_config("t"), tasks_menu=tasks.generate_config("t"), shop_menu=shop.generate_config("t"), version=1)
         router = handlers.build_router(FakeStats(known), texts, profile)
 
         def call(data, msg_id=10):
@@ -549,7 +556,7 @@ class CaptchaTargetChangesTests(unittest.TestCase):
             captcha=cfg, greeting=greeting.generate_config("t"),
             shop_buttons=shop_buttons.generate_config("t"),
             deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
-                suggest=suggest_ui.generate_config("t"), version=1)
+                suggest=suggest_ui.generate_config("t"), tasks_menu=tasks.generate_config("t"), version=1)
         stats = FakeStats(set())
         stats.add = lambda uid, name=None: stats.known.add(uid) or True
 
@@ -619,6 +626,39 @@ class CaptchaTargetChangesTests(unittest.TestCase):
         finally:
             handlers.CAPTCHA_MIN_INTERVAL = orig_delay
             messaging.send_message = orig_send
+
+
+class ActivityHookTests(unittest.TestCase):
+    """Любое сообщение и нажатие кнопки прошедшего капчу пользователя отмечает активность (сам троттлинг — в UserStats)."""
+
+    def _router(self, known):
+        from app import greeting
+
+        profile = types.SimpleNamespace(name="Бот", message_image_url=None)
+        texts = types.SimpleNamespace(
+            greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
+            deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
+            suggest=suggest_ui.generate_config("t"), tasks_menu=tasks.generate_config("t"), version=1)
+        self.stats = FakeStats(known)
+        return handlers.build_router(self.stats, texts, profile)
+
+    def test_private_message_marks_activity(self):
+        router = self._router({5})
+        msg = types.SimpleNamespace(text="привет", message_id=1, from_user=types.SimpleNamespace(id=5, username="u"))
+        asyncio.run(router.handlers["on_private_message"](msg, FakeBot()))
+        self.assertEqual(self.stats.activity, [5])
+
+    def test_button_press_marks_activity(self):
+        router = self._router({5})
+        answered = []
+
+        async def answer(*a, **k):
+            answered.append(1)
+
+        call = types.SimpleNamespace(
+            data="zzz", from_user=types.SimpleNamespace(id=5, username="u"), message=None, answer=answer)
+        asyncio.run(router.handlers["on_gallery_button"](call, FakeBot()))
+        self.assertEqual(self.stats.activity, [5])
 
 
 if __name__ == "__main__":

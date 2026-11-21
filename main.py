@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from app import db, push, topup
+from app import cleanup, db, push, topup
 from app.config import get_settings
 from app.events import bus
 from app.manager import BotManager
@@ -58,6 +58,20 @@ async def _startup(app: FastAPI) -> None:
     app.state.manager = manager
     app.state.error = None
     manager.start()
+
+    # автоочистка неактивных (7+ дней) пользователей: раз в сутки, первый запуск — с задержкой после старта
+    async def _before_cleanup() -> None:
+        if manager.stats is not None:
+            await manager.stats.flush()   # накопленная в памяти активность уходит в БД до удаления
+
+    def _on_cleanup_deleted(rows) -> None:
+        st = manager.stats                # работающий бот забывает удалённых, иначе считал бы их прошедшими капчу
+        if st is not None:
+            st.forget(uid for bot_id, uid in rows if bot_id == st.bot_id)
+
+    app.state.cleanup_task = asyncio.create_task(
+        cleanup.run_loop(before=_before_cleanup, on_deleted=_on_cleanup_deleted), name="users-cleanup"
+    )
     log.info("Приложение готово")
 
 
@@ -72,10 +86,11 @@ async def lifespan(app: FastAPI):
         bus.close()  # закрывает открытые SSE-соединения, чтобы остановка не зависала
         startup.cancel()
         await asyncio.gather(startup, return_exceptions=True)
-        task = getattr(app.state, "metrics_task", None)
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        for name in ("metrics_task", "cleanup_task"):
+            task = getattr(app.state, name, None)
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         if app.state.manager is not None:
             await app.state.manager.stop()
         await topup.shutdown()   # фоновые задачи «Купить конфеты» (проверка оплат, Stars-бот)

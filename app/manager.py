@@ -13,7 +13,7 @@ from aiogram.exceptions import (
     TelegramUnauthorizedError,
 )
 
-from . import avatars, push, repo, topup, video_pool
+from . import avatars, push, repo, task_review, topup, video_pool
 from .config import Settings
 from .events import bus
 from .handlers import build_router
@@ -317,6 +317,7 @@ class BotManager:
         finally:
             self.bot = self.profile = self.texts = None
             topup.detach(profile.id)
+            task_review.detach(profile.id)
             forwarder.cancel()
             stopper.cancel()
             if polling is not None and not polling.done():

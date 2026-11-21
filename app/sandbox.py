@@ -138,6 +138,32 @@ async def change_candies(
     }
 
 
+BLOCK_SCOPES = ("suggest", "receipts")   # «Предложка» / «Отправка чеков»
+
+
+def _resolve_for_block(manager: BotManager, raw: str) -> tuple[int, str]:
+    """Как resolve, но числовой ID принимается и у тех, кого бот не знает (заблокировать можно заранее)."""
+    kind, value = parse_target(raw)
+    if kind == "id":
+        uid = int(value)
+        name = manager.stats.username_of(uid) if manager.is_running() else None
+        return uid, display(name, uid)
+    return resolve(manager, raw)
+
+
+async def set_block(manager: BotManager, target: str, scope: str, block: bool, confirm: bool) -> dict:
+    """Блокировка / разблокировка пользователя: scope `suggest` — отправка видео в «Предложку», `receipts` — отправка
+    чеков об оплате картой. Действует сразу для всех токенов бота."""
+    _require_confirm(confirm)
+    if scope not in BLOCK_SCOPES:
+        raise SandboxError(400, "Неизвестный раздел блокировки")
+    uid, who = _resolve_for_block(manager, target)
+    setter = repo.set_author_block if scope == "suggest" else repo.set_receipt_block
+    changed = await setter(uid, block)
+    log.info("Песочница: %s пользователя %s (%s), изменено: %s", "блокировка" if block else "разблокировка", uid, scope, changed)
+    return {"ok": True, "who": who, "user_id": uid, "scope": scope, "blocked": block, "changed": changed}
+
+
 async def remove_user(manager: BotManager, target: str, confirm: bool) -> dict:
     _require_confirm(confirm)
     uid, who = resolve(manager, target)

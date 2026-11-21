@@ -156,10 +156,17 @@
   .dd-list{position:absolute;top:calc(100% + 6px);left:0;z-index:20;display:none;flex-direction:column;gap:6px}
   .dd.open .dd-list{display:flex}
   .dd-list .dd-btn{box-shadow:0 6px 18px rgba(0,0,0,.22)}
+  /* строка блокировки: [ Заблокировать / Разблокировать ] ........ [ Предложка / Отправка чеков ] */
+  .blk-row{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-top:12px}
+  .dd.wide .dd-btn{width:auto;min-width:150px;padding:0 24px 0 14px;font-size:15px;white-space:nowrap}
+  .dd.wide .dd-list .dd-btn{width:100%}
+  .dd.right .dd-list{left:auto;right:0}
+  .dd.right .dd-list .dd-btn{width:max-content;min-width:100%}
+  .dd-btn.blue{background:var(--blue);border-color:var(--blue)}
   .conv{margin-top:8px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
   .sb-submit-row .btn{min-width:120px}
-  #shop-list .mod-row{flex-wrap:wrap}
-  #shop-list .mod-row .grow{flex-basis:100%}
+  #shop-list .mod-row,#task-list .mod-row{flex-wrap:wrap}
+  #shop-list .mod-row .grow,#task-list .mod-row .grow{flex-basis:100%}
   .shop-tools{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 6px}
   .chk{display:flex;align-items:center;gap:8px;margin-top:12px}
   .chk input{width:auto}
@@ -259,10 +266,48 @@
       <p class="hint">Экспорт сохраняет все товары (название, цена, цвет, описание, видимость, порядок). Импорт заменяет текущий каталог товарами из файла — перед этим спросим подтверждение.</p>
       <div id="shop-list"></div>
     </div>
+    <div class="card sb">
+      <h3 id="task-form-title">Добавить задание</h3>
+      <p class="hint">Задания показываются в боте в разделе «Бесплатные конфеты». Если задание требует скриншот, пользователь присылает фото, а модератор (вкладка «Модераторы») принимает или отклоняет его в боте — награда начисляется после принятия. Без скриншота награда выдаётся сразу по кнопке «Выполнено» (один раз на пользователя).</p>
+      <label for="task-button">Текст кнопки</label>
+      <input id="task-button" maxlength="64" autocomplete="off" placeholder="Подписаться на канал">
+      <label for="task-about">Описание задания</label>
+      <textarea id="task-about" maxlength="8000" placeholder="Что нужно сделать. **Жирный**, [ссылка](https://адрес), варианты [а/б]"></textarea>
+      <p class="hint" id="task-about-count">В Telegram — до 3000 символов (считается после выбора вариантов [а/б], без значков оформления). Оформление то же, что у описания товара.</p>
+      <label for="task-reward">Награда (конфет 🍬)</label>
+      <input id="task-reward" type="text" inputmode="numeric" autocomplete="off" placeholder="10">
+      <label class="chk"><input type="checkbox" id="task-shot"> Требовать скриншот</label>
+      <label class="chk"><input type="checkbox" id="task-visible" checked> Показывать в боте</label>
+      <div class="msg" id="task-msg"></div>
+      <div class="row">
+        <button type="button" class="btn" id="task-cancel" hidden>Отмена</button>
+        <button type="button" class="btn green" id="task-save">Добавить</button>
+      </div>
+    </div>
+    <div class="card sb">
+      <h3>Задания</h3>
+      <p class="hint" id="task-rewards">Ежедневный подарок и награда за приглашённого друга задаются переменными окружения DAILY_GIFT_CANDIES и REFERRAL_REWARD_CANDIES.</p>
+      <div id="task-list"></div>
+    </div>
   </section>
 
   <section id="tab-sandbox" hidden>
     <div class="card sb"><div class="sb-note" id="sb-note">—</div></div>
+
+    <div class="card sb">
+      <h3>Блокировка 🚫</h3>
+      <p class="hint">Запретить пользователю отправлять видео в «Предложку» или чеки об оплате картой — или снять запрет.</p>
+      <div class="blk-row">
+        <div class="dd wide" id="dd-bact"></div>
+        <div class="dd wide right" id="dd-bscope"></div>
+      </div>
+      <label for="sb-block-user">Юзернейм или ID пользователя</label>
+      <input id="sb-block-user" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="msg" id="sb-block-msg"></div>
+      <div class="row sb-submit-row">
+        <button type="button" class="btn red" id="sb-block-submit">Заблокировать</button>
+      </div>
+    </div>
 
     <div class="card sb">
       <h3>Конфеты 🍬</h3>
@@ -580,7 +625,7 @@ document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () 
   $('#tab-moderators').hidden = tab !== 'moderators';
   $('#tab-shop').hidden = tab !== 'shop';
   $('#tab-sandbox').hidden = tab !== 'sandbox';
-  if (tab === 'shop') loadShop();
+  if (tab === 'shop') { loadShop(); loadTasks(); }
 }));
 
 $('#btn-edit').addEventListener('click', () => { editing = !editing; if (S) renderList(); });
@@ -952,6 +997,121 @@ $('#shop-file').addEventListener('change', async (e) => {
   } catch (err) { toast(err.message); }
 });
 
+/* ---------- «Задания» (вкладка «Магазин»): раздел «Бесплатные конфеты» в боте ---------- */
+let taskItems = [];
+let taskEditId = null;
+
+async function loadTasks() {
+  try {
+    const r = await api('GET', '/api/tasks');
+    taskItems = r.tasks;
+    $('#task-rewards').textContent = 'Ежедневный подарок: ' + r.daily_reward + '🍬 раз в 24 часа, приглашённый друг: ' + r.referral_reward +
+      '🍬 пригласившему (переменные окружения DAILY_GIFT_CANDIES и REFERRAL_REWARD_CANDIES).';
+    renderTasks();
+  } catch (err) { toast(err.message); }
+}
+
+function renderTasks() {
+  $('#task-list').innerHTML = taskItems.length ? taskItems.map((t, i) => {
+    const about = t.about ? esc(t.about.length > 80 ? t.about.slice(0, 80) + '…' : t.about).replace(/\n/g, ' ') : 'без описания';
+    return `<div class="mod-row"><div class="grow"><div class="name">${esc(t.button_text)} — ${esc(fmtNum(t.reward))}🍬${t.visible ? '' : ' · скрыто'}</div>` +
+      `<div class="sub">${t.screenshot ? 'со скриншотом' : 'без скриншота'} · ${about}</div></div>` +
+      `<button type="button" class="btn sm" data-task-up="${t.id}" ${i === 0 ? 'disabled' : ''}>↑</button>` +
+      `<button type="button" class="btn sm" data-task-down="${t.id}" ${i === taskItems.length - 1 ? 'disabled' : ''}>↓</button>` +
+      `<button type="button" class="btn sm" data-task-edit="${t.id}">Изменить</button>` +
+      `<button type="button" class="btn sm" data-task-vis="${t.id}">${t.visible ? 'Скрыть' : 'Показать'}</button>` +
+      `<button type="button" class="btn red sm" data-task-del="${t.id}">Удалить</button></div>`;
+  }).join('') : '<p class="hint">Заданий пока нет.</p>';
+}
+
+function taskFormReset() {
+  taskEditId = null;
+  $('#task-button').value = ''; $('#task-about').value = ''; $('#task-reward').value = '';
+  $('#task-shot').checked = false; $('#task-visible').checked = true;
+  $('#task-form-title').textContent = 'Добавить задание';
+  $('#task-save').textContent = 'Добавить';
+  $('#task-cancel').hidden = true;
+  updateTaskAboutCount();
+}
+
+function taskBody(t) {
+  return {button_text: t.button_text, about: t.about, reward: String(t.reward), screenshot: t.screenshot, visible: t.visible};
+}
+
+let taskCountTimer = null;
+function updateTaskAboutCount() {
+  clearTimeout(taskCountTimer);
+  taskCountTimer = setTimeout(async () => {
+    const el = $('#task-about-count');
+    try {
+      const r = await api('POST', '/api/tasks/about-length', {about: $('#task-about').value});
+      el.textContent = 'Введено: ' + r.site + ' из ' + r.site_max + ' · в Telegram займёт до ' + r.telegram + ' из ' + r.telegram_max;
+      el.style.color = (r.telegram > r.telegram_max || r.site > r.site_max) ? 'var(--red, #d33)' : '';
+    } catch (err) { /* счётчик необязателен */ }
+  }, 300);
+}
+$('#task-about').addEventListener('input', updateTaskAboutCount);
+
+$('#task-save').addEventListener('click', async () => {
+  setMsg('#task-msg', '');
+  const body = {
+    button_text: $('#task-button').value, about: $('#task-about').value, reward: $('#task-reward').value,
+    screenshot: $('#task-shot').checked, visible: $('#task-visible').checked,
+  };
+  $('#task-save').disabled = true;
+  try {
+    if (taskEditId) await api('POST', '/api/tasks/' + taskEditId + '/edit', body);
+    else await api('POST', '/api/tasks', body);
+    const edited = !!taskEditId;
+    taskFormReset();
+    setMsg('#task-msg', edited ? 'Задание сохранено' : 'Задание добавлено');
+    await loadTasks();
+  } catch (err) { setMsg('#task-msg', err.message, true); }
+  $('#task-save').disabled = false;
+});
+
+$('#task-cancel').addEventListener('click', () => { taskFormReset(); setMsg('#task-msg', ''); });
+
+$('#task-list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const d = btn.dataset;
+  const id = Number(d.taskUp || d.taskDown || d.taskEdit || d.taskVis || d.taskDel);
+  const idx = taskItems.findIndex((t) => t.id === id);
+  if (idx < 0) return;
+  const t = taskItems[idx];
+  try {
+    if (d.taskEdit) {
+      taskEditId = t.id;
+      $('#task-button').value = t.button_text; $('#task-about').value = t.about; $('#task-reward').value = t.reward;
+      $('#task-shot').checked = t.screenshot; $('#task-visible').checked = t.visible;
+      updateTaskAboutCount();
+      $('#task-form-title').textContent = 'Изменить задание';
+      $('#task-save').textContent = 'Сохранить';
+      $('#task-cancel').hidden = false;
+      setMsg('#task-msg', '');
+      $('#task-button').scrollIntoView({behavior: 'smooth', block: 'center'});
+    } else if (d.taskVis) {
+      await api('POST', '/api/tasks/' + t.id + '/edit', {...taskBody(t), visible: !t.visible});
+      await loadTasks();
+    } else if (d.taskUp || d.taskDown) {
+      const to = idx + (d.taskUp ? -1 : 1);
+      const ids = taskItems.map((x) => x.id);
+      [ids[idx], ids[to]] = [ids[to], ids[idx]];
+      await api('POST', '/api/tasks/reorder', {ids});
+      await loadTasks();
+    } else if (d.taskDel) {
+      const ok = await askConfirm({
+        title: 'Удалить задание?', text: `«${t.button_text}» исчезнет из бота вместе с отметками о выполнении.`, ok: 'Удалить', danger: true,
+      });
+      if (!ok) return;
+      await api('DELETE', '/api/tasks/' + t.id);
+      if (taskEditId === t.id) taskFormReset();
+      await loadTasks();
+    }
+  } catch (err) { toast(err.message); }
+});
+
 /* ---------- вкладка «Песочница» ---------- */
 const fmtNum = (n) => Number(n).toLocaleString('ru-RU', {useGrouping: false});  // без разделителей разрядов: 1000
 function setMsg(sel, text, bad) {
@@ -971,7 +1131,7 @@ function renderSandbox() {
     note.classList.add('off');
     note.textContent = S && S.current ? 'Основной бот сейчас не запущен — действия недоступны.' : 'Нет активного бота — действия недоступны.';
   }
-  ['#sb-submit', '#sb-reroll', '#sb-delete', '#sb-del-videos'].forEach((id) => { $(id).disabled = !ready; });
+  ['#sb-submit', '#sb-block-submit', '#sb-reroll', '#sb-delete', '#sb-del-videos'].forEach((id) => { $(id).disabled = !ready; });
 }
 
 /* ----- строка суммы: знак (+ / −) и валюта (🍬 / ₽ / $) ----- */
@@ -982,6 +1142,8 @@ const IC = {
   candy: '<svg class="ic candy" viewBox="0 0 24 24" fill="none"><path d="M1.8 7.6 7.6 12l-5.8 4.4c-.5.4-1.2 0-1.2-.6V8.2c0-.6.7-1 1.2-.6z" fill="#fff"/><path d="M22.2 7.6 16.4 12l5.8 4.4c.5.4 1.2 0 1.2-.6V8.2c0-.6-.7-1-1.2-.6z" fill="#fff"/><circle cx="12" cy="12" r="6.4" fill="#fff"/><path d="M8.6 8.6c2.6.5 4.6 2.5 5.2 5.2M10.8 6.9c2.2.6 3.9 2.3 4.5 4.5" stroke="var(--pink)" stroke-width="1.6" stroke-linecap="round"/></svg>',
   rub: '<span aria-hidden="true">₽</span>',
   usd: '<span aria-hidden="true">$</span>',
+  block: '<span>Заблокировать</span>', unblock: '<span>Разблокировать</span>',
+  suggest: '<span>Предложка</span>', receipts: '<span>Отправка чеков</span>',
   caret: '<svg class="caret" viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1 2.6 4 5.6l3-3"/></svg>',
 };
 const DD = {
@@ -990,7 +1152,11 @@ const DD = {
   cur:  {el: '#dd-cur', order: ['candy', 'rub', 'usd'], color: {candy: 'pink', rub: 'green', usd: 'green'},
          label: {candy: 'Конфеты', rub: 'Рубли', usd: 'Доллары'}},
 };
-const sb = {sign: 'plus', cur: 'candy'};
+DD.bact = {el: '#dd-bact', order: ['block', 'unblock'], color: {block: 'red', unblock: 'green'},
+           label: {block: 'Заблокировать', unblock: 'Разблокировать'}};
+DD.bscope = {el: '#dd-bscope', order: ['suggest', 'receipts'], color: {suggest: 'blue', receipts: 'blue'},
+             label: {suggest: 'Предложка', receipts: 'Отправка чеков'}};
+const sb = {sign: 'plus', cur: 'candy', bact: 'block', bscope: 'suggest'};
 
 function renderDd(name) {
   const d = DD[name], cur = sb[name];
@@ -1006,7 +1172,10 @@ function closeDd() {
   });
 }
 function applySbState() {
-  renderDd('sign'); renderDd('cur');
+  renderDd('sign'); renderDd('cur'); renderDd('bact'); renderDd('bscope');
+  const blocking = sb.bact === 'block', bbtn = $('#sb-block-submit');
+  bbtn.textContent = blocking ? 'Заблокировать' : 'Разблокировать';
+  bbtn.className = 'btn ' + (blocking ? 'red' : 'green');
   const give = sb.sign === 'plus';
   const btn = $('#sb-submit');
   btn.textContent = give ? 'Выдать' : 'Изъять';
@@ -1109,6 +1278,32 @@ async function sbSubmit() {
   renderSandbox();
 }
 $('#sb-submit').addEventListener('click', sbSubmit);
+
+async function sbBlock() {
+  const block = sb.bact === 'block', scope = sb.bscope;
+  const target = $('#sb-block-user').value.trim();
+  const sect = scope === 'suggest' ? 'отправку в «Предложку»' : 'отправку чеков';
+  setMsg('#sb-block-msg', '');
+  if (!target) { setMsg('#sb-block-msg', 'Укажите юзернейм или ID', true); return; }
+  const ok = await askConfirm({
+    title: block ? 'Заблокировать пользователя?' : 'Разблокировать пользователя?',
+    text: block ? `Запретить пользователю ${target} ${sect}?` : `Снова разрешить пользователю ${target} ${sect}?`,
+    ok: block ? 'Заблокировать' : 'Разблокировать',
+    danger: block,
+  });
+  if (!ok) return;
+  $('#sb-block-submit').disabled = true;
+  try {
+    const r = await api('POST', '/api/sandbox/block', {target, scope, action: block ? 'block' : 'unblock', confirm: true});
+    const verb = block ? 'заблокирован' : 'разблокирован';
+    setMsg('#sb-block-msg', r.changed
+      ? `Готово: ${r.who} ${verb} (${scope === 'suggest' ? 'Предложка' : 'Отправка чеков'}).`
+      : `${r.who}: ничего не изменилось — ${block ? 'уже был заблокирован' : 'в блокировке не был'}.`);
+    if (r.changed) $('#sb-block-user').value = '';
+  } catch (err) { setMsg('#sb-block-msg', err.message, true); }
+  renderSandbox();
+}
+$('#sb-block-submit').addEventListener('click', sbBlock);
 
 $('#sb-reroll').addEventListener('click', async () => {
   setMsg('#sb-rand-msg', '');

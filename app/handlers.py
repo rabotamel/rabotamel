@@ -1,12 +1,17 @@
+import asyncio
+import html
 import logging
 import time
+from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
-from . import captcha, gallery, greeting, messaging, moderation, repo, shop, shop_buttons, suggest, topup, video_pool
+from . import (
+    captcha, gallery, greeting, messaging, moderation, repo, shop, shop_buttons, suggest, task_review, tasks, topup, video_pool,
+)
 from .metrics import metrics
 from .models import BotProfile
 from .stats import UserStats
@@ -57,6 +62,24 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
     # user_id -> id «верхних» частей длинной карточки товара (в памяти). Карточка длиннее лимита Telegram уходит
     # несколькими сообщениями; кнопки — под последним, а эти части убираются, как только пользователь уходит с карточки.
     product_parts: dict[int, list[int]] = {}
+    # user_id -> id задания, скриншот к которому бот сейчас ждёт (в памяти; сбрасывается «Назад», /start и «Меню»).
+    task_wait: dict[int, int] = {}
+    # user_id -> принятые скриншоты [(file_id, 'photo'|'document')] до нажатия «Отправить на проверку» (в памяти: при
+    # перезапуске бота набор пропадает, пользователь просто пришлёт скрины заново) и отложенное обновление экрана-счётчика
+    # (чтобы альбом из нескольких фото давал один экран, а не по экрану на каждое фото).
+    task_shots: dict[int, list[tuple[str, str]]] = {}
+    task_refresh: dict[int, asyncio.Task] = {}
+    # user_id новичка -> id пригласившего из «/start ref_<id>». Награда уходит пригласившему, когда новичок проходит
+    # капчу (в памяти: если бот перезапустился до капчи, ссылка просто не засчитается).
+    ref_pending: dict[int, int] = {}
+
+    def clear_task_wait(user_id: int) -> None:
+        """Конец приёма скриншотов (назад, /start, «Меню», отправка): ожидание, принятые скрины и отложенный экран."""
+        task_wait.pop(user_id, None)
+        task_shots.pop(user_id, None)
+        pending = task_refresh.pop(user_id, None)
+        if pending is not None and not pending.done():
+            pending.cancel()
 
     async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> None:
         try:
@@ -123,8 +146,10 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             await safe_delete(bot, user_id, old_id)
 
     def main_keyboard():
-        """Кнопки под приветствием: «Магазин» / «Галерея» (рандомизированные) и ниже «Купить конфеты»."""
-        return shop_buttons.build_keyboard(texts.shop_buttons, extra_rows=topup_module.menu_rows())
+        """Кнопки под приветствием: «Магазин» / «Галерея» (рандомизированные) ниже «Бесплатные конфеты» и «Купить конфеты»."""
+        return shop_buttons.build_keyboard(
+            texts.shop_buttons, extra_rows=[tasks.menu_row(texts.tasks_menu), *topup_module.menu_rows()]
+        )
 
     async def drop_product_parts(bot: Bot, user_id: int) -> None:
         for old_id in product_parts.pop(user_id, []):
@@ -154,6 +179,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         suggest_menu.pop(user_id, None)
         menu_kb.pop(user_id, None)
         product_parts.pop(user_id, None)
+        clear_task_wait(user_id)
+        ref_pending.pop(user_id, None)
         topup_module.reset(user_id)
         shown.pop(user_id, None)
         if stats.remove(user_id):
@@ -194,6 +221,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         await drop_suggest(bot, user_id)       # и меню предложки тоже (/start закрывает его)
         await drop_product_parts(bot, user_id)  # и верхние части длинной карточки товара
         topup_module.reset(user_id)            # и раздел «Купить конфеты» закрывается
+        clear_task_wait(user_id)               # и приём скриншотов задания отменяется
         text = greeting.render(texts.greeting, profile.name, balance)
         try:
             # кнопки «Магазин» / «Галерея» крепятся прямо под приветствием (отдельного меню нет);
@@ -257,7 +285,13 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         отправить не удалось — конфеты возвращаются. Успех — без всплывающих уведомлений."""
         user_id = call.from_user.id
         bot_id = stats.bot_id
-        balance = await repo.spend_candies(bot_id, user_id, gallery.PRICE)
+        premium = await has_premium(user_id)
+        note = "" if premium else ", конфеты не списаны"
+        price = 0 if premium else gallery.PRICE   # премиум: видео бесплатно и без защиты от пересылки
+        if premium:
+            balance = await repo.get_candies(bot_id, user_id)
+        else:
+            balance = await repo.spend_candies(bot_id, user_id, price)
         if balance is None:
             await safe_answer(call, "❌ У вас недостаточно средств", alert=True)
             return
@@ -266,7 +300,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             for _ in range(3):  # недействительный file_id пропускаем и берём следующее видео
                 pick = await video_pool.pool.pick(bot_id, user_id)
                 if pick is None:
-                    problem = "Видео пока нет, конфеты не списаны"
+                    problem = "Видео пока нет" + note
                     break
                 sub_id, file_id = pick
                 try:
@@ -274,8 +308,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                     # подпись — строка баланса (как в приветствии и галерее), уже с учётом списания
                     await bot.send_video(
                         user_id, file_id, caption=gallery.balance_line(texts.greeting.template, greeting.format_number(balance)),
-                        parse_mode="HTML", reply_markup=gallery.build_video_keyboard(texts.gallery),
-                        protect_content=True,
+                        parse_mode="HTML", reply_markup=gallery.build_video_keyboard(texts.gallery, premium),
+                        protect_content=not premium,
                     )
                 except TelegramForbiddenError as e:
                     await on_forbidden(e, user_id)
@@ -286,21 +320,21 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                     continue
                 except TelegramAPIError as e:
                     log.warning("Видео %s не отправилось: %s", sub_id, e)
-                    problem = "Не удалось отправить видео, конфеты не списаны"
+                    problem = "Не удалось отправить видео" + note
                     break
                 video_pool.pool.mark_shown(bot_id, user_id, sub_id)
                 metrics.add("videos_sent")
                 sent = True
                 break
             else:
-                problem = "Не удалось отправить видео, конфеты не списаны"
+                problem = "Не удалось отправить видео" + note
         finally:
-            if not sent:
+            if not sent and price > 0:
                 try:
-                    await repo.add_candies(bot_id, user_id, gallery.PRICE)  # возврат
+                    await repo.add_candies(bot_id, user_id, price)  # возврат
                 except Exception:
-                    log.exception("Не удалось вернуть %s🍬 пользователю %s", gallery.PRICE, user_id)
-        await safe_answer(call, None if sent else (problem or "Не удалось отправить видео, конфеты не списаны"),
+                    log.exception("Не удалось вернуть %s🍬 пользователю %s", price, user_id)
+        await safe_answer(call, None if sent else (problem or "Не удалось отправить видео" + note),
                           alert=not sent)
 
     @router.message(CommandStart(), F.chat.type == "private")
@@ -309,8 +343,14 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         if not user:
             return
         await touch_moderator(user)
+        referrer = tasks.parse_start_referrer(getattr(message, "text", None))
+        if referrer and referrer != user.id and not stats.has(user.id):
+            if len(ref_pending) > 5000:
+                ref_pending.clear()
+            ref_pending[user.id] = referrer   # засчитаем, когда пройдёт капчу
         if stats.has(user.id):
             stats.touch(user.id, user.username)
+            stats.touch_activity(user.id)   # last_active_at: в БД не чаще раза в 6 часов (троттлинг в UserStats)
             await ensure_menu_keyboard(bot, user.id)   # прошедшие капчу до обновления получают кнопку «Меню» при первом /start
             # баланс живёт только в БД (его меняют и «Песочница», и в будущем платежи) — один запрос по ключу
             await send_greeting(bot, user.id, await repo.get_candies(stats.bot_id, user.id))
@@ -328,6 +368,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         await touch_moderator(user)
         if stats.has(user.id):
             stats.touch(user.id, user.username)  # актуализируем юзернейм (в памяти)
+            stats.touch_activity(user.id)        # last_active_at (с троттлингом, см. UserStats)
             if getattr(message, "text", None) == MENU_BUTTON:
                 # кнопка «Меню»: как /start — приветствие приходит заново, прежнее меню (галерея, предложка, магазин,
                 # «Купить конфеты») убирается; само сообщение «Меню» стираем, чтобы не копились в чате
@@ -335,6 +376,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                 await send_greeting(bot, user.id, await repo.get_candies(stats.bot_id, user.id))
             elif topup_module.active(user.id):
                 await topup_module.on_message(message, bot)
+            elif user.id in task_wait:
+                await handle_task_screenshot(message, bot)
             elif user.id in suggest_menu:
                 await handle_suggestion(message, bot)
         else:
@@ -370,6 +413,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                 await stats.flush()  # одна транзакция на всех, кто прошёл одновременно
                 await ensure_menu_keyboard(bot, user_id, force=True)  # кнопка «Меню» у клавиатуры — после капчи всегда
                 await send_greeting(bot, user_id, 0)
+                await grant_referral(bot, user_id)   # пришёл по реферальной ссылке — награда пригласившему
             else:
                 await call.answer()
         else:
@@ -377,14 +421,65 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             # те же 4 фрукта и то же задание, но в новом порядке (старое сообщение уже удалено выше)
             await send_captcha(bot, user_id, force=True, deleted_id=msg_id, nonce=nonce)
 
+    async def get_premium_state(user_id: int) -> tuple[object, bool]:
+        """(premium_until, premium_forever); при сбое БД — премиума нет (покупка видео работает как обычно)."""
+        try:
+            return await repo.get_premium(user_id)
+        except Exception:
+            log.exception("Не удалось прочитать премиум пользователя %s", user_id)
+            return None, False
+
+    async def has_premium(user_id: int) -> bool:
+        until, forever = await get_premium_state(user_id)
+        return gallery.premium_active(until, forever)
+
+    async def send_premium_menu(bot: Bot, user_id: int, balance: int | None = None) -> None:
+        """Экран «Премиум подписка»: статус, баланс и три тарифа. Как раздел галереи он запоминается в last_gallery
+        (/start и «Назад» убирают его так же, как меню галереи)."""
+        if balance is None:
+            balance = await repo.get_candies(stats.bot_id, user_id)
+        until, forever = await get_premium_state(user_id)
+        text = gallery.render_premium(texts.gallery, texts.greeting.template, greeting.format_number(balance), until, forever)
+        try:
+            msg = await messaging.send_message(
+                bot, user_id, text, profile.message_image_url, reply_markup=gallery.build_premium_keyboard(texts.gallery)
+            )
+            if len(last_gallery) > 5000:
+                last_gallery.clear()
+            last_gallery[user_id] = msg.message_id
+        except TelegramForbiddenError as e:
+            await on_forbidden(e, user_id)
+        except TelegramAPIError as e:
+            log.warning("Меню премиума пользователю %s не доставлено: %s", user_id, e)
+
+    async def buy_premium(call: CallbackQuery, bot: Bot, key: str) -> None:
+        """Покупка тарифа премиума: списание и выдача — одна транзакция (repo.buy_premium). Меню приходит заново."""
+        user_id = call.from_user.id
+        opt = gallery.PREMIUM_OPTIONS[key]
+        until, forever = await get_premium_state(user_id)
+        if forever:
+            await safe_answer(call, "💎 У вас уже безлимитный премиум", alert=True)
+            return
+        result = await repo.buy_premium(stats.bot_id, user_id, int(opt["price"]), opt["days"])
+        if result is None:
+            await safe_answer(call, "❌ У вас недостаточно средств", alert=True)
+            return
+        balance = result[0]
+        if call.message is not None:
+            await safe_delete(bot, call.message.chat.id, call.message.message_id)
+        last_gallery.pop(user_id, None)
+        await send_premium_menu(bot, user_id, balance)
+        await safe_answer(call, f"❤️‍🔥 Вы успешно приобрели премиум {gallery.PREMIUM_BOUGHT[key]}.", alert=True)
+
     async def send_gallery(bot: Bot, user_id: int) -> None:
         """Сообщение раздела «Галерея»: заголовок = название кнопки этого бота, маркер бота, баланс как в приветствии."""
         balance = await repo.get_candies(stats.bot_id, user_id)
+        premium = await has_premium(user_id)
         text = gallery.render(texts.gallery, texts.deco, texts.shop_buttons.gallery_heading, texts.greeting.template, balance,
                               texts.suggest.name)
         try:
             msg = await messaging.send_message(
-                bot, user_id, text, profile.message_image_url, reply_markup=gallery.build_keyboard(texts.gallery, texts.suggest.label)
+                bot, user_id, text, profile.message_image_url, reply_markup=gallery.build_keyboard(texts.gallery, texts.suggest.label, premium)
             )
             if len(last_gallery) > 5000:
                 last_gallery.clear()
@@ -399,7 +494,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         и в остальном боте: сообщение не редактируется, а присылается новое, прежнее удаляется. Новое отправляется
         первым, поэтому при сбое отправки старый экран остаётся на месте. Возвращает id нового сообщения."""
         await drop_product_parts(bot, user_id)   # уходим с длинной карточки товара — её верхние части убираем
-        msg = call.message
+        msg = getattr(call, "message", None)   # call=None: экран после обычного сообщения (скриншот задания)
         try:
             sent = await messaging.send_message(bot, user_id, text, profile.message_image_url, reply_markup=markup)
         except TelegramForbiddenError as e:
@@ -469,6 +564,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
     @router.callback_query(F.data.startswith(topup_module.keys.p))
     async def on_topup(call: CallbackQuery, bot: Bot) -> None:
         """«🍭 Купить конфеты 🍬»: экраны оплаты и кнопки админов под чеками (app/topup.py)."""
+        stats.touch_activity(call.from_user.id)
         await topup_module.on_callback(call, bot)
 
     @router.callback_query(F.data.startswith((shop_buttons.SHOP_PREFIX, shop_buttons.GALLERY_PREFIX)))
@@ -478,6 +574,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         action = shop_buttons.parse_action(texts.shop_buttons, call.data)
         await call.answer()
         user_id = call.from_user.id
+        stats.touch_activity(user_id)
         if action is None or not stats.has(user_id):
             return
         if action == "gallery":
@@ -497,6 +594,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         parsed = shop.parse_callback(texts.shop_menu, call.data)
         await safe_answer(call)
         user_id = call.from_user.id
+        stats.touch_activity(user_id)
         if parsed is None or not stats.has(user_id):
             return
         action, product_id = parsed
@@ -516,6 +614,224 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             await show_main_menu(call, bot, user_id)
         # TODO: action == "buy" — покупка товара product_id за его цену (repo.spend_candies); пока заглушка, ничего не делает
 
+    # ---------- «Бесплатные конфеты»: подарок, реферальная ссылка, задания из БД (app/tasks.py) ----------
+
+    def seed_of_bot() -> str:
+        return str(getattr(profile, "token", None) or stats.bot_id)
+
+    async def grant_referral(bot: Bot, invited_id: int) -> None:
+        """Новичок прошёл капчу по реферальной ссылке: пригласивший получает награду (один раз за друга)."""
+        referrer = ref_pending.pop(invited_id, None)
+        if referrer is None:
+            return
+        try:
+            balance = await repo.register_referral(stats.bot_id, invited_id, referrer, tasks.REFERRAL_REWARD)
+        except Exception:
+            log.exception("Не удалось засчитать приглашение %s -> %s", referrer, invited_id)
+            return
+        if balance is not None:
+            await reply(bot, referrer, tasks.fill(texts.tasks_menu.text("invited"), reward=tasks.REFERRAL_REWARD))
+
+    async def show_free_menu(call, bot: Bot, user_id: int, balance: int | None = None) -> None:
+        """Меню «Бесплатные конфеты»: подарок, ссылка, видимые задания из БД и «Назад». Заданий нет — только подарок и ссылка."""
+        if balance is None:
+            balance = await repo.get_candies(stats.bot_id, user_id)
+        items = [tasks.task_from_row(r) for r in await repo.list_tasks(limit=tasks.MAX_TASKS)]
+        text = tasks.render_menu(texts.tasks_menu, texts.deco, balance)
+        await show_screen(call, bot, user_id, text, tasks.build_menu_keyboard(texts.tasks_menu, items))
+
+    async def show_task_card(call, bot: Bot, user_id: int, row) -> None:
+        task = tasks.task_from_row(row)
+        completion = await repo.get_completion(stats.bot_id, user_id, task.id)
+        status = completion.status if completion else None
+        await show_screen(
+            call, bot, user_id, tasks.render_task(texts.tasks_menu, task, seed_of_bot(), status),
+            tasks.build_task_keyboard(texts.tasks_menu, task, status),
+        )
+
+    async def claim_daily_gift(call: CallbackQuery, bot: Bot, user_id: int) -> None:
+        cfg = texts.tasks_menu
+        ok, balance, last = await repo.claim_daily(stats.bot_id, user_id, tasks.DAILY_REWARD, tasks.DAILY_COOLDOWN)
+        if ok:
+            await show_free_menu(call, bot, user_id, balance)   # новое меню с обновлённым балансом
+            await safe_answer(call, tasks.fill(cfg.text("daily_ok"), amount=tasks.DAILY_REWARD), alert=True)
+        elif last is not None:
+            left = (last + tasks.DAILY_COOLDOWN - datetime.now(timezone.utc)).total_seconds()
+            await safe_answer(call, tasks.fill(cfg.text("daily_wait"), left=tasks.fmt_left(left)), alert=True)
+        else:
+            await safe_answer(call)
+
+    async def show_ref_screen(call: CallbackQuery, bot: Bot, user_id: int) -> None:
+        link = tasks.ref_link(getattr(profile, "username", None), user_id)
+        if link is None:
+            await safe_answer(call, "Реферальная ссылка пока недоступна", alert=True)
+            return
+        count = await repo.count_referrals(stats.bot_id, user_id)
+        await show_screen(call, bot, user_id, tasks.render_ref(texts.tasks_menu, link, count),
+                          tasks.build_back_keyboard(texts.tasks_menu))
+
+    async def show_collect_screen(call, bot: Bot, user_id: int, row, notice: str | None = None) -> None:
+        """Экран приёма скриншотов: описание, счётчик принятых и кнопки «Отправить на проверку (N)» / «Назад»."""
+        task = tasks.task_from_row(row)
+        count = len(task_shots.get(user_id, ()))
+        await show_screen(
+            call, bot, user_id, tasks.render_send_prompt(texts.tasks_menu, task, count, notice),
+            tasks.build_collect_keyboard(texts.tasks_menu, task, count),
+        )
+
+    def schedule_collect_refresh(bot: Bot, user_id: int, notice: str | None = None) -> None:
+        """Обновляет экран-счётчик через короткую паузу после последнего скриншота: альбом из нескольких фото приходит
+        отдельными сообщениями, а экран нужен один — с итоговым числом."""
+        old = task_refresh.pop(user_id, None)
+        if old is not None and not old.done():
+            old.cancel()
+
+        async def run() -> None:
+            try:
+                await asyncio.sleep(tasks.COLLECT_REFRESH_DELAY)
+                if task_refresh.get(user_id) is asyncio.current_task():
+                    task_refresh.pop(user_id, None)
+                task_id = task_wait.get(user_id)
+                if task_id is None:   # человек уже вышел (назад, /start)
+                    return
+                row = await repo.get_task(task_id)
+                if row is None or not row.require_screenshot:   # задание скрыли/удалили/изменили, пока человек готовил скрины
+                    clear_task_wait(user_id)
+                    await show_free_menu(None, bot, user_id)
+                    return
+                await show_collect_screen(None, bot, user_id, row, notice)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Не удалось обновить экран приёма скриншотов у %s", user_id)
+
+        task_refresh[user_id] = asyncio.create_task(run())
+
+    async def handle_task_screenshot(message: Message, bot: Bot) -> None:
+        """Сообщение пользователя, пока бот ждёт скриншоты задания: фото (или картинка файлом) добавляется к набору
+        (до tasks.MAX_SHOTS), экран-счётчик обновляется. На проверку набор уходит кнопкой «Отправить на проверку»."""
+        user = message.from_user
+        found = tasks.is_image_message(message)
+        if found is None:
+            await reply(bot, user.id, texts.tasks_menu.text("not_photo"))   # ждём дальше
+            return
+        shots = task_shots.setdefault(user.id, [])
+        notice = None
+        if len(shots) >= tasks.MAX_SHOTS:
+            notice = tasks.fill(tasks.SHOTS_LIMIT, max=tasks.MAX_SHOTS)
+        else:
+            shots.append(found)
+        schedule_collect_refresh(bot, user.id, notice)
+
+    async def submit_task_shots(call: CallbackQuery, bot: Bot, user_id: int, task_id: int) -> None:
+        """«Отправить на проверку (N)»: набор скриншотов -> заявка (pending) -> бот для чеков (app/task_review.py)."""
+        cfg = texts.tasks_menu
+        shots = list(task_shots.get(user_id, ()))
+        row = await repo.get_task(task_id)
+        if row is None or not row.require_screenshot:   # задание скрыли/удалили/изменили, пока человек готовил скрины
+            clear_task_wait(user_id)
+            await safe_answer(call)
+            await show_free_menu(call, bot, user_id)
+            return
+        if not shots:
+            await safe_answer(call, tasks.SHOTS_EMPTY, alert=True)
+            return
+        if await repo.is_receipt_blocked(user_id):   # заблокировали, пока человек готовил скрины
+            clear_task_wait(user_id)
+            await safe_answer(call, tasks.TASK_BLOCKED_ALERT, alert=True)
+            await show_free_menu(call, bot, user_id)
+            return
+        clear_task_wait(user_id)   # до обращения к БД: второе нажатие не отправит набор повторно
+        try:
+            cid = await repo.submit_task_screenshot(
+                stats.bot_id, user_id, row.id, int(row.reward), shots, stats_username(call.from_user)
+            )
+        except Exception:
+            log.exception("Не удалось сохранить скриншоты задания от %s", user_id)
+            await safe_answer(call, tasks.SHOTS_NOT_SENT, alert=True)
+            await show_free_menu(call, bot, user_id)
+            return
+        await safe_answer(call)
+        if cid is None:   # уже выполнено или уже на проверке
+            await show_task_card(call, bot, user_id, row)
+            return
+        await reply(bot, user_id, cfg.text("sent"))
+        await show_free_menu(call, bot, user_id)
+        try:
+            await task_review.deliver(cid)   # недоставленное придёт админам по /pending у бота для чеков
+        except Exception:
+            log.exception("Не удалось отправить задание #%s в бот для чеков", cid)
+
+    @router.callback_query(F.data.startswith(tasks.PREFIXES))
+    async def on_tasks_button(call: CallbackQuery, bot: Bot) -> None:
+        """Кнопки «Бесплатные конфеты»: меню, ежедневный подарок, реферальная ссылка, задания. Действие определяется по
+        callback_data ЭТОГО бота (texts.tasks_menu читается в момент нажатия): кнопки старых или чужих сообщений гасят «часики»."""
+        cfg = texts.tasks_menu
+        parsed = tasks.parse_callback(cfg, call.data)
+        user_id = call.from_user.id
+        stats.touch_activity(user_id)
+        if parsed is None or not stats.has(user_id):
+            await safe_answer(call)
+            return
+        action, task_id = parsed
+        if action == "done" and task_id is not None and task_wait.get(user_id) == task_id and task_shots.get(user_id):
+            await submit_task_shots(call, bot, user_id, task_id)   # «Отправить на проверку (N)» на экране приёма скринов
+            return
+        clear_task_wait(user_id)   # любой переход отменяет приём скринов; «Отправить скриншот» включит его заново
+        if action == "daily":
+            await claim_daily_gift(call, bot, user_id)   # сам отвечает на callback
+            return
+        if action == "ref":
+            await safe_answer(call)
+            await show_ref_screen(call, bot, user_id)
+            return
+        if action in ("open", "menu"):
+            await safe_answer(call)
+            await show_free_menu(call, bot, user_id)
+            return
+        if action == "back":
+            await safe_answer(call)
+            await show_main_menu(call, bot, user_id)
+            return
+        # задания: кнопка устаревшего сообщения (задание скрыто/удалено) вместо карточки даёт актуальное меню
+        row = await repo.get_task(task_id) if task_id is not None else None
+        if row is None:
+            await safe_answer(call)
+            await show_free_menu(call, bot, user_id)
+            return
+        if action == "task":
+            await safe_answer(call)
+            await show_task_card(call, bot, user_id, row)
+            return
+        completion = await repo.get_completion(stats.bot_id, user_id, row.id)
+        if completion is not None and completion.status in ("approved", "pending"):
+            await safe_answer(call)
+            await show_task_card(call, bot, user_id, row)   # уже выполнено или на проверке — карточка с актуальным статусом
+            return
+        if row.require_screenshot:   # «send» (и «done» по кнопке старого сообщения, если скриншот теперь нужен)
+            if await repo.is_receipt_blocked(user_id):
+                await safe_answer(call, tasks.TASK_BLOCKED_ALERT, alert=True)
+                return
+            await safe_answer(call)
+            task_wait[user_id] = row.id
+            await show_collect_screen(call, bot, user_id, row)
+            return
+        balance = await repo.complete_task_instant(stats.bot_id, user_id, row.id, int(row.reward), stats_username(call.from_user))
+        if balance is None:
+            await safe_answer(call)
+            await show_task_card(call, bot, user_id, row)
+            return
+        await show_free_menu(call, bot, user_id, balance)
+        await safe_answer(call, tasks.fill(cfg.text("done_ok"), reward=int(row.reward)), alert=True)
+
+    async def notify_task_decision(user_id: int, key: str, task_name: str, reward: int) -> None:
+        """Решение админа из бота для чеков (app/task_review.py): пользователю пишет ЭТОТ бот-магазин, текст — его вариант."""
+        name = html.escape(task_name, quote=False)
+        await reply(bot, user_id, tasks.fill(texts.tasks_menu.text(key), task=name, reward=reward))
+
+    if bot is not None:
+        task_review.register(stats.bot_id, bot, notify_task_decision)   # скачать скрины и уведомить о решении
+
     @router.callback_query(
         F.data.startswith((
             gallery.BUY_PREFIX, gallery.PREMIUM_PREFIX, gallery.BACK_PREFIX,
@@ -525,11 +841,19 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
     async def on_gallery_button(call: CallbackQuery, bot: Bot) -> None:
         action = gallery.parse_action(texts.gallery, call.data)
         user_id = call.from_user.id
+        stats.touch_activity(user_id)
         if action is None or not stats.has(user_id):
             await safe_answer(call)
             return
         if action == "buy":
             await buy_video(call, bot)  # сам отвечает на callback (алерт при нехватке конфет)
+            return
+        if action == "premium_buy":
+            key = gallery.parse_premium_key(texts.gallery, call.data)
+            if key in gallery.PREMIUM_OPTIONS:
+                await buy_premium(call, bot, key)  # сам отвечает на callback
+            else:
+                await safe_answer(call)
             return
         await safe_answer(call)
         if action == "back":
@@ -557,7 +881,17 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             suggest_menu.pop(user_id, None)
             await drop_last_gallery(bot, user_id)
             await send_gallery(bot, user_id)
-        # TODO: "premium" — премиум-подписка
+        elif action == "premium":
+            # меню галереи заменяется меню премиума
+            if call.message is not None:
+                await safe_delete(bot, call.message.chat.id, call.message.message_id)
+            last_gallery.pop(user_id, None)
+            await send_premium_menu(bot, user_id)
+        elif action == "premium_back":
+            if call.message is not None:
+                await safe_delete(bot, call.message.chat.id, call.message.message_id)
+            last_gallery.pop(user_id, None)
+            await send_gallery(bot, user_id)
 
     @router.my_chat_member(F.chat.type == "private", F.new_chat_member.status == "kicked")
     async def on_blocked_by_user(event) -> None:

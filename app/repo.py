@@ -2,14 +2,25 @@
 import json
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import bindparam, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from . import db
+from .cleanup_sql import build_delete_inactive_sql
 from .models import (
+    TASK_APPROVED,
+    TASK_PENDING,
+    TASK_REJECTED,
+    BonusTask,
+    Referral,
+    TaskCompletion,
+    TaskCompletionFile,
+    TaskReviewMessage,
+    UserPremium,
+    ReceiptBlockedUser,
     STATUS_ACTIVE,
     STATUS_BLOCKED,
     STATUS_QUEUED,
@@ -305,6 +316,81 @@ async def spend_candies(bot_id: int, user_id: int, amount: int) -> int | None:
         return res.scalar_one_or_none()
 
 
+async def load_last_active(bot_id: int) -> dict[int, float]:
+    """user_id -> unix-время (сек) последней записанной в БД активности. Один запрос при запуске бота: по нему
+    заполняется кэш троттлинга (UserStats), чтобы после каждого перезапуска процесса не писать активность заново
+    всем подряд."""
+    async with db.SessionLocal() as s:
+        res = await s.execute(select(BotUser.user_id, BotUser.last_active_at).where(BotUser.bot_id == bot_id))
+        return {uid: ts.timestamp() for uid, ts in res.all() if ts is not None}
+
+
+async def touch_users_active(bot_id: int, user_ids: list[int]) -> None:
+    """Пачкой отмечает активность: last_active_at = now() одним UPDATE на каждые 5000 пользователей."""
+    async with db.SessionLocal() as s, s.begin():
+        for i in range(0, len(user_ids), 5000):
+            chunk = user_ids[i : i + 5000]
+            await s.execute(
+                update(BotUser)
+                .where(BotUser.bot_id == bot_id, BotUser.user_id.in_(chunk))
+                .values(last_active_at=func.now())
+            )
+
+
+_DELETE_INACTIVE_SQL = build_delete_inactive_sql(
+    (TOPUP_CREATING, TOPUP_ACTIVE, TOPUP_REVIEW, TOPUP_PAID), SUB_PENDING
+)
+
+
+async def delete_inactive_users(cutoff: datetime, batch: int) -> list[tuple[int, int]]:
+    """Удаляет одну пачку неактивных пользователей (см. cleanup_sql) и возвращает [(bot_id, user_id), ...]."""
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(text(_DELETE_INACTIVE_SQL), {"cutoff": cutoff, "now": _now(), "batch": batch})
+        return [(row[0], row[1]) for row in res.all()]
+
+
+# ---------- премиум ----------
+
+async def get_premium(user_id: int) -> tuple[datetime | None, bool]:
+    """(premium_until, premium_forever); (None, False) — подписки нет."""
+    async with db.SessionLocal() as s:
+        row = (await s.execute(select(UserPremium).where(UserPremium.user_id == user_id))).scalar_one_or_none()
+        return (row.premium_until, bool(row.premium_forever)) if row is not None else (None, False)
+
+
+async def buy_premium(bot_id: int, user_id: int, price: int, days: int | None) -> tuple[int, datetime | None, bool] | None:
+    """Покупка премиума одной транзакцией: списание `price` 🍬 (только если хватает) и выдача подписки. days=None — навсегда.
+    Действующая подписка продлевается (дни прибавляются к дате окончания), «навсегда» не понижается. Возвращает
+    (новый баланс, до какого, навсегда ли); None — не хватает конфет (или пользователя нет в базе)."""
+    async with db.SessionLocal() as s, s.begin():
+        paid = await s.execute(
+            update(BotUser)
+            .where(BotUser.bot_id == bot_id, BotUser.user_id == user_id, BotUser.candies >= price)
+            .values(candies=BotUser.candies - price)
+            .returning(BotUser.candies)
+        )
+        balance = paid.scalar_one_or_none()
+        if balance is None:
+            return None
+        row = (await s.execute(
+            select(UserPremium).where(UserPremium.user_id == user_id).with_for_update()
+        )).scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        if row is None:
+            row = UserPremium(user_id=user_id, premium_until=None, premium_forever=False)
+            s.add(row)
+        if days is None:
+            row.premium_until, row.premium_forever = None, True
+        elif not row.premium_forever:
+            until = row.premium_until
+            if until is not None and until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            base = until if until is not None and until > now else now
+            row.premium_until = base + timedelta(days=days)
+        await s.flush()
+        return int(balance), row.premium_until, bool(row.premium_forever)
+
+
 # ---------- модераторы предложки ----------
 
 async def list_moderators() -> list[Moderator]:
@@ -416,6 +502,33 @@ async def is_author_blocked(user_id: int) -> bool:
         return (await s.execute(select(BlockedAuthor.user_id).where(BlockedAuthor.user_id == user_id))).first() is not None
 
 
+async def _set_block(model, user_id: int, blocked: bool, by: int | None) -> bool:
+    """Добавляет/убирает user_id в таблице блокировок. True — список изменился (не было -> есть или наоборот)."""
+    async with db.SessionLocal() as s, s.begin():
+        if blocked:
+            res = await s.execute(
+                pg_insert(model).values(user_id=user_id, blocked_by=by).on_conflict_do_nothing().returning(model.user_id)
+            )
+            return res.first() is not None
+        res = await s.execute(delete(model).where(model.user_id == user_id))
+        return res.rowcount > 0
+
+
+async def set_author_block(user_id: int, blocked: bool, by: int | None = None) -> bool:
+    """Блокировка/разблокировка отправки в «Предложку» (вручную, из «Песочницы»)."""
+    return await _set_block(BlockedAuthor, user_id, blocked, by)
+
+
+async def is_receipt_blocked(user_id: int) -> bool:
+    async with db.SessionLocal() as s:
+        return (await s.execute(select(ReceiptBlockedUser.user_id).where(ReceiptBlockedUser.user_id == user_id))).first() is not None
+
+
+async def set_receipt_block(user_id: int, blocked: bool, by: int | None = None) -> bool:
+    """Блокировка/разблокировка отправки чеков об оплате картой."""
+    return await _set_block(ReceiptBlockedUser, user_id, blocked, by)
+
+
 async def create_submission(
     bot_id: int, user_id: int, username: str | None, file_id: str, file_unique_id: str, duration: int
 ) -> Submission:
@@ -506,7 +619,7 @@ async def decide_submission(
             paid = await s.execute(
                 update(BotUser)
                 .where(BotUser.bot_id == bot_id, BotUser.user_id == sub.user_id)
-                .values(candies=BotUser.candies + reward)
+                .values(candies=BotUser.candies + reward, last_active_at=func.now())
                 .returning(BotUser.candies)
             )
             rewarded = paid.scalar_one_or_none() is not None
@@ -664,6 +777,312 @@ async def replace_shop_products(items) -> int:
         s.add_all([make(pos, it) for pos, it in enumerate(items, start=1) if it.id is None])
         await s.flush()
     return len(items)
+
+
+# ---------- «Бесплатные конфеты»: ежедневный подарок, рефералы, задания ----------
+
+async def claim_daily(bot_id: int, user_id: int, amount: int, cooldown: timedelta) -> tuple[bool, int | None, datetime | None]:
+    """Ежедневный подарок: ОДИН условный UPDATE (подарок не брали или с прошлого прошло >= cooldown), поэтому два быстрых
+    нажатия подряд не выдадут его дважды. (True, новый баланс, None) — выдан; (False, None, когда брали прошлый) — рано;
+    (False, None, None) — пользователя нет в базе."""
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(
+            update(BotUser)
+            .where(
+                BotUser.bot_id == bot_id, BotUser.user_id == user_id,
+                or_(BotUser.daily_at.is_(None), BotUser.daily_at <= func.now() - cooldown),
+            )
+            .values(candies=BotUser.candies + amount, daily_at=func.now(), last_active_at=func.now())
+            .returning(BotUser.candies)
+        )
+        balance = res.scalar_one_or_none()
+        if balance is not None:
+            return True, balance, None
+        last = (await s.execute(
+            select(BotUser.daily_at).where(BotUser.bot_id == bot_id, BotUser.user_id == user_id)
+        )).scalar_one_or_none()
+        return False, None, last
+
+
+async def register_referral(bot_id: int, invited_id: int, referrer_id: int, reward: int) -> int | None:
+    """Новый пользователь (прошёл капчу) пришёл по ссылке `referrer_id`: запись о друге и награда пригласившему — одной
+    транзакцией. Новый баланс пригласившего или None (сам себя, пригласившего нет в базе бота, друг уже учтён)."""
+    if invited_id == referrer_id:
+        return None
+    async with db.SessionLocal() as s, s.begin():
+        exists = (await s.execute(
+            select(BotUser.user_id).where(BotUser.bot_id == bot_id, BotUser.user_id == referrer_id)
+        )).scalar_one_or_none()
+        if exists is None:
+            return None
+        ins = await s.execute(
+            pg_insert(Referral).values(bot_id=bot_id, invited_id=invited_id, referrer_id=referrer_id)
+            .on_conflict_do_nothing(index_elements=["bot_id", "invited_id"]).returning(Referral.invited_id)
+        )
+        if ins.scalar_one_or_none() is None:
+            return None
+        res = await s.execute(
+            update(BotUser).where(BotUser.bot_id == bot_id, BotUser.user_id == referrer_id)
+            .values(candies=BotUser.candies + reward, last_active_at=func.now()).returning(BotUser.candies)
+        )
+        return res.scalar_one_or_none()
+
+
+async def count_referrals(bot_id: int, user_id: int) -> int:
+    async with db.SessionLocal() as s:
+        return (await s.execute(
+            select(func.count()).select_from(Referral).where(Referral.bot_id == bot_id, Referral.referrer_id == user_id)
+        )).scalar_one()
+
+
+async def list_tasks(only_visible: bool = True, limit: int | None = None) -> list[BonusTask]:
+    """Задания в порядке показа. only_visible=True — только показываемые (меню в боте); False — все (панель)."""
+    q = select(BonusTask).order_by(BonusTask.position, BonusTask.id)
+    if only_visible:
+        q = q.where(BonusTask.is_visible.is_(True))
+    if limit:
+        q = q.limit(limit)
+    async with db.SessionLocal() as s:
+        return list((await s.execute(q)).scalars())
+
+
+async def get_task(task_id: int, only_visible: bool = True) -> BonusTask | None:
+    q = select(BonusTask).where(BonusTask.id == task_id)
+    if only_visible:
+        q = q.where(BonusTask.is_visible.is_(True))
+    async with db.SessionLocal() as s:
+        return (await s.execute(q)).scalar_one_or_none()
+
+
+async def add_task(button_text: str, about: str, reward: int, require_screenshot: bool, visible: bool = True) -> BonusTask:
+    """Новое задание — в конец списка."""
+    async with db.SessionLocal() as s, s.begin():
+        last = (await s.execute(select(func.max(BonusTask.position)))).scalar_one_or_none() or 0
+        row = BonusTask(
+            button_text=button_text, about=about, reward=reward, require_screenshot=require_screenshot,
+            position=last + 1, is_visible=visible,
+        )
+        s.add(row)
+        await s.flush()
+        return row
+
+
+async def update_task(task_id: int, **values) -> BonusTask | None:
+    allowed = {k: v for k, v in values.items() if k in {"button_text", "about", "reward", "require_screenshot", "is_visible"}}
+    async with db.SessionLocal() as s, s.begin():
+        row = (await s.execute(select(BonusTask).where(BonusTask.id == task_id).with_for_update())).scalar_one_or_none()
+        if row is None:
+            return None
+        for key, val in allowed.items():
+            setattr(row, key, val)
+        return row
+
+
+async def delete_task(task_id: int) -> bool:
+    """Удаляет задание вместе с отметками о выполнении (каскадом)."""
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(delete(BonusTask).where(BonusTask.id == task_id))
+        return res.rowcount > 0
+
+
+async def reorder_tasks(ids: list[int]) -> None:
+    async with db.SessionLocal() as s, s.begin():
+        rows = list((await s.execute(
+            select(BonusTask).order_by(BonusTask.position, BonusTask.id).with_for_update()
+        )).scalars())
+        by_id = {r.id: r for r in rows}
+        ordered = [by_id[i] for i in dict.fromkeys(ids) if i in by_id]
+        seen = {r.id for r in ordered}
+        for pos, r in enumerate(ordered + [r for r in rows if r.id not in seen], start=1):
+            r.position = pos
+
+
+async def get_completion(bot_id: int, user_id: int, task_id: int) -> TaskCompletion | None:
+    async with db.SessionLocal() as s:
+        return (await s.execute(
+            select(TaskCompletion).where(
+                TaskCompletion.bot_id == bot_id, TaskCompletion.user_id == user_id, TaskCompletion.task_id == task_id
+            )
+        )).scalar_one_or_none()
+
+
+async def _upsert_completion(s, bot_id: int, user_id: int, task_id: int, **values) -> int | None:
+    """Создаёт запись о выполнении или обновляет ОТКЛОНЁННУЮ (повторная попытка). pending/approved не трогает — тогда None."""
+    stmt = pg_insert(TaskCompletion).values(bot_id=bot_id, user_id=user_id, task_id=task_id, **values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["bot_id", "user_id", "task_id"],
+        set_={**values, "created_at": func.now(), "decided_at": None},
+        where=TaskCompletion.status == TASK_REJECTED,
+    ).returning(TaskCompletion.id)
+    return (await s.execute(stmt)).scalar_one_or_none()
+
+
+class _NoUser(Exception):
+    """Пользователя нет в базе: транзакцию откатываем целиком (отметка о задании не должна остаться без награды)."""
+
+
+async def complete_task_instant(bot_id: int, user_id: int, task_id: int, reward: int, username: str | None = None) -> int | None:
+    """Задание без скриншота: отметка и награда одной транзакцией. Новый баланс; None — уже выполнено/на проверке
+    или пользователя нет в базе (тогда отметка откатывается и конфеты не теряются)."""
+    try:
+        async with db.SessionLocal() as s, s.begin():
+            cid = await _upsert_completion(
+                s, bot_id, user_id, task_id, status=TASK_APPROVED, reward=reward, username=username,
+                file_id=None, file_kind=None,
+            )
+            if cid is None:
+                return None
+            res = await s.execute(
+                update(BotUser).where(BotUser.bot_id == bot_id, BotUser.user_id == user_id)
+                .values(candies=BotUser.candies + reward, last_active_at=func.now()).returning(BotUser.candies)
+            )
+            balance = res.scalar_one_or_none()
+            if balance is None:
+                raise _NoUser
+            await s.execute(update(TaskCompletion).where(TaskCompletion.id == cid).values(decided_at=func.now()))
+            return balance
+    except _NoUser:
+        return None
+
+
+async def submit_task_screenshot(
+    bot_id: int, user_id: int, task_id: int, reward: int, files: list[tuple[str, str]], username: str | None = None
+) -> int | None:
+    """Скриншоты на проверку: `files` — [(file_id, 'photo'|'document')], от 1 штуки. id заявки; None — задание уже
+    выполнено или уже на проверке. Заявка и набор файлов пишутся одной транзакцией (при повторной отправке после
+    отказа старые файлы заменяются)."""
+    if not files:
+        return None
+    async with db.SessionLocal() as s, s.begin():
+        cid = await _upsert_completion(
+            s, bot_id, user_id, task_id, status=TASK_PENDING, reward=reward, username=username,
+            file_id=files[0][0], file_kind=files[0][1],
+        )
+        if cid is None:
+            return None
+        await s.execute(delete(TaskCompletionFile).where(TaskCompletionFile.completion_id == cid))
+        s.add_all(
+            TaskCompletionFile(completion_id=cid, position=i, file_id=fid, file_kind=kind)
+            for i, (fid, kind) in enumerate(files)
+        )
+        return cid
+
+
+async def get_task_files(completion_id: int) -> list[tuple[str, str]]:
+    """[(file_id, kind)] скриншотов заявки по порядку. У записей, созданных до появления нескольких скринов, —
+    единственный файл из самой заявки."""
+    async with db.SessionLocal() as s:
+        rows = (await s.execute(
+            select(TaskCompletionFile.file_id, TaskCompletionFile.file_kind)
+            .where(TaskCompletionFile.completion_id == completion_id).order_by(TaskCompletionFile.position)
+        )).all()
+        if rows:
+            return [(f, k) for f, k in rows]
+        legacy = (await s.execute(
+            select(TaskCompletion.file_id, TaskCompletion.file_kind).where(TaskCompletion.id == completion_id)
+        )).first()
+        return [(legacy[0], legacy[1] or "photo")] if legacy and legacy[0] else []
+
+
+@dataclass
+class TaskReview:
+    id: int
+    bot_id: int
+    user_id: int
+    username: str | None
+    task_id: int
+    task_name: str
+    reward: int
+    status: str
+    file_id: str | None
+    file_kind: str | None
+    moderator_id: int | None
+    moderator_username: str | None
+    moderator_name: str | None
+    balance: int | None = None   # баланс пользователя после начисления (только в ответе decide_task)
+
+
+def _review(c: TaskCompletion, name: str) -> TaskReview:
+    return TaskReview(
+        id=c.id, bot_id=c.bot_id, user_id=c.user_id, username=c.username, task_id=c.task_id, task_name=name,
+        reward=c.reward, status=c.status, file_id=c.file_id, file_kind=c.file_kind, moderator_id=c.moderator_id,
+        moderator_username=c.moderator_username, moderator_name=c.moderator_name,
+    )
+
+
+async def get_task_reviews(ids: list[int]) -> list[TaskReview]:
+    if not ids:
+        return []
+    async with db.SessionLocal() as s:
+        rows = (await s.execute(
+            select(TaskCompletion, BonusTask.button_text)
+            .join(BonusTask, BonusTask.id == TaskCompletion.task_id).where(TaskCompletion.id.in_(ids))
+        )).all()
+        return [_review(c, name) for c, name in rows]
+
+
+async def decide_task(
+    completion_id: int, bot_id: int | None, approve: bool, moderator_id: int, moderator_username: str | None,
+    moderator_name: str | None,
+) -> TaskReview | None:
+    """Решение админа: один UPDATE ... WHERE status = 'pending' (выигрывает один) и начисление награды той же
+    транзакцией. None — уже решено или заявки нет. `bot_id=None` — любой бот (бот для чеков общий для всех магазинов:
+    баланс начисляется у бота, чья это заявка); число — только заявка этого бота."""
+    async with db.SessionLocal() as s, s.begin():
+        conds = [TaskCompletion.id == completion_id, TaskCompletion.status == TASK_PENDING]
+        if bot_id is not None:
+            conds.append(TaskCompletion.bot_id == bot_id)
+        res = await s.execute(
+            update(TaskCompletion)
+            .where(*conds)
+            .values(
+                status=TASK_APPROVED if approve else TASK_REJECTED, decided_at=func.now(), moderator_id=moderator_id,
+                moderator_username=moderator_username, moderator_name=moderator_name,
+            )
+            .returning(TaskCompletion)
+        )
+        c = res.scalar_one_or_none()
+        if c is None:
+            return None
+        name = (await s.execute(select(BonusTask.button_text).where(BonusTask.id == c.task_id))).scalar_one_or_none() or ""
+        review = _review(c, name)
+        if approve:
+            r = await s.execute(
+                update(BotUser).where(BotUser.bot_id == c.bot_id, BotUser.user_id == c.user_id)
+                .values(candies=BotUser.candies + c.reward, last_active_at=func.now()).returning(BotUser.candies)
+            )
+            review.balance = r.scalar_one_or_none()
+        return review
+
+
+async def list_pending_task_reviews(limit: int = 50) -> list[TaskReview]:
+    """Заявки на проверке (старые первыми) по всем ботам — для /pending в боте для чеков."""
+    async with db.SessionLocal() as s:
+        rows = (await s.execute(
+            select(TaskCompletion, BonusTask.button_text)
+            .join(BonusTask, BonusTask.id == TaskCompletion.task_id)
+            .where(TaskCompletion.status == TASK_PENDING).order_by(TaskCompletion.id).limit(limit)
+        )).all()
+        return [_review(c, name) for c, name in rows]
+
+
+async def save_task_review_message(completion_id: int, chat_id: int, message_id: int) -> None:
+    async with db.SessionLocal() as s, s.begin():
+        await s.execute(
+            pg_insert(TaskReviewMessage).values(completion_id=completion_id, chat_id=chat_id, message_id=message_id)
+            .on_conflict_do_update(
+                index_elements=["completion_id", "chat_id"], set_={"message_id": message_id}
+            )
+        )
+
+
+async def task_review_messages(completion_id: int) -> list[tuple[int, int]]:
+    async with db.SessionLocal() as s:
+        rows = (await s.execute(
+            select(TaskReviewMessage.chat_id, TaskReviewMessage.message_id)
+            .where(TaskReviewMessage.completion_id == completion_id)
+        )).all()
+        return [(c, m) for c, m in rows]
 
 
 # ---------- рандомизируемые сообщения и аватарки ----------
@@ -914,7 +1333,8 @@ async def credit_topup_order(order_id: int) -> TopupOrder | None:
                 return None
             added = await s.execute(
                 update(BotUser).where(BotUser.bot_id == row.bot_id, BotUser.user_id == row.user_id)
-                .values(candies=BotUser.candies + row.candies).returning(BotUser.candies)
+                .values(candies=BotUser.candies + row.candies, last_active_at=func.now())
+                .returning(BotUser.candies)
             )
             if added.scalar_one_or_none() is None:
                 raise _NoUser  # откат: заказ остаётся оплаченным

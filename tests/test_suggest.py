@@ -6,6 +6,7 @@ import os
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -13,7 +14,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import test_handlers as th  # noqa: E402  (ставит заглушки aiogram и даёт импорт app.handlers)
 from test_gallery import _FakeAiogramTypes  # noqa: E402
 
-from app import deco, gallery, greeting, messaging, moderation, shop_buttons, suggest, suggest_ui, video_pool  # noqa: E402
+from app import deco, gallery, greeting, messaging, moderation, shop_buttons, suggest, suggest_ui, tasks, video_pool  # noqa: E402
 
 handlers = th.handlers
 repo = handlers.repo
@@ -218,6 +219,7 @@ class GalleryButtonsTests(unittest.TestCase):
         self.assertEqual([[b.text for b in r] for r in kb.inline_keyboard], [[c.buy_label], ["⬅️ Назад"]])
         self.assertEqual([[b.callback_data for b in r] for r in sk.inline_keyboard], [[c.suggest_back_cb]])
         self.assertEqual(sk.inline_keyboard[0][0].text, "⬅️ Назад")
+        self.assertEqual(sk.inline_keyboard[0][0].style, "danger")   # «Назад» в меню предложки — красная
 
 
 class ModerationFormatTests(unittest.TestCase):
@@ -333,7 +335,7 @@ class FakeDB:
     NAMES = (
         "list_moderators", "is_author_blocked", "create_submission", "get_submissions", "save_submission_message",
         "submission_messages", "decide_submission", "spend_candies", "add_candies", "get_candies",
-        "load_approved_pool", "bind_moderator",
+        "load_approved_pool", "bind_moderator", "get_premium", "buy_premium",
     )
 
     def __init__(self):
@@ -342,6 +344,7 @@ class FakeDB:
         self.pool = []
         self.mods = [NS(user_id=100, username="mod_a"), NS(user_id=200, username=None)]
         self.rewards = 0
+        self.premium = {}   # user_id -> (until, forever)
 
     def sub(self, sub_id):
         return NS(**self.subs[sub_id])
@@ -410,6 +413,22 @@ class FakeDB:
 
         async def load_approved_pool(bot_id):
             return list(db.pool)
+
+        async def get_premium(uid):
+            return db.premium.get(uid, (None, False))
+
+        async def buy_premium(bot_id, uid, price, days):
+            if db.candies.get((bot_id, uid), 0) < price:
+                return None
+            db.candies[(bot_id, uid)] -= price
+            until, forever = db.premium.get(uid, (None, False))
+            if days is None:
+                until, forever = None, True
+            elif not forever:
+                base = until if until is not None and until > datetime.now(timezone.utc) else datetime.now(timezone.utc)
+                until = base + timedelta(days=days)
+            db.premium[uid] = (until, forever)
+            return db.candies[(bot_id, uid)], until, forever
 
         async def bind_moderator(uid, username):
             for m in db.mods:
@@ -480,7 +499,7 @@ class Flow(unittest.TestCase):
         self.texts = NS(
             greeting=greeting.generate_config("t"), shop_buttons=shop_buttons.generate_config("t"),
             deco=deco.generate_config("t"), gallery=gallery.generate_config("t"),
-            suggest=suggest_ui.generate_config("t"), version=1)
+            suggest=suggest_ui.generate_config("t"), tasks_menu=tasks.generate_config("t"), version=1)
         self.stats = _RemovableStats({5, 6, 777})
         self.router = handlers.build_router(self.stats, self.texts, profile)
         self.h = self.router.handlers if hasattr(self.router, "handlers") else {
@@ -776,6 +795,102 @@ class Flow(unittest.TestCase):
             self.assertEqual([r[0].callback_data for r in kb], [self.texts.gallery.buy_cb, self.texts.gallery.back_cb])
 
         self.arun(go())
+
+    # --- премиум
+    def test_premium_menu_opens_from_gallery_and_back_returns(self):
+        g = self.texts.gallery
+
+        async def go():
+            await self.h["on_gallery_button"](self.call(g.premium_cb, msg_id=10), self.bot)
+            self.assertEqual(self.bot.deleted, [10])
+            mid, _chat, text, markup = self.sent[-1]
+            self.assertTrue(text.startswith(f"<b>{g.premium_label}</b>"))
+            self.assertIn("🤷🏻‍♀️ У вас нет премиума", text)
+            self.assertIn("бесплатно", text)
+            self.assertEqual([r[0].text for r in markup.inline_keyboard],
+                             ["💕 3 дня (650🍬) 👑", "🔥 Неделя (1250🍬) 👑", "💎 Безлимит (1750🍬) 👑", "⬅️ Назад"])
+            self.assertEqual([r[0].callback_data for r in markup.inline_keyboard],
+                             [f"{g.premium_cb}:3", f"{g.premium_cb}:7", f"{g.premium_cb}:forever", f"{g.premium_cb}:b"])
+            self.assertEqual([r[0].style for r in markup.inline_keyboard], ["success"] * 3 + ["danger"])
+            await self.h["on_gallery_button"](self.call(f"{g.premium_cb}:b", msg_id=mid), self.bot)
+            self.assertEqual(self.bot.deleted, [10, mid])
+            self.assertIn(f"<b>{self.texts.shop_buttons.gallery_heading}</b>", self.sent[-1][2])   # снова меню галереи
+        self.arun(go())
+
+    def test_premium_purchase_needs_money_then_charges_and_extends(self):
+        g = self.texts.gallery
+
+        async def go():
+            self.db.candies[(1, 5)] = 600
+            c = self.call(f"{g.premium_cb}:3")
+            await self.h["on_gallery_button"](c, self.bot)
+            self.assertEqual((c.answers, self.db.premium), ([("❌ У вас недостаточно средств", True)], {}))
+            self.db.candies[(1, 5)] = 2000
+            c = self.call(f"{g.premium_cb}:3", msg_id=10)
+            await self.h["on_gallery_button"](c, self.bot)
+            self.assertEqual(self.db.candies[(1, 5)], 1350)
+            self.assertEqual(c.answers, [("❤️‍🔥 Вы успешно приобрели премиум на 3 дня.", True)])
+            until, forever = self.db.premium[5]
+            self.assertFalse(forever)
+            self.assertAlmostEqual((until - datetime.now(timezone.utc)).total_seconds(), 3 * 86400, delta=60)
+            self.assertIn("истечёт через 2д 23ч", self.sent[-1][2])              # экран обновлён: статус и новый баланс
+            self.assertIn("1350🍬", self.sent[-1][2])
+            await self.h["on_gallery_button"](self.call(f"{g.premium_cb}:7"), self.bot)   # продление: дни складываются
+            self.assertAlmostEqual((self.db.premium[5][0] - datetime.now(timezone.utc)).total_seconds(), 10 * 86400, delta=60)
+            self.db.candies[(1, 5)] = 5000
+            c = self.call(f"{g.premium_cb}:forever")
+            await self.h["on_gallery_button"](c, self.bot)
+            self.assertEqual(self.db.premium[5], (None, True))
+            self.assertIn("💎 Ваш премиум безлимитный", self.sent[-1][2])
+            before = self.db.candies[(1, 5)]
+            c = self.call(f"{g.premium_cb}:3")
+            await self.h["on_gallery_button"](c, self.bot)                       # безлимит уже есть — ничего не списывается
+            self.assertEqual((self.db.candies[(1, 5)], c.answers[0][1]), (before, True))
+        self.arun(go())
+
+    def test_foreign_or_bad_premium_callbacks_are_ignored(self):
+        g = self.texts.gallery
+        self.assertIsNone(gallery.parse_premium_key(g, f"{g.premium_cb}:999"))
+        self.assertIsNone(gallery.parse_premium_key(g, "gp:other:3"))
+        self.assertEqual(gallery.parse_action(g, f"{g.premium_cb}:forever"), "premium_buy")
+        self.assertEqual(gallery.parse_action(g, f"{g.premium_cb}:b"), "premium_back")
+        self.assertEqual(gallery.parse_action(g, g.premium_cb), "premium")
+
+        async def go():
+            self.db.candies[(1, 5)] = 5000
+            await self.h["on_gallery_button"](self.call(f"{g.premium_cb}:zzz"), self.bot)
+            self.assertEqual(self.db.premium, {})
+        self.arun(go())
+
+    def test_premium_user_gets_free_unprotected_video(self):
+        g = self.texts.gallery
+
+        async def go():
+            self.db.pool = [(1, "V1")]
+            self.db.premium[5] = (None, True)
+            c = self.call(g.buy_cb)
+            await self.h["on_gallery_button"](c, self.bot)
+            self.assertEqual(self.db.candies[(1, 5)], 10)                       # ничего не списано
+            (v,) = self.bot.videos
+            self.assertIs(v["protect_content"], False)                           # можно пересылать и сохранять
+            self.assertIn("(0🍬)", v["reply_markup"].inline_keyboard[0][0].text)
+            self.assertEqual(v["caption"], gallery.balance_line(self.texts.greeting.template, "10"))
+            # даже при нуле на балансе
+            self.db.candies[(1, 5)] = 0
+            self.db.pool = [(1, "V1")]
+            await self.h["on_gallery_button"](self.call(g.buy_cb), self.bot)
+            self.assertEqual(len(self.bot.videos), 2)
+            # меню галереи показывает цену 0🍬 только премиуму
+            await self.h["on_gallery_button"](self.call(g.premium_cb), self.bot)
+            await self.h["on_gallery_button"](self.call(f"{g.premium_cb}:b"), self.bot)
+            self.assertIn("(0🍬)", self.sent[-1][3].inline_keyboard[0][0].text)
+        self.arun(go())
+
+    def test_expired_premium_is_not_premium(self):
+        self.assertFalse(gallery.premium_active(datetime.now(timezone.utc) - timedelta(seconds=1), False))
+        self.assertTrue(gallery.premium_active(datetime.now(timezone.utc) + timedelta(minutes=1), False))
+        self.assertFalse(gallery.premium_active(None, False))
+        self.assertEqual(gallery.format_left(timedelta(days=2, hours=3, minutes=4)), "2д 3ч 4м")
 
     def test_purchased_videos_are_not_deleted_and_back_opens_new_gallery(self):
         async def go():

@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Awaitable, Callable
 
-from . import messaging, moderation, repo
+from . import messaging, moderation, repo, task_review
 from .config import _secret
 from .currency import format_money
 
@@ -158,6 +158,7 @@ CARD_CONFIRM_TEXT = (
     "<b>🧾 Подтвердите оплату 🧾</b>\n\n"
     "Отправьте скрин или чек об оплате, после чего мы проверим поступление и вы получите свои конфеты 📷💵👇"
 )
+RECEIPT_BLOCKED_ALERT = "❌ Отправка чеков для вас недоступна."
 CARD_PROCESSING_TEXT = (
     "<b>🔍 Проверяем ваш чек...</b>\n\n"
     "✅ Ваш чек принят на рассмотрение. Обычно это занимает меньше получаса. "
@@ -285,6 +286,7 @@ def receipt_rows(order) -> list[Row]:
     return [
         [(f"✅ Выдать {int(order.candies)}🍬 за {money(order.fiat_amount)}₽", f"{CHECK_PREFIX}:ok:{oid}", None, "success")],
         [("❌ Отказать", f"{CHECK_PREFIX}:no:{oid}", None, "danger")],
+        [("🚫 Заблокировать", f"{CHECK_PREFIX}:bl:{oid}", None, "danger")],
     ]
 
 
@@ -647,6 +649,11 @@ async def _decide(call, bot, action: str, order_id: int | None) -> None:
         await _answer(call, "Заказ не найден.", True)
         return
     who = f"@{call.from_user.username}" if call.from_user.username else html.escape(call.from_user.full_name or str(call.from_user.id))
+    if action == "bl" and order.status != "review":   # чек уже разобран, но автора всё равно можно заблокировать
+        await repo.set_receipt_block(int(order.user_id), True, call.from_user.id)
+        await _answer(call, "Пользователь заблокирован: чеки он больше отправлять не сможет.", True)
+        await _strip_buttons(bot, msg.chat.id, msg.message_id)
+        return
     if order.status != "review":
         await _answer(call, "Этот чек уже обработан.", True)
         await _strip_buttons(bot, msg.chat.id, msg.message_id)
@@ -658,6 +665,11 @@ async def _decide(call, bot, action: str, order_id: int | None) -> None:
         done = fresh is not None and fresh.status == "credited"
         result = (f"✅ Выдано {int(order.candies)}{CANDY} за {money(order.fiat_amount)}₽ ({who})" if done
                   else "⚠️ Оплата отмечена, но конфеты пока не начислены (пользователя нет в базе?).")
+    elif action == "bl":
+        # отказ без уведомления + запрет на отправку новых чеков
+        await repo.finish_topup_order(order_id, "rejected")
+        await repo.set_receipt_block(int(order.user_id), True, call.from_user.id)
+        result = f"🚫 Отказано, пользователь заблокирован ({who})"
     else:
         if await repo.finish_topup_order(order_id, "rejected"):
             mod = ACTIVE.get(int(order.bot_id))
@@ -704,9 +716,10 @@ def _ensure_check_bot():
 
     async def count_pending() -> int:
         try:
-            return len(await repo.list_topup_orders("review", M_CARD))
+            checks = len(await repo.list_topup_orders("review", M_CARD))
         except Exception:
-            return 0
+            checks = 0
+        return checks + await task_review.count_pending()
 
     @_check_dp.message(Command("start"))
     async def _on_start(message: Message, bot: Bot) -> None:
@@ -717,9 +730,10 @@ def _ensure_check_bot():
             except Exception:
                 log.exception("Бот для чеков: не удалось проверить модератора %s", uid)
         if message.chat.type == "private" and uid in await receipt_targets():
-            text = ("👮 <b>Бот для чеков</b>\n\nСюда приходят чеки об оплате конфет картой. Под каждым чеком — кнопки "
-                    "«Выдать» и «Отказать». Решает первый нажавший, у остальных админов чек обновится.\n\n"
-                    f"🧾 Сейчас на проверке: {await count_pending()}\n/pending — прислать чеки на проверке ещё раз.")
+            text = ("👮 <b>Бот для чеков</b>\n\nСюда приходят чеки об оплате конфет картой и скриншоты выполнения заданий. "
+                    "Под чеком — кнопки «Выдать», «Отказать» и «Заблокировать», под заданием — «Подтвердить», «Отклонить» и "
+                    "«Заблокировать». Решает первый нажавший, у остальных админов сообщение обновится.\n\n"
+                    f"🧾 Сейчас на проверке: {await count_pending()}\n/pending — прислать чеки и задания на проверке ещё раз.")
         else:
             text = (f"⛔ Нет доступа. Ваш Telegram ID: <code>{uid}</code>\n"
                     "Чтобы получать чеки, добавьте себя (этот ID или @юзернейм) во вкладке «Модераторы» на сайте и нажмите /start ещё раз.")
@@ -735,21 +749,31 @@ def _ensure_check_bot():
             return
         try:
             sent = await _send_pending(bot, message.chat.id)
+            sent += await task_review.send_pending(bot, message.chat.id)
             if not sent:
-                await bot.send_message(message.chat.id, "✅ Чеков на проверке нет.")
+                await bot.send_message(message.chat.id, "✅ Чеков и заданий на проверке нет.")
         except Exception:
             log.exception("Бот для чеков: /pending не выполнен")
 
     @_check_dp.callback_query(F.data.startswith(CHECK_PREFIX + ":"))
     async def _on_check_decision(call: CallbackQuery, bot: Bot) -> None:
         parts = (call.data or "").split(":")
-        if len(parts) != 3 or parts[1] not in ("ok", "no") or not parts[2].isdigit():
+        if len(parts) != 3 or parts[1] not in ("ok", "no", "bl") or not parts[2].isdigit():
             await _answer(call)
             return
         try:
             await _decide(call, bot, parts[1], int(parts[2]))
         except Exception:
             log.exception("Бот для чеков: не удалось обработать нажатие %s", call.data)
+            await _answer(call, "❌ Ошибка, попробуйте ещё раз.", True)
+
+    @_check_dp.callback_query(F.data.startswith(task_review.PREFIX))
+    async def _on_task_decision(call: CallbackQuery, bot: Bot) -> None:
+        """«Подтвердить / Отклонить / Заблокировать» под скриншотами задания (app/task_review.py)."""
+        try:
+            await task_review.on_callback(call, bot)
+        except Exception:
+            log.exception("Бот для чеков: не удалось обработать задание %s", call.data)
             await _answer(call, "❌ Ошибка, попробуйте ещё раз.", True)
 
     return _check_bot
@@ -900,13 +924,13 @@ class TopupModule:
             await self._delete(bot, chat_id, old_id)
         return True
 
-    async def _send_new(self, bot, user_id: int, st: UserState, text: str, rows: list[Row]) -> None:
-        """Новое сообщение раздела вместо старого (например, после ввода количества конфет)."""
+    async def _send_new(self, bot, user_id: int, st: UserState, text: str, rows: list[Row], *, with_image: bool = True) -> None:
+        """Новое сообщение раздела вместо старого (например, после ввода количества конфет). with_image=False — без картинки бота."""
         from aiogram.exceptions import TelegramAPIError
 
         old = st.message_id
         try:
-            sent = await messaging.send_message(bot, user_id, text, self.image, reply_markup=markup(rows))
+            sent = await messaging.send_message(bot, user_id, text, self.image if with_image else None, reply_markup=markup(rows))
         except TelegramAPIError as e:
             log.warning("Экран пополнения пользователю %s не доставлен: %s", user_id, e)
             return
@@ -976,6 +1000,9 @@ class TopupModule:
                 return
             await self._screen(call, bot, st, "card", card_text(amount), card_rows(self.keys))
         elif action == "paid":
+            if await repo.is_receipt_blocked(call.from_user.id):
+                await self._alert(call, RECEIPT_BLOCKED_ALERT)
+                return
             await self._screen(call, bot, st, "card_wait_receipt", CARD_CONFIRM_TEXT, card_confirm_rows(self.keys))
         elif action == "info":
             await self._screen(call, bot, st, "info", CRYPTO_INSTRUCTION_TEXT, crypto_info_rows(self.keys))
@@ -1089,6 +1116,9 @@ class TopupModule:
         user_id, amount, targets = message.from_user.id, int(st.amount or 0), await receipt_targets()
         if not amount or not targets or not CHECK_BOT_TOKEN:
             return
+        if await repo.is_receipt_blocked(user_id):   # заблокировали, пока экран ожидания чека был открыт
+            await self._notify_user(bot, user_id, RECEIPT_BLOCKED_ALERT)
+            return
         user = message.from_user
         sender = f"@{user.username}" if user.username else ((user.full_name or "").strip() or str(user.id))
         file_id = message.photo[-1].file_id if message.photo else message.document.file_id
@@ -1112,7 +1142,8 @@ class TopupModule:
                 pass
             return
         st.screen, st.order_id, st.method = "card_review", order_id, M_CARD
-        await self._send_new(bot, user_id, st, CARD_PROCESSING_TEXT, card_processing_rows(self.keys))
+        # «чек принят на проверку» — короткое уведомление, поэтому без картинки бота
+        await self._send_new(bot, user_id, st, CARD_PROCESSING_TEXT, card_processing_rows(self.keys), with_image=False)
         if st.message_id is not None and st.chat_id is not None:
             try:
                 await repo.set_topup_screen(order_id, st.chat_id, st.message_id)
@@ -1120,6 +1151,12 @@ class TopupModule:
                 pass
 
     # --- сообщения пользователю после оплаты ---
+    async def _notify_user(self, bot, user_id: int, text: str) -> None:
+        try:
+            await messaging.send_message(bot, user_id, text)   # короткое уведомление — без картинки
+        except Exception as e:
+            log.warning("Уведомление пользователю %s не доставлено: %s", user_id, e)
+
     async def _notify(self, bot, order, text: str) -> None:
         try:
             await messaging.send_message(bot, int(order.user_id), text)   # короткое уведомление — без картинки

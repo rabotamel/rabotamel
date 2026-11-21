@@ -143,6 +143,16 @@ class FakeRepo:
         self.balance[(o.bot_id, o.user_id)] += o.candies
         return o
 
+    blocked_receipts: set = set()
+
+    async def is_receipt_blocked(self, uid):
+        return uid in self.blocked_receipts
+
+    async def set_receipt_block(self, uid, blocked, by=None):
+        had = uid in self.blocked_receipts
+        (self.blocked_receipts.add if blocked else self.blocked_receipts.discard)(uid)
+        return had != blocked
+
     async def list_topup_orders(self, status, method=None):
         return [o for o in self.orders.values() if o.status == status and (method is None or o.method == method)]
 
@@ -190,11 +200,13 @@ class Bot:
 class FlowTests(unittest.TestCase):
     def setUp(self):
         self.repo = FakeRepo()
+        self.repo.blocked_receipts = set()
         self.repo.balance[(1, 5)] = 10
         self.saved = {n: getattr(topup.repo, n, None) for n in dir(self.repo) if not n.startswith("_") and n not in ("orders", "balance", "next")}
         for n in self.saved:
             setattr(topup.repo, n, getattr(self.repo, n))
         self.screens, self.news, self.deleted, self.alerts, self.main = [], [], [], [], []
+        self.images = []   # картинка, с которой ушло каждое сообщение из self.news
         self.bot = Bot()
 
         async def fake_edit(bot, chat_id, mid, text, markup=None, *, has_photo=False):
@@ -203,6 +215,7 @@ class FlowTests(unittest.TestCase):
         async def fake_send(bot, chat_id, text, image=None, reply_markup=None):
             self.bot.next_id += 1
             self.news.append((chat_id, text, reply_markup))
+            self.images.append(image)
             return NS(message_id=self.bot.next_id, chat=NS(id=chat_id))
 
         self.check = Bot()   # бот для чеков (отдельный от бота-магазина self.bot)
@@ -306,11 +319,52 @@ class FlowTests(unittest.TestCase):
         self.assertIn("100🍬", kw["caption"])
         self.assertIn("80", kw["caption"])
         self.assertNotIn("@boss", kw["caption"])                     # личные сообщения — никого не пингуем
-        self.assertEqual([b.callback_data for row in kw["reply_markup"].inline_keyboard for b in row], ["tpchk:ok:1", "tpchk:no:1"])
+        self.assertEqual([b.callback_data for row in kw["reply_markup"].inline_keyboard for b in row], ["tpchk:ok:1", "tpchk:no:1", "tpchk:bl:1"])
         self.assertEqual(self.news[-1][1], topup.CARD_PROCESSING_TEXT)
         order = self.repo.orders[1]
         self.assertEqual((order.status, order.method, order.fiat_amount), ("review", "card", Decimal("80.00")))
         self.assertEqual(len(topup._receipt_msgs[1]), 2)
+
+    def test_receipt_accepted_notice_has_no_bot_image(self):
+        self.mod.profile = NS(message_image_url="http://img/x.jpg")   # у бота задана картинка сообщений
+        self._send_receipt()
+        self.assertEqual(self.news[-1][1], topup.CARD_PROCESSING_TEXT)
+        self.assertIsNone(self.images[-1])                          # но «чек принят на проверку» уходит без неё
+        self.assertEqual(self.mod.image, "http://img/x.jpg")
+
+    def test_block_button_rejects_silently_and_blocks_receipts(self):
+        self._send_receipt()
+        order = self.repo.orders[1]
+        (c1, m1), (c2, m2) = topup._receipt_msgs[1]
+        k = self.mod.keys
+        news_before = len(self.news)
+
+        async def go():
+            await topup._decide(self.call("tpchk:bl:1", uid=999, chat=c1, msg_id=m1), self.check, "bl", 1)   # не админ
+            self.assertEqual((order.status, 5 in self.repo.blocked_receipts), ("review", False))
+            await topup._decide(self.call("tpchk:bl:1", uid=101, chat=c1, msg_id=m1), self.check, "bl", 1)
+            self.assertEqual((order.status, 5 in self.repo.blocked_receipts), ("rejected", True))
+            self.assertEqual(len(self.news), news_before)                      # пользователю ничего не пишем
+            self.assertEqual(self.repo.balance[(1, 5)], 10)
+            self.assertIn("🚫 Отказано, пользователь заблокирован", self.check.edits_caption[-1]["caption"])
+            self.assertEqual({(e["chat_id"], e["message_id"]) for e in self.check.edits_caption}, {(c1, m1), (c2, m2)})
+            # заблокированный не может перейти к отправке чека
+            await self.mod.on_callback(self.call(k.cb("open")), self.bot)
+            await self.mod.on_message(self.msg("50"), self.bot)
+            await self.mod.on_callback(self.call(k.cb("paid")), self.bot)
+            self.assertEqual(self.alerts[-1], topup.RECEIPT_BLOCKED_ALERT)
+        self.run_(go())
+
+    def test_block_after_review_still_blocks_author(self):
+        self._send_receipt()
+        c1, m1 = topup._receipt_msgs[1][0]
+        self.repo.orders[1].status = "credited"
+
+        async def go():
+            await topup._decide(self.call("tpchk:bl:1", uid=101, chat=c1, msg_id=m1), self.check, "bl", 1)
+            self.assertIn(5, self.repo.blocked_receipts)
+            self.assertEqual(self.repo.orders[1].status, "credited")
+        self.run_(go())
 
     def test_admin_approves_once_and_other_copy_is_updated(self):
         self._send_receipt()

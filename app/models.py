@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, func, text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -72,6 +72,8 @@ class BotUser(Base):
     """Пользователи, которые заходили в бота (Bot API не умеет отдавать список — считаем сами)."""
 
     __tablename__ = "bot_users"
+    # индекс по last_active_at: выборка и удаление давно неактивных (app/cleanup.py) идут без полного сканирования таблицы
+    __table_args__ = (Index("idx_users_last_active_at", "last_active_at"),)
 
     bot_id: Mapped[int] = mapped_column(ForeignKey("bot_profiles.id", ondelete="CASCADE"), primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -79,6 +81,10 @@ class BotUser(Base):
     candies: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
     # юзернейм в нижнем регистре (нужен, чтобы находить пользователя в «Песочнице» по @username); может отсутствовать
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # последнее взаимодействие с ботом. Пишется не на каждое сообщение, а с троттлингом (см. UserStats.touch_activity)
+    last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # когда пользователь в последний раз забрал «Ежедневный подарок» (кулдаун 24 ч, см. tasks.DAILY_COOLDOWN); NULL — ещё не брал
+    daily_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class PushSubscription(Base):
@@ -184,6 +190,28 @@ class ShopProduct(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class UserPremium(Base):
+    """Премиум-подписка пользователя («Галерея» -> «Премиум подписка»). Общая для всех токенов бота (user_id у Telegram один).
+    Премиум: видео из галереи бесплатно (0🍬) и без защиты от пересылки/сохранения. Либо до premium_until, либо навсегда."""
+
+    __tablename__ = "user_premium"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    premium_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    premium_forever: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+
+
+class ReceiptBlockedUser(Base):
+    """Пользователи, которым запрещено отправлять чеки об оплате картой («Купить конфеты»). Общий список для всех
+    токенов бота. Блокируют кнопкой «Заблокировать» под чеком в боте для чеков или в «Песочнице» на сайте."""
+
+    __tablename__ = "receipt_blocked_users"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    blocked_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # статусы заказов пополнения («Купить конфеты»)
 TOPUP_CREATING = "creating"   # счёт создаётся
 TOPUP_ACTIVE = "active"       # счёт выставлен, ждём оплату (CryptoBot / Stars)
@@ -222,3 +250,100 @@ class TopupOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     credited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---------- «Бесплатные конфеты»: задания, их выполнение, рефералы ----------
+
+# статусы выполнения задания
+TASK_PENDING = "pending"     # скриншот отправлен модераторам, ждём решения
+TASK_APPROVED = "approved"   # принято, награда начислена
+TASK_REJECTED = "rejected"   # отклонено (можно отправить скриншот заново)
+
+
+class BonusTask(Base):
+    """Задание раздела «Бесплатные конфеты». Список общий для всех токенов бота (как товары магазина): при ротации
+    токена задания остаются. В коде заданий нет — бот берёт их отсюда, а править их можно во вкладке «Магазин» на сайте.
+
+    `about` хранится как введено (с `**…**`, `[а/б]` и т. д.; в HTML переводится при показе через shop.format_about).
+    `require_screenshot` — нужно ли прикреплять скриншот (тогда награду начисляет модератор после проверки); без скриншота
+    награда начисляется сразу по кнопке выполнения (один раз на пользователя). Показываются только is_visible, в порядке (position, id)."""
+
+    __tablename__ = "bonus_tasks"
+    __table_args__ = (Index("ix_bonus_tasks_order", "is_visible", "position", "id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    button_text: Mapped[str] = mapped_column(String(64))
+    about: Mapped[str] = mapped_column(Text, default="", server_default="")
+    reward: Mapped[int] = mapped_column(BigInteger)
+    require_screenshot: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    position: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    is_visible: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TaskCompletion(Base):
+    """Выполнение задания пользователем. Баланс 🍬 у каждого бота свой, поэтому и выполнение привязано к bot_id.
+    Один пользователь — одна запись на задание: повторно награду не получить (пока запись pending/approved); после
+    отклонения скриншот можно отправить заново. Награда запоминается в момент отправки (`reward`)."""
+
+    __tablename__ = "task_completions"
+    __table_args__ = (
+        UniqueConstraint("bot_id", "user_id", "task_id", name="uq_task_completions_user_task"),
+        Index("ix_task_completions_status", "bot_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bot_id: Mapped[int] = mapped_column(ForeignKey("bot_profiles.id", ondelete="CASCADE"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("bonus_tasks.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default=TASK_PENDING, server_default=TASK_PENDING)
+    reward: Mapped[int] = mapped_column(BigInteger)
+    file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_kind: Mapped[str | None] = mapped_column(String(8), nullable=True)   # photo | document
+    moderator_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    moderator_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    moderator_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TaskCompletionFile(Base):
+    """Скриншоты одного выполнения задания (их может быть несколько, до tasks.MAX_SHOTS). Первый дублируется в
+    `task_completions.file_id/file_kind` (для старых записей и совместимости); при повторной отправке после отказа
+    набор заменяется целиком. Порядок — по `position`."""
+
+    __tablename__ = "task_completion_files"
+
+    completion_id: Mapped[int] = mapped_column(
+        ForeignKey("task_completions.id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    file_id: Mapped[str] = mapped_column(Text)
+    file_kind: Mapped[str] = mapped_column(String(8))   # photo | document
+
+
+class TaskReviewMessage(Base):
+    """Сообщения с кнопками «Подтвердить / Отклонить / Заблокировать», отправленные админам БОТОМ ДЛЯ ЧЕКОВ: нужны, чтобы
+    после решения одного админа обновить их у остальных (как submission_messages у «Предложки»)."""
+
+    __tablename__ = "task_review_messages"
+
+    completion_id: Mapped[int] = mapped_column(
+        ForeignKey("task_completions.id", ondelete="CASCADE"), primary_key=True
+    )
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    message_id: Mapped[int] = mapped_column(BigInteger)
+
+
+class Referral(Base):
+    """Приглашённый по реферальной ссылке. Один приглашённый — одна запись на бота (PK), поэтому награда за него
+    начисляется один раз, сколько бы раз он ни нажимал ссылку."""
+
+    __tablename__ = "referrals"
+    __table_args__ = (Index("ix_referrals_referrer", "bot_id", "referrer_id"),)
+
+    bot_id: Mapped[int] = mapped_column(ForeignKey("bot_profiles.id", ondelete="CASCADE"), primary_key=True)
+    invited_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    referrer_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
