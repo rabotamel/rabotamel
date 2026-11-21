@@ -255,6 +255,16 @@ async def load_users(bot_id: int) -> dict[int, str | None]:
         return {uid: name for uid, name in res.all()}
 
 
+async def _drop_user_leftovers(s, bot_id: int, user_ids) -> None:
+    """Вместе с пользователем удаляем его персональный промокод (скидка) и запись очереди автосообщения: отдельных
+    внешних ключей на bot_users у них нет, сами они не удалятся. Что намеренно остаётся — см. cleanup_sql.PER_USER_TABLES."""
+    ids = list(user_ids)
+    for i in range(0, len(ids), 5000):
+        chunk = ids[i : i + 5000]
+        await s.execute(delete(UserPromo).where(UserPromo.bot_id == bot_id, UserPromo.user_id.in_(chunk)))
+        await s.execute(delete(AutoMessageQueue).where(AutoMessageQueue.bot_id == bot_id, AutoMessageQueue.user_id.in_(chunk)))
+
+
 async def save_users(
     bot_id: int, add: dict[int, str | None], rename: dict[int, str | None], remove: set[int]
 ) -> int:
@@ -268,6 +278,7 @@ async def save_users(
         for i in range(0, len(rem_list), 5000):
             chunk = rem_list[i : i + 5000]
             await s.execute(delete(BotUser).where(BotUser.bot_id == bot_id, BotUser.user_id.in_(chunk)))
+            await _drop_user_leftovers(s, bot_id, chunk)   # скидка удалённого пользователя не должна пережить его
 
         add_list = list(add.items())
         for i in range(0, len(add_list), 5000):
@@ -375,7 +386,13 @@ async def delete_inactive_users(cutoff: datetime, batch: int) -> list[tuple[int,
     """Удаляет одну пачку неактивных пользователей (см. cleanup_sql) и возвращает [(bot_id, user_id), ...]."""
     async with db.SessionLocal() as s, s.begin():
         res = await s.execute(text(_DELETE_INACTIVE_SQL), {"cutoff": cutoff, "now": _now(), "batch": batch})
-        return [(row[0], row[1]) for row in res.all()]
+        rows = [(row[0], row[1]) for row in res.all()]
+        by_bot: dict[int, list[int]] = {}
+        for bot_id, user_id in rows:
+            by_bot.setdefault(int(bot_id), []).append(int(user_id))
+        for bot_id, ids in by_bot.items():
+            await _drop_user_leftovers(s, bot_id, ids)   # та же транзакция: скидка уходит вместе с пользователем
+        return rows
 
 
 # ---------- премиум ----------

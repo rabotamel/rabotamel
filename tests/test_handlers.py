@@ -130,13 +130,19 @@ class FakeBot:
         self.next_id = 100
         self.deleted = []
         self.plain = []   # служебные сообщения «в лоб» через bot.send_message (клавиатура «Меню»)
+        self.carrier_ids = []          # id этих служебных сообщений
+        self.deleted_carriers = []     # какие из них уже удалены (удаляются сразу: «🍭» в чате не остаётся)
 
     async def delete_message(self, chat_id, message_id):
+        if message_id in self.carrier_ids:
+            self.deleted_carriers.append(message_id)   # в self.deleted — только удаления приветствий и меню
+            return
         self.deleted.append(message_id)
 
     async def send_message(self, chat_id, text, reply_markup=None, parse_mode=None):
         self.next_id += 1
         self.plain.append((chat_id, text, reply_markup))
+        self.carrier_ids.append(self.next_id)
         return types.SimpleNamespace(message_id=self.next_id)
 
 
@@ -247,6 +253,7 @@ class MenuButtonTests(unittest.TestCase):
         self.assertEqual((chat, text), (5, handlers.MENU_KEYBOARD_CARRIER))
         self.assertEqual(kb.keyboard[0][0].text, "Меню")
         self.assertTrue(kb.resize_keyboard and kb.is_persistent)
+        self.assertEqual(self.bot.deleted_carriers, self.bot.carrier_ids)   # служебное «🍭» сразу удалено, кнопка «Меню» осталась
 
     def test_menu_button_acts_like_start_and_removes_old_message(self):
         router = self._setup()
@@ -545,11 +552,11 @@ class ShopNavigationTests(unittest.TestCase):
             menu_id, text = sent[-1]
             self.assertTrue(text.endswith("\n\n<b>🔥 Действует промокод на 15%! Скидка истечёт через 23ч 40м</b>"))
             btns = self._buttons(self.sent_markup[-1])
-            self.assertEqual(btns[0].text, "Абсолют — " + shop.strike("100🍬") + " 85🍬")
+            self.assertEqual(btns[0].text, "Абсолют — " + shop.strike("100") + " 85🍬")
             self.assertEqual(btns[-1].text, "⬅️ Назад")
             await router.handlers["on_shop_menu_button"](call(btns[0].callback_data, menu_id), bot)
             card = sent[-1][1]
-            self.assertIn("<s>100🍬</s> 85🍬", card)
+            self.assertIn("<s>100</s> 85🍬", card)
             self.assertTrue(card.endswith("<b>🔥 Действует промокод на 15%!</b>"))
             self.assertEqual([b.text for b in self._buttons(self.sent_markup[-1])], ["🍭 Купить (85🍬)", "⬅️ Назад"])
 
@@ -890,6 +897,70 @@ class ActivityHookTests(unittest.TestCase):
             data="zzz", from_user=types.SimpleNamespace(id=5, username="u"), message=None, answer=answer)
         asyncio.run(router.handlers["on_gallery_button"](call, FakeBot()))
         self.assertEqual(self.stats.activity, [5])
+
+
+class SupportButtonTests(unittest.TestCase):
+    """Кнопка «Поддержка» под приветствием: контакт с сайта, сообщение, красная «Назад» в приветствие."""
+
+    def _setup(self, contact):
+        from app import support
+        bot, router, texts, call, edits, sent = ShopNavigationTests._setup(self)
+        self.support, self.contact = support, contact
+
+        async def fake_load(fresh=False):
+            return support.Settings(self.contact)
+
+        orig = support.load_settings
+        support.load_settings = fake_load
+        self.addCleanup(lambda: setattr(support, "load_settings", orig))
+        return bot, router, texts, call, sent
+
+    def _greet(self, router, bot):
+        async def go():
+            await router.handlers["on_start"](types.SimpleNamespace(
+                text="/start", message_id=900, from_user=types.SimpleNamespace(id=5, username="u")), bot)
+        asyncio.run(go())
+        return ShopNavigationTests._buttons(self.sent_markup[-1])
+
+    def test_button_is_last_and_hidden_without_contact(self):
+        bot, router, texts, call, sent = self._setup("@help_team")
+        btns = self._greet(router, bot)
+        key = texts.gallery.back_cb
+        self.assertEqual(btns[-1].text, self.support.button_label(key))
+        self.assertEqual(btns[-1].callback_data, self.support.cb_open(key))
+        self.assertEqual(btns[-1].style, "primary")
+        self.assertIn("Поддержка" if "Поддержка" in btns[-1].text else "Связь", btns[-1].text)
+        bot2, router2, texts2, call2, sent2 = self._setup("")
+        btns2 = self._greet(router2, bot2)
+        self.assertFalse(any(b.callback_data.startswith(self.support.OPEN_PREFIX) for b in btns2))
+
+    def test_open_shows_exact_contact_with_red_back_and_back_returns_to_greeting(self):
+        bot, router, texts, call, sent = self._setup("@help_team")
+        key = texts.gallery.back_cb
+
+        async def go():
+            await router.handlers["on_support_button"](call(self.support.cb_open(key), 10), bot)
+            msg_id, text = sent[-1]
+            self.assertEqual(text, self.support.message_text(key, "@help_team"))
+            self.assertTrue(text.endswith("@help_team"))
+            self.assertIn("с ", text)
+            self.assertEqual(bot.deleted, [10])                     # приветствие заменено экраном поддержки
+            btns = ShopNavigationTests._buttons(self.sent_markup[-1])
+            self.assertEqual([(b.text, b.style) for b in btns], [("⬅️ Назад", "danger")])
+            await router.handlers["on_support_button"](call(btns[0].callback_data, msg_id), bot)
+            self.assertEqual(bot.deleted, [10, msg_id])             # экран поддержки убран
+            self.assertIn("12" if False else "42🍬", sent[-1][1])    # вернулось приветствие (с балансом)
+            back_btns = ShopNavigationTests._buttons(self.sent_markup[-1])
+            self.assertEqual(back_btns[-1].callback_data, self.support.cb_open(key))
+        asyncio.run(go())
+
+    def test_foreign_or_stale_callback_does_nothing(self):
+        bot, router, texts, call, sent = self._setup("@help_team")
+
+        async def go():
+            await router.handlers["on_support_button"](call("su:deadbeef00", 10), bot)
+            self.assertEqual(sent, [])
+        asyncio.run(go())
 
 
 if __name__ == "__main__":

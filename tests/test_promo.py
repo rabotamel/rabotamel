@@ -124,9 +124,9 @@ class DiscountTests(unittest.TestCase):
         p = shop.Product(id=1, name="Товар", price=100)
         self.assertEqual(shop.product_label(p), "Товар — 100🍬")
         struck = shop.product_label(p, 15)
-        self.assertEqual(struck, "Товар — " + "1\u0336" + "0\u0336" + "0\u0336" + "🍬\u0336" + " 85🍬")
+        self.assertEqual(struck, "Товар — " + "1\u0336" + "0\u0336" + "0\u0336" + " 85🍬")
         self.assertEqual(shop.buy_label(p, 15), "🍭 Купить (85🍬)")
-        self.assertEqual(shop.price_text(100, 15).count(shop.STRIKE), 4)
+        self.assertEqual(shop.price_text(100, 15).count(shop.STRIKE), 3)   # зачёркнуто только число, 🍬 старой цены нет
 
     def test_menu_and_card_text(self):
         p = shop.Product(id=1, name="Т", price=100, about="описание")
@@ -134,7 +134,7 @@ class DiscountTests(unittest.TestCase):
         menu = shop.render_menu("🍫 Магазин 💫", 5, 15)
         self.assertTrue(menu.endswith("🍭 Ваш баланс: 5🍬\n\n<b>🔥 Действует промокод на 15%!</b>"))
         card = shop.render_product(p, "", 15)
-        self.assertIn("<s>100🍬</s> 85🍬", card)
+        self.assertIn("<s>100</s> 85🍬", card)
         self.assertTrue(card.endswith("<b>🔥 Действует промокод на 15%!</b>"))
         self.assertEqual(shop.render_product(p, ""), shop.render_product(p, "", 0))
 
@@ -246,14 +246,14 @@ class AutoMessengerTests(unittest.TestCase):
         self.assertEqual(promo.AUTO_DELAY, 1800)
         self.assertEqual(automsg.AutoMessenger(FakeBot(), FakeStats([]), self.profile).delay, 1800)
 
-    def test_message_sent_after_delay_with_unique_code_and_image(self):
+    def test_message_sent_after_delay_with_unique_code_without_image(self):
         async def go():
             m = self._messenger()
             await m.on_captcha_passed(7)
             self.assertIn(7, self.queue)                     # запись в БД создана сразу
             self.assertEqual(self.sent, [])
             await asyncio.sleep(0.1)
-            self.assertEqual(self.sent, [(7, "Привет! Код: <b>ABCD1234</b>", "http://img")])
+            self.assertEqual(self.sent, [(7, "Привет! Код: <b>ABCD1234</b>", None)])
             self.assertEqual(self.issued, [(7, 15)])
             self.assertNotIn(7, self.queue)                  # запись забрана — повторно не уйдёт
             await m.close()
@@ -275,7 +275,7 @@ class AutoMessengerTests(unittest.TestCase):
             await m.on_captcha_passed(7)
             self.settings = promo.AutoSettings("Новый текст", None, "")
             await asyncio.sleep(0.15)
-            self.assertEqual(self.sent, [(7, "Новый текст", "http://img")])
+            self.assertEqual(self.sent, [(7, "Новый текст", None)])
             self.assertEqual(self.issued, [])                 # без {promo} код не выдаётся
         asyncio.run(go())
 
@@ -331,12 +331,12 @@ class AutoMessengerTests(unittest.TestCase):
             self.assertEqual(calls, [7])
         asyncio.run(go())
 
-    def test_send_test_sends_now_with_fresh_code_and_image_without_touching_queue(self):
+    def test_send_test_sends_now_with_fresh_code_without_image_or_touching_queue(self):
         async def go():
             m = self._messenger(delay=60)
             await m.on_captcha_passed(7)                     # человек ещё ждёт своё сообщение
             res = await m.send_test(7)
-            self.assertEqual(self.sent, [(7, "Привет! Код: <b>ABCD1234</b>", "http://img")])
+            self.assertEqual(self.sent, [(7, "Привет! Код: <b>ABCD1234</b>", None)])
             self.assertEqual(self.issued, [(7, 15)])
             self.assertEqual(res, {"promo": "ABCD1234", "percent": 15})
             self.assertIn(7, self.queue)                     # очередь не тронута: боевое сообщение придёт в своё время
@@ -347,7 +347,7 @@ class AutoMessengerTests(unittest.TestCase):
         self.settings = promo.AutoSettings("Просто текст", None, "")
         res = asyncio.run(self._messenger().send_test(7))
         self.assertEqual((self.issued, res), ([], {"promo": None, "percent": None}))
-        self.assertEqual(self.sent, [(7, "Просто текст", "http://img")])
+        self.assertEqual(self.sent, [(7, "Просто текст", None)])
 
     def test_send_test_requires_enabled_message(self):
         self.settings = promo.AutoSettings()

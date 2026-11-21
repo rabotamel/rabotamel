@@ -67,7 +67,11 @@ async def _startup(app: FastAPI) -> None:
     def _on_cleanup_deleted(rows) -> None:
         st = manager.stats                # работающий бот забывает удалённых, иначе считал бы их прошедшими капчу
         if st is not None:
-            st.forget(uid for bot_id, uid in rows if bot_id == st.bot_id)
+            gone = [uid for bot_id, uid in rows if bot_id == st.bot_id]
+            st.forget(gone)
+            if manager.automsg is not None:
+                for uid in gone:
+                    manager.automsg.forget(uid)   # таймер автосообщения удалённого пользователя
 
     app.state.cleanup_task = asyncio.create_task(
         cleanup.run_loop(before=_before_cleanup, on_deleted=_on_cleanup_deleted), name="users-cleanup"

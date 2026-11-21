@@ -3,6 +3,8 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
+from .cleanup_sql import ORPHAN_SQL
+
 engine: AsyncEngine | None = None
 SessionLocal: async_sessionmaker[AsyncSession] | None = None
 
@@ -97,6 +99,9 @@ async def init_db(database_url: str) -> None:
             "SELECT bot_id, user_id FROM bot_users UNION SELECT bot_id, invited_id FROM referrals"
             ") u WHERE NOT EXISTS (SELECT 1 FROM user_history) ON CONFLICT DO NOTHING"
         ))
+        # скидка и очередь автосообщения удалённых пользователей (раньше они оставались в базе)
+        for stmt in ORPHAN_SQL:
+            await conn.execute(text(stmt))
         await conn.execute(text("UPDATE bot_profiles SET position = id WHERE position = 0"))
         await conn.execute(text("UPDATE bot_profiles SET active_since = now() WHERE is_active AND active_since IS NULL"))
 

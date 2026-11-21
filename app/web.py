@@ -13,9 +13,9 @@ from aiogram.exceptions import TelegramNotFound, TelegramUnauthorizedError
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from . import auth, avatars, comeback, moderation, promo, push, repo, sandbox, shop, shop_io, tasks
+from . import auth, avatars, comeback, moderation, promo, push, repo, sandbox, shop, shop_io, support, tasks
 from .metrics import metrics
 from .events import bus
 from .models import STATUS_ACTIVE, STATUS_QUEUED
@@ -125,6 +125,10 @@ class AutoMessageIn(BaseModel):
     text: str = ""                  # сообщение, которое уходит через 30 минут после капчи (как введено)
     percent: int | str | None = ""  # скидка по промокоду, %
     reply: str = ""                 # ответ бота, когда человек ввёл свой промокод
+
+
+class SupportIn(BaseModel):
+    contact: str = Field("", max_length=300)
 
 
 class ReturnNoticeIn(BaseModel):
@@ -696,11 +700,30 @@ async def delete_shop_product(product_id: int):
     return {"ok": True}
 
 
+@api.get("/support")
+async def get_support():
+    return {"contact": (await support.load_settings(fresh=True)).contact}
+
+
+@api.post("/support")
+async def save_support(body: SupportIn):
+    """Контакт поддержки для кнопки «Поддержка» в боте: @username или числовой ID; пусто — кнопка скрыта."""
+    try:
+        contact = support.normalize(body.contact)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    await support.save_settings(support.Settings(contact))
+    return {"ok": True, "contact": contact}
+
+
 @api.get("/buttons/export")
 @api.get("/shop/export")
 async def export_buttons():
     """Все тексты вкладки «Кнопки в боте» одним .txt-файлом UTF-8: товары (и скрытые, в порядке показа) и задания."""
-    text = shop_io.export_all(await repo.list_shop_products(only_visible=False), await repo.list_tasks(only_visible=False))
+    text = shop_io.export_all(
+        await repo.list_shop_products(only_visible=False), await repo.list_tasks(only_visible=False),
+        (await support.load_settings(fresh=True)).contact,
+    )
     name = f"bot-buttons-{datetime.now().strftime('%Y%m%d-%H%M')}.txt"
     return Response(
         text, media_type="text/plain; charset=utf-8",
@@ -725,12 +748,15 @@ async def import_buttons(body: ShopImportIn):
         return {"ok": True, "applied": False, "count": len(parsed.products), "current": current,
                 "names": [it.name for it in parsed.products[:10]],
                 "tasks": count_tasks, "current_tasks": current_tasks,
-                "task_names": [it.button_text for it in (parsed.tasks or [])[:10]]}
+                "task_names": [it.button_text for it in (parsed.tasks or [])[:10]],
+                "support": parsed.support, "current_support": (await support.load_settings(fresh=True)).contact}
     try:
         await repo.restore_buttons(parsed.products, parsed.tasks)
     except Exception:
         logging.getLogger("bot.web").exception("Восстановление вкладки «Кнопки в боте» из файла не удалось")
         raise HTTPException(500, "Не удалось восстановить данные из файла, текущие данные не изменены")
+    if parsed.support is not None:
+        await support.save_settings(support.Settings(parsed.support))
     bus.publish({"type": "changed"})
     return {"ok": True, "applied": True, "count": len(parsed.products), "current": current,
             "tasks": count_tasks, "current_tasks": current_tasks}

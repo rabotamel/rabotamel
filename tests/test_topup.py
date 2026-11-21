@@ -36,8 +36,21 @@ class PureTests(unittest.TestCase):
             self.assertEqual(currency.to_candies(stars, currency.STAR), candies)
 
     def test_parse_amount(self):
-        self.assertEqual([topup.parse_amount(t) for t in ("100", " 1 000 ", "500 конфет", "x", "", None, "0", "-5", "1000001")],
-                         [100, 1000, 500, None, None, None, None, 5, None])
+        self.assertEqual([topup.parse_amount(t) for t in (
+            "100", " 1 000 ", "500 конфет", "10", "x", "", None, "0", "9", "-5", "-100", "10.5", "100,5", "1000001")],
+                         [100, 1000, 500, 10, None, None, None, None, None, None, None, None, None, None])
+
+    def test_amount_errors_are_specific(self):
+        e = {t: topup.check_amount(t)[1] for t in ("5", "9", "0", "-50", "12.5", "12,5", "abc", "1000001")}
+        self.assertEqual(e["5"], topup.AMOUNT_ERROR_MIN)
+        self.assertEqual(e["9"], topup.AMOUNT_ERROR_MIN)
+        self.assertEqual(e["0"], topup.AMOUNT_ERROR_MIN)
+        self.assertIn("10", topup.AMOUNT_ERROR_MIN)
+        self.assertEqual(e["-50"], topup.AMOUNT_ERROR_NEGATIVE)
+        self.assertEqual((e["12.5"], e["12,5"]), (topup.AMOUNT_ERROR_FRACTION,) * 2)
+        self.assertEqual(e["abc"], topup.AMOUNT_ERROR_FORMAT)
+        self.assertEqual(e["1000001"], topup.AMOUNT_ERROR_MAX)
+        self.assertEqual(topup.check_amount("10"), (10, None))
 
     def test_receipt_targets_come_from_moderators_tab(self):
         from app import moderation

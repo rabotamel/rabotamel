@@ -58,7 +58,7 @@ class AutoMessenger:
     async def send_test(self, user_id: int) -> dict:
         """Проверка с сайта: шлёт автосообщение СЕЙЧАС, в обход очереди и 30-минутного таймера. Всё как в бою: настройки
         читаются свежими, промокод выдаётся при наличии {promo} (прежний код пользователя заменяется новым и скидка
-        сбрасывается), сообщение идёт с картинкой бота. Очередь не трогаем: если человек ещё ждёт автосообщение, оно
+        сбрасывается), сообщение идёт без картинки бота. Очередь не трогаем: если человек ещё ждёт автосообщение, оно
         придёт в своё время. ValueError — автосообщение выключено; ошибки Telegram пробрасываются вызывающему."""
         cfg = await promo.load_settings(fresh=True)
         if not cfg.enabled:
@@ -67,7 +67,7 @@ class AutoMessenger:
         if promo.has_variable(cfg.text) and cfg.percent:
             code = await repo.issue_promo(self.stats.bot_id, user_id, cfg.percent)
         text = promo.render(cfg.text, self.seed, code, cfg.percent)
-        await messaging.send_message(self.bot, user_id, text, self.profile.message_image_url)
+        await messaging.send_message(self.bot, user_id, text)   # уведомление о скидке — без картинки бота
         return {"promo": code, "percent": cfg.percent}
 
     async def on_captcha_passed(self, user_id: int) -> None:
@@ -132,7 +132,7 @@ class AutoMessenger:
         text = promo.render(cfg.text, self.seed, code, cfg.percent)
         for attempt in (1, 2):
             try:
-                await messaging.send_message(self.bot, user_id, text, self.profile.message_image_url)
+                await messaging.send_message(self.bot, user_id, text)   # уведомление о скидке — без картинки бота
                 return True
             except TelegramRetryAfter as e:
                 if attempt == 2:

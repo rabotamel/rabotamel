@@ -50,3 +50,19 @@ AND last_active_at < :cutoff
 AND candies <= 0
 RETURNING bot_id, user_id
 """
+
+
+# Данные пользователя «внутри бота», которые лежат в отдельных таблицах и сами вместе со строкой bot_users НЕ удаляются
+# (внешнего ключа на пользователя нет): персональный промокод со скидкой и запись очереди автосообщения. Они должны исчезать
+# вместе с пользователем, иначе вернувшийся человек получил бы старую скидку. Намеренно НЕ входят: user_premium (платная
+# подписка, общая для всех ботов), user_history (счётчик «всего было»), referrals / task_completions / topup_orders
+# (защита от повторного начисления наград и учёт оплат), списки блокировок.
+PER_USER_TABLES = ("user_promos", "auto_message_queue")
+
+# Разовая зачистка «осиротевших» записей (пользователя уже нет в bot_users): остатки от прежних версий, где удаление
+# пользователя скидку не трогало. Выполняется при запуске (db.init_db).
+ORPHAN_SQL = tuple(
+    f"DELETE FROM {t} WHERE NOT EXISTS ("
+    f"SELECT 1 FROM bot_users u WHERE u.bot_id = {t}.bot_id AND u.user_id = {t}.user_id)"
+    for t in PER_USER_TABLES
+)

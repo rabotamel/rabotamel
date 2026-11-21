@@ -15,6 +15,9 @@
     <1 строка комментария для админа>
     === END TASK ===
 
+В заголовке v2 после `tasks:` может идти строка `support: @username` (или ID; пусто — контакт не задан): контакт поддержки с сайта.
+Старые файлы без неё при импорте контакт не меняют.
+
 Описание и комментарий записываются построчно (число строк указано), поэтому любые символы разбор не ломают. Старые файлы
 `TG-BOT-ROTATOR SHOP v1` (только товары) по-прежнему принимаются: тогда задания не затрагиваются.
 
@@ -51,6 +54,7 @@
 from dataclasses import dataclass
 
 from . import shop, tasks
+from . import support as support_mod
 
 HEADER = "TG-BOT-ROTATOR SHOP v1"            # только товары (прежний формат, принимается при импорте)
 HEADER_V2 = "TG-BOT-ROTATOR BUTTONS v2"      # товары + задания
@@ -90,9 +94,11 @@ class TaskItem:
 
 @dataclass(frozen=True)
 class Parsed:
-    """Разобранный файл. tasks=None — файл старого формата (только товары): задания при импорте не трогаются."""
+    """Разобранный файл. tasks=None — файл старого формата (только товары): задания при импорте не трогаются.
+    support=None — в файле нет строки `support:` (контакт поддержки не трогаем); "" — в файле он пустой (очистить)."""
     products: list
     tasks: list | None
+    support: str | None = None
 
 
 def _lines(value) -> list[str]:
@@ -110,11 +116,15 @@ def _product_block(r) -> list[str]:
     ]
 
 
-def export_all(products, task_rows) -> str:
-    """Все тексты вкладки «Кнопки в боте»: товары (в порядке показа, включая скрытые) и задания -> текст файла v2.
-    task_rows — объекты с полями id, button_text, about, reward, require_screenshot, one_time, is_visible, comment."""
+def export_all(products, task_rows, support: str | None = None) -> str:
+    """Все тексты вкладки «Кнопки в боте»: товары (в порядке показа, включая скрытые), задания и контакт поддержки -> текст файла v2.
+    task_rows — объекты с полями id, button_text, about, reward, require_screenshot, one_time, is_visible, comment.
+    support — «@username» / ID / "" (не задан); None — строка `support:` в файл не пишется."""
     products, task_rows = list(products), list(task_rows)
-    out = [HEADER_V2, f"products: {len(products)}", f"tasks: {len(task_rows)}", ""]
+    out = [HEADER_V2, f"products: {len(products)}", f"tasks: {len(task_rows)}"]
+    if support is not None:
+        out.append(f"support: {support}")
+    out.append("")
     for r in products:
         out += _product_block(r)
     for t in task_rows:
@@ -168,10 +178,18 @@ def _parse(text: str, v2: bool) -> Parsed:
     i += 1
     declared: int | None = None
     declared_tasks: int | None = None
-    for _ in range(2 if v2 else 1):
+    support: str | None = None
+    for _ in range(3 if v2 else 1):
         skip_blank()
-        for key in ("products", "tasks") if v2 else ("products",):
+        for key in ("products", "tasks", "support") if v2 else ("products",):
             if i < n and lines[i].lower().startswith(key + ":"):
+                if key == "support":
+                    try:
+                        support = support_mod.normalize(lines[i].partition(":")[2])
+                    except ValueError as e:
+                        raise ValueError(f"Строка {i + 1}: support — {e}") from None
+                    i += 1
+                    break
                 try:
                     value = int(lines[i].partition(":")[2].strip())
                 except ValueError:
@@ -256,7 +274,7 @@ def _parse(text: str, v2: bool) -> Parsed:
         raise ValueError(f"В заголовке указано заданий: {declared_tasks}, а в файле найдено: {len(task_items)} — файл повреждён")
     if v2 and declared_tasks is None and not task_items:
         raise ValueError("В заголовке нет строки tasks — файл повреждён")
-    return Parsed(items, task_items if v2 else None)
+    return Parsed(items, task_items if v2 else None, support)
 
 
 def _parse_task(lines: list[str], i: int, out: list, seen_ids: set) -> int:

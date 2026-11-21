@@ -488,10 +488,10 @@ def strike(text: str) -> str:
 
 
 def price_text(price: int, percent: int = 0) -> str:
-    """Цена для кнопки: «100🍬» или со скидкой «1̶0̶0̶🍬̶ 85🍬» (старая зачёркнута, рядом новая)."""
+    """Цена для кнопки: «100🍬» или со скидкой «1̶0̶0̶ 85🍬» (зачёркнуто только число старой цены, без 🍬; рядом новая цена)."""
     if not percent:
         return f"{int(price)}{CANDY}"
-    return f"{strike(f'{int(price)}{CANDY}')} {discounted_price(price, percent)}{CANDY}"
+    return f"{strike(str(int(price)))} {discounted_price(price, percent)}{CANDY}"
 
 
 def left_hm(seconds: float) -> str:
@@ -553,7 +553,7 @@ def render_product(p: Product, seed: str = "", percent: int = 0) -> str:
     """Карточка товара (HTML): название без « — 6789🍬», цена отдельной строкой, описание из БД с оформлением.
     seed — seed бота: по нему из [а/б] в описании выбираются варианты (у одного бота всегда одни и те же).
     percent > 0 — цена со скидкой (старая зачёркнута) и внизу строка про промокод."""
-    price = f"{int(p.price)}{CANDY}" if not percent else f"<s>{int(p.price)}{CANDY}</s> {discounted_price(p.price, percent)}{CANDY}"
+    price = f"{int(p.price)}{CANDY}" if not percent else f"<s>{int(p.price)}</s> {discounted_price(p.price, percent)}{CANDY}"
     text = (
         f"<b>📦 Товар:</b> {html.escape(p.name, quote=False)}\n"
         f"{BALANCE_EMOJI} <b>Цена:</b> {price}\n\n"

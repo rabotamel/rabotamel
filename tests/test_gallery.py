@@ -65,7 +65,8 @@ class StaticEmojiTests(unittest.TestCase):
         for i in range(300):
             c = gl.generate_config(f"st{i}")
             self.assertTrue(c.buy_label.startswith("🎥 ") and c.buy_label.endswith(" 💖"))
-            self.assertTrue(c.premium_label.startswith("💫 ") and c.premium_label.endswith(" 💖"))
+            self.assertIn(c.premium_label, gl.PREMIUM_HEADS)
+            self.assertEqual(c.premium_label, gl.premium_ui(c).title)   # кнопка открытия = заголовок меню премиума
             self.assertEqual(gl.layout_rows(c)[2][0][0], "📩 Предложка 🤍")
             self.assertEqual(gl.layout_rows(c)[3][0][0], "⬅️ Назад")
 
@@ -103,7 +104,7 @@ class StaticEmojiTests(unittest.TestCase):
                  hint="✨ Нажмите «{proposal_title}», чтобы заработать конфеты", buy_emoji=1, premium_emoji=2)
         n = gl.GalleryConfig.from_json(json.dumps(d, ensure_ascii=False))
         self.assertEqual(n.buy_label, "🎥 Смотреть видео (3🍬) 💖")     # цена 3🍬 в тексте кнопки сохранена
-        self.assertEqual(n.premium_label, "💫 VIP-подписка 💖")
+        self.assertEqual(n.premium_label, gl.premium_head(n.back_cb))   # подпись премиума выводится из back_cb
         self.assertEqual(n.hint_template, "Нажмите «{proposal_title}», чтобы заработать конфеты")
         self.assertEqual((n.buy_emoji, n.premium_emoji), (0, 0))
         self.assertEqual(gl.GalleryConfig.from_json(n.to_json()), n)   # повторное чтение ничего не меняет
@@ -162,6 +163,7 @@ class LegacyPremiumTests(unittest.TestCase):
     def test_removed_premium_text_is_replaced_and_not_generated(self):
         import json
         self.assertNotIn("Безлимит и скачивание", gl.PREMIUM_TEXTS)
+        self.assertNotIn("Безлимит и скачивание", " ".join(gl.PREMIUM_HEADS))
         for i in range(300):
             self.assertNotIn("Безлимит", gl.generate_config(f"p{i}").premium_label)
         d = json.loads(gl.generate_config("old").to_json())
@@ -181,7 +183,7 @@ class PremiumUiTests(unittest.TestCase):
             u = gl.premium_ui(c)
             uis.add((u.title, u.info, u.status_head, u.status_none, u.status_temp, u.status_forever, u.back, tuple(u.tariffs.values())))
         self.assertGreater(len(uis), 20)
-        self.assertEqual(gl.premium_ui(None).status_none, "У вас нет премиума")
+        self.assertEqual(gl.premium_ui(None).status_none, "🐦‍🔥 У вас нет премиума")
 
     def test_three_statuses_and_dynamic_left(self):
         from datetime import datetime, timedelta, timezone
@@ -192,12 +194,12 @@ class PremiumUiTests(unittest.TestCase):
             none = gl.render_premium(c, self.GT, 5, None, False, now)
             temp = gl.render_premium(c, self.GT, 5, now + timedelta(days=2, hours=3, minutes=4), False, now)
             fv = gl.render_premium(c, self.GT, 5, None, True, now)
-            self.assertIn(f"🤷🏻‍♀️ {ui.status_none}", none)
-            self.assertIn(f"❤️‍🔥 {ui.status_temp.format(left='2д 3ч 4м')}", temp)
-            self.assertIn(f"💎 {ui.status_forever}", fv)
+            self.assertIn(ui.status_none, none)
+            self.assertIn(ui.status_temp.format(left='2д 3ч 4м'), temp)
+            self.assertIn(ui.status_forever, fv)
             self.assertNotIn("{left}", temp)
             for t in (none, temp, fv):
-                self.assertTrue(t.startswith(f"<b>💫 {ui.title} 💖</b>\n\n🌸 {ui.info} 🌸\n\n<b>🔥 {ui.status_head} 🩷</b>\n"))
+                self.assertTrue(t.startswith(f"<b>{ui.title}</b>\n\n{ui.info}\n\n<b>{ui.status_head}</b>\n"))
                 self.assertTrue(t.endswith(gl.balance_line(self.GT, "5")))
             # просроченный временный премиум = «нет премиума»
             self.assertIn(ui.status_none, gl.render_premium(c, self.GT, 5, now - timedelta(minutes=1), False, now))
@@ -208,12 +210,25 @@ class PremiumUiTests(unittest.TestCase):
             rows = gl.premium_rows(c)
             self.assertEqual([r[0][1] for r in rows], [f"{c.premium_cb}:{k}" for k in ("3", "7", "forever", "b")])
             for (text, _), k in zip((r[0] for r in rows[:3]), gl.PREMIUM_KEYS):
-                self.assertIn(f"({gl.PREMIUM_OPTIONS[k]['price']}🍬)", text)
-                self.assertTrue(text.endswith(" 👑"))
-            self.assertTrue(rows[3][0][0].startswith("⬅️ "))
+                self.assertIn(f"{gl.PREMIUM_OPTIONS[k]['price']}🍬", text)
+                self.assertEqual(text, gl.tariff_label(gl.premium_ui(c), k))
+            self.assertIn(rows[3][0][0], gl.PREMIUM_BACK_TEXTS)
             for _, cb in (r[0] for r in rows):
                 self.assertIsNotNone(gl.parse_premium_key(c, cb))
                 self.assertLessEqual(len(cb.encode()), 64)
+
+
+    def test_title_equals_opening_button_and_lists_are_the_spec(self):
+        self.assertEqual(len(gl.PREMIUM_HEADS), 2)
+        seen = set()
+        for i in range(200):
+            c = gl.generate_config(f"hd{i}")
+            btn = gl.layout_rows(c)[1][0][0]
+            title = gl.render_premium(c, self.GT, 5, None, False).split("</b>")[0][3:]
+            self.assertEqual((btn, title), (c.premium_label, c.premium_label))
+            seen.add(btn)
+        self.assertEqual(seen, set(gl.PREMIUM_HEADS))
+        self.assertEqual(gl.tariff_label(gl.premium_ui(None), "3"), "💕 3 дня (650🍬) 👑")
 
 
 if __name__ == "__main__":

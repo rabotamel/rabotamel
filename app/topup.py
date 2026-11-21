@@ -54,6 +54,7 @@ CANDY = "🍬"
 BUTTON_LABEL = "🍭 Купить конфеты 🍬"
 BUTTON_STYLE = "primary"      # как у соседних кнопок под приветствием
 MAX_CANDIES = 1_000_000       # больше за один заказ не берём (защита от опечаток)
+MIN_CANDIES = 10              # меньше за один заказ не берём
 RETRY_LIMIT = 30              # сколько раз пробуем начислить оплаченный заказ, если пользователя нет в базе
 
 M_CARD, M_CRYPTO, M_STARS = "card", "cryptobot", "stars"
@@ -99,13 +100,36 @@ def money(value: Decimal | int | str) -> str:
     return format_money(Decimal(str(value)))
 
 
-def parse_amount(text: str | None) -> int | None:
-    """Первое число из текста («1 000», «500 конфет»). None — числа нет или оно не от 1 до MAX_CANDIES."""
-    m = re.search(r"\d+", (text or "").replace(" ", "").replace(" ", ""))
+_AMOUNT_RE = re.compile(r"([-−–—])?(\d+)([.,]\d+)?")
+
+AMOUNT_ERROR_FORMAT = f"❌ Введите целое число конфет от {MIN_CANDIES} до {MAX_CANDIES}."
+AMOUNT_ERROR_NEGATIVE = "❌ Число конфет не может быть отрицательным."
+AMOUNT_ERROR_FRACTION = "❌ Количество конфет должно быть целым числом, дробные числа нельзя."
+AMOUNT_ERROR_MIN = f"❌ Меньше {MIN_CANDIES} конфет купить нельзя."
+AMOUNT_ERROR_MAX = f"❌ Больше {MAX_CANDIES} конфет за один раз купить нельзя."
+
+
+def check_amount(text: str | None) -> tuple[int | None, str | None]:
+    """Разбор введённого количества конфет: (число, None) или (None, текст ошибки для пользователя).
+    Берётся первое число из текста («1 000», «500 конфет»). Отрицательные, дробные, меньше MIN_CANDIES и больше MAX_CANDIES — ошибка."""
+    m = _AMOUNT_RE.search((text or "").replace(" ", "").replace(" ", ""))
     if not m:
-        return None
-    value = int(m.group(0))
-    return value if 0 < value <= MAX_CANDIES else None
+        return None, AMOUNT_ERROR_FORMAT
+    if m.group(1):
+        return None, AMOUNT_ERROR_NEGATIVE
+    if m.group(3):
+        return None, AMOUNT_ERROR_FRACTION
+    value = int(m.group(2))
+    if value < MIN_CANDIES:
+        return None, AMOUNT_ERROR_MIN
+    if value > MAX_CANDIES:
+        return None, AMOUNT_ERROR_MAX
+    return value, None
+
+
+def parse_amount(text: str | None) -> int | None:
+    """Количество конфет из текста; None — ввод неверный (см. check_amount)."""
+    return check_amount(text)[0]
 
 
 # ---------- ключи callback_data (свои у каждого бота, как у остальных кнопок) ----------
@@ -1097,13 +1121,10 @@ class TopupModule:
             return True
         if st.screen == "card_review":
             return True
-        amount = parse_amount(message.text)
+        amount, error = check_amount(message.text)
         if amount is None:
             if message.text:
-                try:
-                    await messaging.send_message(bot, user_id, f"❌ Введите число конфет от 1 до {MAX_CANDIES}.")
-                except Exception:
-                    pass
+                await self._notify_user(bot, user_id, error or AMOUNT_ERROR_FORMAT)   # «меньше 10 нельзя» и т. п.
             return True
         st.amount, st.screen = amount, "methods"
         st.method = st.order_id = st.invoice_url = st.invoice_amount = None

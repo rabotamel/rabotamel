@@ -10,8 +10,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from . import (
-    captcha, comeback, gallery, greeting, messaging, moderation, promo, repo, shop, shop_buttons, suggest, task_review, tasks, topup,
-    video_pool,
+    captcha, comeback, gallery, greeting, messaging, moderation, promo, repo, shop, shop_buttons, suggest, support, task_review, tasks,
+    topup, video_pool,
 )
 from .metrics import metrics
 from .models import BotProfile
@@ -29,7 +29,7 @@ CAPTCHA_RESEND_AFTER = 1800.0
 # Подпись постоянной кнопки у клавиатуры (под полем ввода) — по заданию владельца фиксированная
 MENU_BUTTON = "Меню"
 # Текст служебного сообщения, к которому крепится клавиатура с кнопкой «Меню» (клавиатуру нельзя повесить на
-# приветствие: у него уже есть inline-кнопки)
+# приветствие: у него уже есть inline-кнопки). Сообщение удаляется сразу после отправки — клавиатура остаётся, «🍭» в чате нет
 MENU_KEYBOARD_CARRIER = "🍭"
 
 
@@ -124,7 +124,7 @@ def build_router(
         shown[user_id] = (msg.message_id, order, now, texts.version, target)
 
     async def ensure_menu_keyboard(bot: Bot, user_id: int, *, force: bool = False) -> None:
-        """Постоянная кнопка «Меню» у клавиатуры. Прежнее служебное сообщение заменяется новым (не копятся)."""
+        """Постоянная кнопка «Меню» у клавиатуры. Служебное сообщение-носитель сразу удаляется: в чате остаётся только кнопка."""
         if user_id in menu_kb and not force:
             return
         from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
@@ -144,10 +144,14 @@ def build_router(
             return
         if len(menu_kb) > 5000:
             menu_kb.clear()
-        old_id = menu_kb.get(user_id)
         menu_kb[user_id] = msg.message_id
-        if old_id is not None and old_id != msg.message_id:
-            await safe_delete(bot, user_id, old_id)
+        # Служебное «🍭» нужно только, чтобы Telegram показал клавиатуру: сама клавиатура остаётся в чате и после удаления
+        # сообщения, поэтому в переписке «🍭» не висит (ни после капчи, ни при обновлении клавиатуры)
+        await safe_delete(bot, user_id, msg.message_id)
+
+    def support_key() -> str:
+        """Ключ бота для вариантов и callback_data поддержки; меняется вместе с «Уникальные текста»."""
+        return texts.gallery.back_cb
 
     async def main_keyboard(user_id: int | None = None):
         """Кнопки под приветствием: «Магазин» / «Галерея» (рандомизированные), ниже «Купить конфеты», ещё ниже —
@@ -157,10 +161,13 @@ def build_router(
         if user_id is not None:
             percent, left = await get_discount(user_id)
             suffix = shop.promo_button_suffix(percent, left)
-        return shop_buttons.build_keyboard(
-            texts.shop_buttons, extra_rows=[*topup_module.menu_rows(), tasks.menu_row(texts.tasks_menu)],
-            shop_suffix=suffix,
-        )
+        extra = [*topup_module.menu_rows(), tasks.menu_row(texts.tasks_menu)]
+        try:
+            if (await support.load_settings()).enabled:     # контакт задан на сайте; иначе кнопки нет
+                extra.append(support.menu_row(support_key()))   # самый низ клавиатуры приветствия
+        except Exception:
+            log.exception("Не удалось прочитать контакт поддержки")
+        return shop_buttons.build_keyboard(texts.shop_buttons, extra_rows=extra, shop_suffix=suffix)
 
     async def drop_product_parts(bot: Bot, user_id: int) -> None:
         for old_id in product_parts.pop(user_id, []):
@@ -667,6 +674,30 @@ def build_router(
         elif action == "shop":
             await show_shop_menu(call, bot, user_id)
 
+    @router.callback_query(F.data.startswith(support.PREFIXES))
+    async def on_support_button(call: CallbackQuery, bot: Bot) -> None:
+        """«📲 Поддержка 👩🏻‍💻»: сообщение с контактом поддержки (задаётся на сайте) и красная «⬅️ Назад» в приветствие.
+        Действие определяется по callback_data ЭТОГО бота: кнопки старых или чужих сообщений гасят «часики»."""
+        action = support.parse_action(support_key(), call.data)
+        await safe_answer(call)
+        user_id = call.from_user.id
+        stats.touch_activity(user_id)
+        if action is None or not stats.has(user_id):
+            return
+        if action == "back":
+            await show_main_menu(call, bot, user_id)   # приветствие с кнопками возвращается, экран поддержки убирается
+            return
+        try:
+            cfg = await support.load_settings()
+        except Exception:
+            log.exception("Не удалось прочитать контакт поддержки")
+            return
+        if not cfg.enabled:
+            return
+        await show_screen(
+            call, bot, user_id, support.message_text(support_key(), cfg.contact), support.back_keyboard(support_key()),
+        )
+
     @router.callback_query(F.data.startswith(shop.PREFIXES))
     async def on_shop_menu_button(call: CallbackQuery, bot: Bot) -> None:
         """Кнопки раздела «Магазин»: товар, «Купить», «Назад». Действие определяется по callback_data ЭТОГО бота
@@ -740,9 +771,8 @@ def build_router(
             cfg = await comeback.load_settings()
             if not cfg.enabled:
                 return
-            await messaging.send_message(
-                bot, user_id, comeback.render(cfg.text, seed_of_bot()), profile.message_image_url,
-            )
+            # уведомление о повышенных наградах — без картинки бота
+            await messaging.send_message(bot, user_id, comeback.render(cfg.text, seed_of_bot()))
             await repo.set_reward_boost(stats.bot_id, user_id, datetime.now(timezone.utc) + comeback.BOOST_DURATION)
         except TelegramForbiddenError as e:
             await on_forbidden(e, user_id)

@@ -30,14 +30,14 @@ class BoostRenderTests(unittest.TestCase):
 
     def test_button_has_struck_old_and_new_reward(self):
         t = tasks.boost_button_text("Подписаться (200🍬)", 200)
-        self.assertEqual(t, "Подписаться (2̶" + "0̶0̶🍬 400🍬)")
-        self.assertEqual(t.replace("̶", ""), "Подписаться (200🍬 400🍬)")
+        self.assertEqual(t, "Подписаться (2̶" + "0̶0̶ 400🍬)")
+        self.assertEqual(t.replace("̶", ""), "Подписаться (200 400🍬)")
         self.assertEqual(tasks.boost_button_text("Без суммы", 200), "Без суммы")
         self.assertEqual(tasks.boost_button_text("Награда 1200🍬", 200), "Награда 1200🍬")   # чужое число не трогаем
-        self.assertEqual(tasks.boost_button_text("A 50 🍬", 50).replace("̶", ""), "A 50 🍬 100 🍬")
+        self.assertEqual(tasks.boost_button_text("A 50 🍬", 50).replace("̶", ""), "A 50 100 🍬")
 
     def test_title_uses_real_strikethrough_and_escapes(self):
-        self.assertEqual(tasks.boost_title_html("Подписаться (200🍬) <x>", 200), "Подписаться (<s>200🍬</s> 400🍬) &lt;x&gt;")
+        self.assertEqual(tasks.boost_title_html("Подписаться (200🍬) <x>", 200), "Подписаться (<s>200</s> 400🍬) &lt;x&gt;")
 
     def test_menu_text_and_buttons(self):
         left = 23 * 3600 + 59 * 60
@@ -55,14 +55,14 @@ class BoostRenderTests(unittest.TestCase):
     def test_task_card(self):
         left = 3600 + 60
         c = tasks.render_task(CFG, task(), "seed", None, left)
-        self.assertTrue(c.startswith("<b>Подписаться (<s>200🍬</s> 400🍬)</b>"))
+        self.assertTrue(c.startswith("<b>Подписаться (<s>200</s> 400🍬)</b>"))
         self.assertIn("400", c.split("\n\n")[-2])                                        # строка награды — новая сумма
         self.assertTrue(c.endswith("<b>🔥 Действует УДВОЕНИЕ суммы наград. Конец через: 1ч 1м</b>"))
         plain = tasks.render_task(CFG, task(), "seed", None)
         self.assertNotIn("УДВОЕНИЕ", plain)
         self.assertNotIn("<s>", plain)
         p = tasks.render_send_prompt(CFG, task(), 0, None, left)
-        self.assertIn("<s>200🍬</s> 400🍬", p)
+        self.assertIn("<s>200</s> 400🍬", p)
         self.assertTrue(p.endswith("1ч 1м</b>"))
 
 

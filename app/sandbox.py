@@ -199,7 +199,9 @@ async def remove_user(manager: BotManager, target: str, confirm: bool) -> dict:
     uid, who = resolve(manager, target)
     stats, _ = _running(manager)
     stats.remove(uid)
-    await stats.flush()  # удаляем из БД сразу, а не при очередном сбросе раз в 15 секунд
+    if getattr(manager, "automsg", None) is not None:
+        manager.automsg.forget(uid)   # ждущее автосообщение (таймер в памяти) удалённому пользователю не уйдёт
+    await stats.flush()  # удаляем из БД сразу (вместе с его скидкой), а не при очередном сбросе раз в 15 секунд
     log.info("Песочница: пользователь %s удалён из базы бота %s", uid, stats.bot_id)
     return {"ok": True, "who": who, "user_id": uid, "users": stats.count}
 

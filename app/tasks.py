@@ -407,7 +407,7 @@ def parse_start_referrer(text: str | None) -> int | None:
 
 # ---------- «УДВОЕНИЕ наград» (app/comeback.py) ----------
 # Пока действует, награды за задания (не за ежедневный подарок и не за реферала) ×BOOST_FACTOR: в меню заданий внизу идёт строка с
-# остатком времени, а награда в кнопке и заголовке задания показана как «<зачёркнутая старая> новая».
+# остатком времени, а награда в кнопке и заголовке задания показана как «<зачёркнутое число старой суммы> новая🍬».
 BOOST_FACTOR = 2
 BOOST_LINE = "🔥 Действует УДВОЕНИЕ суммы наград. Конец через: {left}"
 _STRIKE = "\u0336"   # объединяемый «длинный штрих»: кнопки Telegram не поддерживают разметку, зачёркивание делаем знаком
@@ -438,17 +438,17 @@ def strike(text: str) -> str:
 
 
 def boost_button_text(button_text: str, reward: int) -> str:
-    """Подпись кнопки при удвоении: «200🍬» -> «2̶0̶0̶🍬 400🍬» (старая сумма зачёркнута, рядом новая). Награда в тексте кнопки — это то,
+    """Подпись кнопки при удвоении: «200🍬» -> «2̶0̶0̶ 400🍬» (зачёркнуто только число старой суммы, без 🍬; рядом новая). Награда в тексте кнопки — это то,
     что владелец сам написал (например, «Подписаться (200🍬)»); если суммы задания в подписи нет, текст не меняется."""
     return _reward_re(reward).sub(
-        lambda m: f"{strike(m.group(1))}{m.group(2)}{CANDY} {boosted(reward)}{m.group(2)}{CANDY}", button_text
+        lambda m: f"{strike(m.group(1))} {boosted(reward)}{m.group(2)}{CANDY}", button_text
     )
 
 
 def boost_title_html(button_text: str, reward: int) -> str:
-    """Заголовок карточки задания (HTML, экранирован): «200🍬» -> «<s>200🍬</s> 400🍬»."""
+    """Заголовок карточки задания (HTML, экранирован): «200🍬» -> «<s>200</s> 400🍬»."""
     return _reward_re(reward).sub(
-        lambda m: f"<s>{m.group(1)}{m.group(2)}{CANDY}</s> {boosted(reward)}{m.group(2)}{CANDY}", _esc(button_text)
+        lambda m: f"<s>{m.group(1)}</s> {boosted(reward)}{m.group(2)}{CANDY}", _esc(button_text)
     )
 
 
@@ -483,7 +483,7 @@ def render_ref(cfg: TasksConfig, link: str, count: int, reward: int = REFERRAL_R
 
 def render_task(cfg: TasksConfig, task: Task, seed: str, status: str | None = None, boost_left: float | None = None) -> str:
     """Карточка задания: название жирным, описание из БД (оформление и варианты — как у товаров), награда, статус.
-    При удвоении наград: сумма в названии «<s>200🍬</s> 400🍬», в строке награды — новая сумма, внизу — строка с остатком времени."""
+    При удвоении наград: сумма в названии «<s>200</s> 400🍬», в строке награды — новая сумма, внизу — строка с остатком времени."""
     title = boost_title_html(task.button_text, task.reward) if boost_left else _esc(task.button_text)
     text = f"<b>{title}</b>"
     about = shop.format_about(task.about, seed, task.id)
