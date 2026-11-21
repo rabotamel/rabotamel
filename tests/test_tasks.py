@@ -121,6 +121,14 @@ class NormalizeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tasks.normalize_reward(bad)
 
+    def test_comment_is_optional_plain_text_with_limit(self):
+        self.assertEqual(tasks.normalize_comment(None), "")
+        self.assertEqual(tasks.normalize_comment("   "), "")
+        self.assertEqual(tasks.normalize_comment("  Подписка и отзыв \r\n"), "Подписка и отзыв")
+        self.assertEqual(len(tasks.normalize_comment("я" * tasks.MAX_COMMENT)), tasks.MAX_COMMENT)
+        with self.assertRaises(ValueError):
+            tasks.normalize_comment("я" * (tasks.MAX_COMMENT + 1))
+
     def test_description(self):
         self.assertEqual(tasks.normalize_description("  Сделайте это \r\n"), "Сделайте это")
         with self.assertRaises(ValueError):
@@ -233,6 +241,21 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(tasks.task_from_row(row).one_time)
         row.one_time = False
         self.assertFalse(tasks.task_from_row(row).one_time)
+
+    def test_task_from_row_carries_admin_comment(self):
+        row = types.SimpleNamespace(id=1, button_text="a", about="", reward=1, require_screenshot=False)
+        self.assertEqual(tasks.task_from_row(row).comment, "")        # старые строки без колонки
+        row.comment = None
+        self.assertEqual(tasks.task_from_row(row).comment, "")
+        row.comment = "Подписаться на канал"
+        self.assertEqual(tasks.task_from_row(row).comment, "Подписаться на канал")
+
+    def test_rejected_notice_is_the_fixed_owner_text(self):
+        self.assertEqual(
+            tasks.REJECTED_NOTICE,
+            "❌ Запрос о выполнении задания был отклонён, так как задание выполнено не полностью, "
+            "либо Вы прикрепили не все скриншоты.",
+        )
 
     def test_task_text_is_escaped_and_formatted(self):
         t = T(1, button="<b>x</b>", about="**жирно** <script>")
@@ -351,6 +374,9 @@ class BotFlowTests(unittest.TestCase):
         async def is_blocked(uid):
             return self.db.get("blocked", False)
 
+        async def is_receipt_blocked(uid):   # блокировка чеков не должна влиять на задания
+            return self.db.get("receipt_blocked", False)
+
         async def register_referral(bot_id, invited, referrer, reward):
             self.db["refs"].append((invited, referrer, reward))
             return self.db["referral"]
@@ -371,7 +397,7 @@ class BotFlowTests(unittest.TestCase):
                          ("get_completion", get_completion), ("get_task_statuses", get_task_statuses), ("claim_daily", claim_daily),
                          ("complete_task_instant", complete), ("submit_task_screenshot", submit),
                          ("register_referral", register_referral), ("count_referrals", count_referrals),
-                         ("is_receipt_blocked", is_blocked)):
+                         ("is_task_blocked", is_blocked), ("is_receipt_blocked", is_receipt_blocked)):
             patch(repo, name, fn)
         patch(handlers.task_review, "deliver", deliver)
         patch(tasks, "COLLECT_REFRESH_DELAY", 0.01)
@@ -634,6 +660,16 @@ class BotFlowTests(unittest.TestCase):
         self.assertEqual(self.db["submitted"], [])
         self.assertEqual(self.answers[-1], (tasks.TASK_BLOCKED_ALERT, True))
 
+    def test_receipt_block_does_not_block_tasks(self):
+        # «Отправка чеков» и «Задания» — разные блокировки
+        self.db["tasks"] = [self.SHOT_TASK]
+        self.db["receipt_blocked"] = True
+        self.press(f"{self.cfg.cb['send']}:9")
+        self.assertNotEqual(self.answers[-1], (tasks.TASK_BLOCKED_ALERT, True))
+        self.converse(self.msg(photo="F1"))
+        self.converse(self.sent[-1][3].inline_keyboard[0][0].callback_data)
+        self.assertEqual(self.db["submitted"], [(5, 9, 30, [("F1", "photo")])])
+
     def test_task_screens_have_no_url_or_support_buttons(self):
         self.db["tasks"] = [self.SHOT_TASK]
         self.press(self.cfg.cb["open"])
@@ -659,7 +695,9 @@ class BotFlowTests(unittest.TestCase):
             self.assertIn("30", self.sent[-1][2])
             self.assertEqual(self.sent[-1][1], 5)
             asyncio.run(hook.notify(5, "rejected", "Отзыв", 30))
-            self.assertIn("Отзыв", self.sent[-1][2])
+            self.assertEqual(self.sent[-1][1], 5)
+            self.assertEqual(self.sent[-1][2], tasks.REJECTED_NOTICE)   # фиксированный текст, без названия задания
+            self.assertIsNone(self.sent[-1][3])                         # короткое уведомление: без кнопок
         finally:
             task_review.detach(self.stats.bot_id)
             handlers.topup.detach(self.stats.bot_id)
@@ -733,6 +771,20 @@ class ModerationTests(unittest.TestCase):
         text = task_review.request_text(r, 3)
         for part in ("Выполнение задания #7", "Отзыв &lt;b&gt;", "@vasya", "<code>42</code>", "30🍬", "Скриншотов:</b> 3"):
             self.assertIn(part, text)
+
+    def test_request_text_shows_comment_instead_of_task_name(self):
+        from app import repo, task_review
+
+        r = repo.TaskReview(
+            id=7, bot_id=1, user_id=42, username="vasya", task_id=3, task_name="Отзыв", reward=30, status="pending",
+            file_id="F", file_kind="photo", moderator_id=None, moderator_username=None, moderator_name=None,
+            comment="Подписаться на канал <и> оставить отзыв",
+        )
+        text = task_review.request_text(r, 2)
+        self.assertIn("<b>Задание:</b> Подписаться на канал &lt;и&gt; оставить отзыв", text)
+        self.assertNotIn("Отзыв\n", text)   # название заменено комментарием
+        r.comment = "   "
+        self.assertIn("<b>Задание:</b> Отзыв\n", task_review.request_text(r, 2))   # пустой комментарий — как раньше
 
     def test_prefix_does_not_clash_with_other_handlers(self):
         from app import moderation, task_review, topup

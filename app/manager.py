@@ -78,6 +78,7 @@ class BotManager:
         # то, что нужно «Песочнице»: работающий бот, его профиль и актуальные варианты сообщений
         self.bot: Bot | None = None
         self.profile: BotProfile | None = None
+        self.automsg: AutoMessenger | None = None   # для кнопки «Проверить» на вкладке «Автосообщения»
         self.texts: BotTexts | None = None
         self.state: dict = {"running": False, "bot_id": None, "username": None, "since": None, "note": "запуск…"}
 
@@ -292,6 +293,7 @@ class BotManager:
             # автосообщение через 30 минут после капчи: те, кто ждал его до перезапуска, получают таймеры заново
             automsg = AutoMessenger(bot, stats, profile)
             await automsg.start()
+            self.automsg = automsg
 
             # 3. polling с защитой от «падений»
             crashes = 0
@@ -325,7 +327,7 @@ class BotManager:
             return outcome()
 
         finally:
-            self.bot = self.profile = self.texts = None
+            self.bot = self.profile = self.texts = self.automsg = None
             if automsg is not None:
                 await automsg.close()
             topup.detach(profile.id)

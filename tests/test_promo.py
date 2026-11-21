@@ -331,6 +331,30 @@ class AutoMessengerTests(unittest.TestCase):
             self.assertEqual(calls, [7])
         asyncio.run(go())
 
+    def test_send_test_sends_now_with_fresh_code_and_image_without_touching_queue(self):
+        async def go():
+            m = self._messenger(delay=60)
+            await m.on_captcha_passed(7)                     # человек ещё ждёт своё сообщение
+            res = await m.send_test(7)
+            self.assertEqual(self.sent, [(7, "Привет! Код: <b>ABCD1234</b>", "http://img")])
+            self.assertEqual(self.issued, [(7, 15)])
+            self.assertEqual(res, {"promo": "ABCD1234", "percent": 15})
+            self.assertIn(7, self.queue)                     # очередь не тронута: боевое сообщение придёт в своё время
+            await m.close()
+        asyncio.run(go())
+
+    def test_send_test_without_promo_variable_issues_no_code(self):
+        self.settings = promo.AutoSettings("Просто текст", None, "")
+        res = asyncio.run(self._messenger().send_test(7))
+        self.assertEqual((self.issued, res), ([], {"promo": None, "percent": None}))
+        self.assertEqual(self.sent, [(7, "Просто текст", "http://img")])
+
+    def test_send_test_requires_enabled_message(self):
+        self.settings = promo.AutoSettings()
+        with self.assertRaises(ValueError):
+            asyncio.run(self._messenger().send_test(7))
+        self.assertEqual((self.sent, self.issued), ([], []))
+
     def test_forget_cancels_timer(self):
         async def go():
             m = self._messenger(delay=0.05)

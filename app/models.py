@@ -85,6 +85,9 @@ class BotUser(Base):
     last_active_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # когда пользователь в последний раз забрал «Ежедневный подарок» (кулдаун 24 ч, см. tasks.DAILY_COOLDOWN); NULL — ещё не брал
     daily_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # «УДВОЕНИЕ наград» за задания (кроме ежедневного подарка): действует до этого момента (24 ч с прихода уведомления о возврате
+    # после смены бота, см. app/comeback.py); NULL — не действует
+    boost_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserHistory(Base):
@@ -224,6 +227,18 @@ class ReceiptBlockedUser(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class TaskBlockedUser(Base):
+    """Пользователи, которым запрещено отправлять скриншоты заданий («Бесплатные конфеты»). Общий список для всех токенов
+    бота и ОТДЕЛЬНЫЙ от «Отправки чеков» (`receipt_blocked_users`) и «Предложки» (`blocked_authors`). Блокируют кнопкой
+    «Заблокировать» под заданием в боте для чеков или в «Песочнице» на сайте (раздел «Задания»)."""
+
+    __tablename__ = "task_blocked_users"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    blocked_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # статусы заказов пополнения («Купить конфеты»)
 TOPUP_CREATING = "creating"   # счёт создаётся
 TOPUP_ACTIVE = "active"       # счёт выставлен, ждём оплату (CryptoBot / Stars)
@@ -291,6 +306,9 @@ class BonusTask(Base):
     require_screenshot: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     # одноразовое: после награды (отклонение не считается) пользователь не может выполнить задание повторно, кнопка синяя
     one_time: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    # комментарий для админа: что именно должен был сделать пользователь. Показывается в боте для чеков под скриншотами
+    # вместо названия задания (пользователю не виден); пусто — в заявке по-прежнему название задания
+    comment: Mapped[str] = mapped_column(Text, default="", server_default="")
     position: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     is_visible: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

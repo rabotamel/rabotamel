@@ -37,6 +37,7 @@ class ReviewFlowTests(unittest.TestCase):
         self.rows = {1: review(1)}
         self.files = {1: [("f1", "photo"), ("f2", "photo"), ("f3", "document")]}
         self.msgs, self.blocked, self.balance, self.notes, self.answers = {}, set(), {555: 100}, [], []
+        self.receipt_blocked = set()
         self.check_bot, self.shop_bot = FakeBot(), FakeBot()
 
         async def get_task_reviews(ids):
@@ -57,8 +58,12 @@ class ReviewFlowTests(unittest.TestCase):
                 out.balance = self.balance[r.user_id]
             return out
 
-        async def set_receipt_block(uid, blocked, by=None):
+        async def set_task_block(uid, blocked, by=None):
             self.blocked.add(uid)
+            return True
+
+        async def set_receipt_block(uid, blocked, by=None):   # список чеков об оплате «Заблокировать» под заданием не трогает
+            self.receipt_blocked.add(uid)
             return True
 
         async def save_msg(cid, chat, mid):
@@ -87,7 +92,8 @@ class ReviewFlowTests(unittest.TestCase):
 
         patches = [
             mock.patch.object(repo, "get_task_reviews", get_task_reviews), mock.patch.object(repo, "get_task_files", get_task_files),
-            mock.patch.object(repo, "decide_task", decide_task), mock.patch.object(repo, "set_receipt_block", set_receipt_block),
+            mock.patch.object(repo, "decide_task", decide_task), mock.patch.object(repo, "set_task_block", set_task_block),
+            mock.patch.object(repo, "set_receipt_block", set_receipt_block),
             mock.patch.object(repo, "save_task_review_message", save_msg), mock.patch.object(repo, "task_review_messages", msgs_of),
             mock.patch.object(repo, "list_pending_task_reviews", pending),
             mock.patch.object(topup, "CHECK_BOT_TOKEN", "token"), mock.patch.object(topup, "receipt_targets", targets),
@@ -123,6 +129,13 @@ class ReviewFlowTests(unittest.TestCase):
         self.assertEqual([b.callback_data for row in kb for b in row], ["tkchk:ok:1", "tkchk:no:1", "tkchk:bl:1"])
         self.assertEqual(set(self.msgs[1]), {11, 22})
 
+    def test_comment_replaces_task_name_in_admin_message(self):
+        self.rows[1].comment = "Подписаться на канал и оставить отзыв"
+        self.deliver(targets=[11])
+        text = [c for c in self.check_bot.calls if c[0] == "send_message"][0][1][1]
+        self.assertIn("<b>Задание:</b> Подписаться на канал и оставить отзыв", text)
+        self.assertNotIn("Отзыв", text)
+
     def test_more_than_ten_screens_split_into_albums(self):
         self.files[1] = [(f"p{i}", "photo") for i in range(12)]
         self.deliver(targets=[11])
@@ -154,6 +167,7 @@ class ReviewFlowTests(unittest.TestCase):
         self.press("tkchk:bl:1")
         self.assertEqual(self.rows[1].status, "rejected")
         self.assertIn(555, self.blocked)
+        self.assertEqual(self.receipt_blocked, set())   # блокировка заданий не блокирует чеки об оплате
         self.assertEqual((self.notes, self.balance[555]), ([], 100))
         # уже разобранную заявку блокировка тоже касается
         self.blocked.clear()

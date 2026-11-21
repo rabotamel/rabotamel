@@ -66,11 +66,13 @@ class BlockTests(unittest.TestCase):
                 return True
             return f
 
-        self.orig = (getattr(sandbox.repo, "set_author_block", None), getattr(sandbox.repo, "set_receipt_block", None))
-        sandbox.repo.set_author_block, sandbox.repo.set_receipt_block = setter("suggest"), setter("receipts")
+        names = ("set_author_block", "set_receipt_block", "set_task_block")
+        self.orig = tuple(getattr(sandbox.repo, n, None) for n in names)
+        sandbox.repo.set_author_block, sandbox.repo.set_receipt_block, sandbox.repo.set_task_block = (
+            setter("suggest"), setter("receipts"), setter("tasks"))
 
     def tearDown(self):
-        for name, value in zip(("set_author_block", "set_receipt_block"), self.orig):
+        for name, value in zip(("set_author_block", "set_receipt_block", "set_task_block"), self.orig):
             if value is None:
                 delattr(sandbox.repo, name)
             else:
@@ -87,6 +89,14 @@ class BlockTests(unittest.TestCase):
         self.run_(sandbox.set_block(m, "t.me/bobby", "receipts", False, True))
         self.assertEqual(self.calls, [("suggest", 777, True), ("receipts", 123456, True), ("receipts", 777, False)])
 
+    def test_tasks_scope_is_separate_from_receipts(self):
+        m = Mgr()
+        r = self.run_(sandbox.set_block(m, "@bobby", "tasks", True, True))
+        self.assertEqual((r["scope"], r["blocked"], r["user_id"]), ("tasks", True, 777))
+        self.run_(sandbox.set_block(m, "777", "tasks", False, True))
+        self.assertEqual(self.calls, [("tasks", 777, True), ("tasks", 777, False)])   # чеки и предложка не затронуты
+        self.assertEqual(sandbox.BLOCK_SCOPES, ("suggest", "receipts", "tasks"))
+
     def test_unknown_id_is_allowed_unknown_username_is_not(self):
         m = Mgr(running=False)
         self.assertEqual(self.run_(sandbox.set_block(m, "555555", "suggest", True, True))["who"], "555555")
@@ -102,6 +112,70 @@ class BlockTests(unittest.TestCase):
                 self.run_(sandbox.set_block(m, *args))
             self.assertEqual(e.exception.status, status, args)
         self.assertEqual(self.calls, [])
+
+
+class AutoMessageTestButtonTests(unittest.TestCase):
+    """Вкладка «Автосообщения» -> «Проверить сообщение»: отправка сохранённого автосообщения конкретному пользователю."""
+
+    def setUp(self):
+        self.sent, self.removed, self.flushed = [], [], []
+        self.error = None
+
+        async def send_test(uid):
+            if self.error is not None:
+                raise self.error
+            self.sent.append(uid)
+            return {"promo": "ABCD1234", "percent": 15}
+
+        async def flush():
+            self.flushed.append(True)
+
+        self.mgr = Mgr()
+        self.mgr.stats.bot_id = 1
+        self.mgr.stats.remove = self.removed.append
+        self.mgr.stats.flush = flush
+        self.mgr.automsg = NS(send_test=send_test)
+
+    def run_(self, *args):
+        return asyncio.run(sandbox.test_automessage(self.mgr, *args))
+
+    def test_sends_to_resolved_user(self):
+        r = self.run_("@bobby", True)
+        self.assertEqual((r["ok"], r["user_id"], r["who"], r["promo"], r["percent"]), (True, 777, "@bob (777)", "ABCD1234", 15))
+        self.run_("777", True)
+        self.assertEqual(self.sent, [777, 777])
+
+    def test_needs_confirm_valid_target_known_user_and_running_bot(self):
+        for args, status in ((("@bobby", False), 400), (("not a user!", True), 400), (("@nobody1", True), 404),
+                             (("555555", True), 404)):       # как у остальных действий песочницы: только прошедшие капчу
+            with self.assertRaises(sandbox.SandboxError) as e:
+                self.run_(*args)
+            self.assertEqual(e.exception.status, status, args)
+        self.mgr._running = False
+        with self.assertRaises(sandbox.SandboxError) as e:
+            self.run_("777", True)
+        self.assertEqual(e.exception.status, 409)
+        self.assertEqual(self.sent, [])
+
+    def test_disabled_message_is_reported_as_error(self):
+        self.error = ValueError("Автосообщение выключено")
+        with self.assertRaises(sandbox.SandboxError) as e:
+            self.run_("777", True)
+        self.assertEqual((e.exception.status, e.exception.message), (400, "Автосообщение выключено"))
+
+    def test_user_who_blocked_the_bot_is_removed_like_in_candies(self):
+        from aiogram.exceptions import TelegramForbiddenError
+
+        self.error = TelegramForbiddenError("Forbidden: bot was blocked by the user")
+        with self.assertRaises(sandbox.SandboxError) as e:
+            self.run_("777", True)
+        self.assertEqual(e.exception.status, 409)
+        self.assertEqual((self.removed, self.flushed), ([777], [True]))
+        self.removed.clear()
+        self.error = TelegramForbiddenError("Forbidden: user is deactivated")   # другие 403 пользователя не удаляют
+        with self.assertRaises(sandbox.SandboxError):
+            self.run_("777", True)
+        self.assertEqual(self.removed, [])
 
 
 if __name__ == "__main__":

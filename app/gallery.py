@@ -44,6 +44,77 @@ PREMIUM_KEYS = tuple(PREMIUM_OPTIONS)
 PREMIUM_BACK_KEY = "b"   # callback_data «Назад» в меню премиума: «<premium_cb>:b»; тарифы: «<premium_cb>:3|7|forever»
 PREMIUM_INFO = "🌸 С премиумом вы сможете <b>бесплатно</b> смотреть, скачивать и пересылать видео из галереи 🌸"
 PREMIUM_BOUGHT = {"3": "на 3 дня", "7": "на неделю", "forever": "навсегда"}
+
+# --- Рандомизация меню премиума -------------------------------------------------------------------------------------
+# Варианты ТЕКСТОВ экрана премиума (эмодзи статичны, как и во всём проекте). Вариант каждого элемента выводится из back_cb
+# бота (он уникален для бота и не меняется): без записи в БД, у уже работающих ботов вариант просто «появляется» и дальше
+# стабилен. Первый вариант в каждом списке — прежний текст. Цены, callback_data и расчёт остатка времени НЕ рандомизируются.
+PREMIUM_TITLES: tuple[str, ...] = ("Премиум подписка", "Премиум-доступ", "VIP-подписка", "Премиум-статус")
+PREMIUM_TITLE_EMOJI: tuple[str, str] = ("💫", "💖")
+PREMIUM_INFOS: tuple[str, ...] = (
+    "С премиумом вы сможете <b>бесплатно</b> смотреть, скачивать и пересылать видео из галереи",
+    "Премиум открывает <b>бесплатный</b> просмотр видео из галереи, а также их скачивание и пересылку",
+    "Оформите премиум: видео из галереи — <b>бесплатно</b>, их можно скачивать и пересылать",
+    "Премиум даёт <b>бесплатный</b> просмотр роликов из галереи и возможность скачивать и пересылать их",
+)
+PREMIUM_INFO_EMOJI = "🌸"
+STATUS_HEADS: tuple[str, ...] = ("Статус", "Ваш статус", "Статус подписки", "Состояние подписки")
+STATUS_HEAD_EMOJI: tuple[str, str] = ("🔥", "🩷")
+# Формулировки статуса по трём состояниям; в «временном» обязательно {left} — остаток «Xд Yч Zм» подставляет premium_status.
+STATUS_NONE: tuple[str, ...] = ("У вас нет премиума", "Премиум не подключён", "Премиум пока не оформлен", "Подписка не активна")
+STATUS_TEMP: tuple[str, ...] = (
+    "Ваш премиум истечёт через {left}", "Премиум активен, осталось {left}",
+    "Подписка действует ещё {left}", "До конца премиума осталось {left}",
+)
+STATUS_FOREVER: tuple[str, ...] = (
+    "Ваш премиум безлимитный", "У вас безлимитный премиум", "Премиум активен навсегда", "Подписка бессрочная",
+)
+STATUS_EMOJI = {"none": "🤷🏻‍♀️", "temp": "❤️‍🔥", "forever": "💎"}
+# Подписи тарифов: «{эмодзи} {текст} ({цена}🍬) 👑»; цена берётся из PREMIUM_OPTIONS и не рандомизируется.
+TARIFF_TEXTS: dict[str, tuple[str, ...]] = {
+    "3": ("3 дня", "На 3 дня", "Три дня", "3 суток"),
+    "7": ("Неделя", "7 дней", "На неделю", "Семь дней"),
+    "forever": ("Безлимит", "Навсегда", "Без ограничений", "Бессрочно"),
+}
+TARIFF_EMOJI = {"3": "💕", "7": "🔥", "forever": "💎"}
+TARIFF_END_EMOJI = "👑"
+PREMIUM_BACK_TEXTS: tuple[str, ...] = ("Назад", "Вернуться", "Вернуться назад", "В галерею")
+PREMIUM_BACK_EMOJI = "⬅️"
+
+
+@dataclass(frozen=True)
+class PremiumUi:
+    """Готовые тексты меню премиума одного бота (см. premium_ui)."""
+    title: str          # без эмодзи
+    info: str           # без эмодзи, с <b>
+    status_head: str    # без эмодзи
+    status_none: str
+    status_temp: str    # с {left}
+    status_forever: str
+    tariffs: dict       # ключ тарифа -> текст без эмодзи и цены
+    back: str           # без эмодзи
+
+
+def _variant(cfg: "GalleryConfig", name: str, options: tuple[str, ...]) -> str:
+    """Стабильный для бота выбор варианта: каждый элемент выбирается независимо, по хэшу от back_cb бота."""
+    h = int(hashlib.sha256(f"premium-ui:{name}:{cfg.back_cb}".encode()).hexdigest()[:8], 16)
+    return options[h % len(options)]
+
+
+def premium_ui(cfg: "GalleryConfig | None") -> PremiumUi:
+    """Тексты меню премиума для бота; cfg=None — прежние (первые) варианты."""
+    if cfg is None:
+        pick = lambda name, options: options[0]  # noqa: E731
+    else:
+        pick = lambda name, options: _variant(cfg, name, options)  # noqa: E731
+    return PremiumUi(
+        title=pick("title", PREMIUM_TITLES), info=pick("info", PREMIUM_INFOS),
+        status_head=pick("status_head", STATUS_HEADS),
+        status_none=pick("status_none", STATUS_NONE), status_temp=pick("status_temp", STATUS_TEMP),
+        status_forever=pick("status_forever", STATUS_FOREVER),
+        tariffs={k: pick(f"tariff:{k}", TARIFF_TEXTS[k]) for k in PREMIUM_KEYS},
+        back=pick("back", PREMIUM_BACK_TEXTS),
+    )
 SUGGEST_LABEL = "📩 Предложка 🤍"  # эталон; у каждого бота своя подпись из suggest_ui (хранится в БД)
 
 DESCRIPTIONS: tuple[str, ...] = (
@@ -109,6 +180,16 @@ def validate_tables() -> None:
     for t in BUY_TEXTS:
         if f"({PRICE}{CANDY})" not in t:
             raise AssertionError("цена должна быть в каждом тексте кнопки покупки")
+    for words in (PREMIUM_TITLES, PREMIUM_INFOS, STATUS_HEADS, STATUS_NONE, STATUS_TEMP, STATUS_FOREVER, PREMIUM_BACK_TEXTS,
+                  *TARIFF_TEXTS.values()):
+        if len(set(words)) != len(words):
+            raise AssertionError("повторы в вариантах меню премиума")
+    if any("{left}" not in t for t in STATUS_TEMP) or any("{left}" in t for t in STATUS_NONE + STATUS_FOREVER):
+        raise AssertionError("{left} (остаток времени) нужен ровно во «временном» статусе")
+    if any("<b>бесплатн" not in t.lower() for t in PREMIUM_INFOS):
+        raise AssertionError("в описании премиума «бесплатно» выделяется <b>")
+    if set(TARIFF_TEXTS) != set(PREMIUM_KEYS) or any(f"{o['price']}" in t for k, o in PREMIUM_OPTIONS.items() for t in TARIFF_TEXTS[k]):
+        raise AssertionError("тарифы: ключи как в PREMIUM_OPTIONS, цена в текст не входит (её подставляет premium_label)")
 
 
 validate_tables()
@@ -296,26 +377,50 @@ def format_left(delta: timedelta) -> str:
     return f"{total // 86400}д {total % 86400 // 3600}ч {total % 3600 // 60}м"
 
 
-def premium_status(until: datetime | None, forever: bool, now: datetime | None = None) -> str:
+def premium_status(
+    until: datetime | None, forever: bool, now: datetime | None = None, ui: PremiumUi | None = None,
+) -> str:
+    """Статус подписки: безлимит / временный (остаток «Xд Yч Zм» считается здесь) / нет премиума; формулировки — из ui."""
+    ui = ui or premium_ui(None)
     now = now or datetime.now(timezone.utc)
     if forever:
-        return "💎 Ваш премиум безлимитный"
+        return f"{STATUS_EMOJI['forever']} {ui.status_forever}"
     if premium_active(until, False, now):
         if until.tzinfo is None:
             until = until.replace(tzinfo=timezone.utc)
-        return f"❤️‍🔥 Ваш премиум истечёт через {format_left(until - now)}"
-    return "🤷🏻‍♀️ У вас нет премиума"
+        return f"{STATUS_EMOJI['temp']} {ui.status_temp.format(left=format_left(until - now))}"
+    return f"{STATUS_EMOJI['none']} {ui.status_none}"
+
+
+def premium_title(ui: PremiumUi) -> str:
+    return label(ui.title, PREMIUM_TITLE_EMOJI)
+
+
+def premium_info(ui: PremiumUi) -> str:
+    return f"{PREMIUM_INFO_EMOJI} {ui.info} {PREMIUM_INFO_EMOJI}"
+
+
+def tariff_label(ui: PremiumUi, key: str) -> str:
+    """«💕 3 дня (650🍬) 👑»: цена из PREMIUM_OPTIONS."""
+    return f"{TARIFF_EMOJI[key]} {ui.tariffs[key]} ({PREMIUM_OPTIONS[key]['price']}{CANDY}) {TARIFF_END_EMOJI}"
+
+
+def premium_back_label(ui: PremiumUi) -> str:
+    return f"{PREMIUM_BACK_EMOJI} {ui.back}"
 
 
 def render_premium(
     cfg: GalleryConfig, greeting_template: str, balance: int, until: datetime | None, forever: bool,
     now: datetime | None = None,
 ) -> str:
-    """Экран «Премиум подписка» (HTML): заголовок = подпись кнопки этого бота, описание, статус и баланс."""
+    """Экран премиума (HTML): заголовок, описание преимуществ, блок статуса и баланс. Тексты заголовка, описания, блока
+    статуса и самого статуса (нет / временный / безлимит) — свои у каждого бота (premium_ui); баланс не рандомизируется."""
+    ui = premium_ui(cfg)
     return (
-        f"<b>{html.escape(cfg.premium_label, quote=False)}</b>\n\n"
-        f"{PREMIUM_INFO}\n\n"
-        f"<b>🔥 Статус 🩷</b>\n{premium_status(until, forever, now)}\n\n"
+        f"<b>{html.escape(premium_title(ui), quote=False)}</b>\n\n"
+        f"{premium_info(ui)}\n\n"
+        f"<b>{STATUS_HEAD_EMOJI[0]} {html.escape(ui.status_head, quote=False)} {STATUS_HEAD_EMOJI[1]}</b>\n"
+        f"{premium_status(until, forever, now, ui)}\n\n"
         f"{balance_line(greeting_template, str(int(balance)))}"
     )
 
@@ -334,9 +439,10 @@ def parse_premium_key(cfg: GalleryConfig, data: str | None) -> str | None:
 
 
 def premium_rows(cfg: GalleryConfig) -> list[list[tuple[str, str]]]:
-    """Меню премиума: три тарифа по одной кнопке в ряд и «Назад» (в галерею)."""
-    rows = [[(PREMIUM_OPTIONS[k]["label"], premium_cb(cfg, k))] for k in PREMIUM_KEYS]
-    rows.append([(BACK_LABEL, premium_cb(cfg, PREMIUM_BACK_KEY))])
+    """Меню премиума: три тарифа по одной кнопке в ряд и «Назад» (в галерею). Тексты — из premium_ui, callback_data прежние."""
+    ui = premium_ui(cfg)
+    rows = [[(tariff_label(ui, k), premium_cb(cfg, k))] for k in PREMIUM_KEYS]
+    rows.append([(premium_back_label(ui), premium_cb(cfg, PREMIUM_BACK_KEY))])
     return rows
 
 

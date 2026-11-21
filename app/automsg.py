@@ -55,6 +55,21 @@ class AutoMessenger:
                 overdue += 1
             self._schedule(user_id, left)
 
+    async def send_test(self, user_id: int) -> dict:
+        """Проверка с сайта: шлёт автосообщение СЕЙЧАС, в обход очереди и 30-минутного таймера. Всё как в бою: настройки
+        читаются свежими, промокод выдаётся при наличии {promo} (прежний код пользователя заменяется новым и скидка
+        сбрасывается), сообщение идёт с картинкой бота. Очередь не трогаем: если человек ещё ждёт автосообщение, оно
+        придёт в своё время. ValueError — автосообщение выключено; ошибки Telegram пробрасываются вызывающему."""
+        cfg = await promo.load_settings(fresh=True)
+        if not cfg.enabled:
+            raise ValueError("Автосообщение выключено: напишите сообщение и нажмите «Сохранить»")
+        code = None
+        if promo.has_variable(cfg.text) and cfg.percent:
+            code = await repo.issue_promo(self.stats.bot_id, user_id, cfg.percent)
+        text = promo.render(cfg.text, self.seed, code, cfg.percent)
+        await messaging.send_message(self.bot, user_id, text, self.profile.message_image_url)
+        return {"promo": code, "percent": cfg.percent}
+
     async def on_captcha_passed(self, user_id: int) -> None:
         """Пользователь прошёл капчу: если автосообщение включено, ставим его в очередь. Ошибки БД на капчу не влияют."""
         try:

@@ -10,7 +10,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from . import (
-    captcha, gallery, greeting, messaging, moderation, promo, repo, shop, shop_buttons, suggest, task_review, tasks, topup,
+    captcha, comeback, gallery, greeting, messaging, moderation, promo, repo, shop, shop_buttons, suggest, task_review, tasks, topup,
     video_pool,
 )
 from .metrics import metrics
@@ -447,6 +447,13 @@ def build_router(
         target = captcha.target_for(texts.captcha, profile.token, user_id, nonce) if nonce else None
         if captcha.is_correct(texts.captcha, captcha.parse_answer(call.data), target):
             shown.pop(user_id, None)
+            # вернулся ли после смены бота (проходил капчу у другого бота): проверяем ДО записи в историю этого бота
+            returning = False
+            try:
+                if (await comeback.load_settings()).enabled:
+                    returning = await repo.returned_after_switch(stats.bot_id, user_id)
+            except Exception:
+                log.exception("Не удалось проверить возврат пользователя %s после смены бота", user_id)
             # Только здесь пользователь становится «новым»: add() синхронный, поэтому второе одновременное
             # нажатие уже увидит has() == True и ничего не продублирует.
             if stats.add(user_id, call.from_user.username):
@@ -454,6 +461,8 @@ def build_router(
                 await stats.flush()  # одна транзакция на всех, кто прошёл одновременно
                 await ensure_menu_keyboard(bot, user_id, force=True)  # кнопка «Меню» у клавиатуры — после капчи всегда
                 await send_greeting(bot, user_id, 0)
+                if returning:
+                    await send_return_notice(bot, user_id)   # после приветствия; включает удвоение наград на 24 часа
                 await grant_referral(bot, user_id)   # пришёл по реферальной ссылке — награда пригласившему
                 if automsg is not None:
                     await automsg.on_captcha_passed(user_id)   # автосообщение уйдёт через 30 минут (app/automsg.py)
@@ -717,6 +726,31 @@ def build_router(
     def seed_of_bot() -> str:
         return str(getattr(profile, "token", None) or stats.bot_id)
 
+    async def boost_left_of(user_id: int) -> float | None:
+        """Сколько секунд ещё действует «УДВОЕНИЕ наград» пользователя; None — не действует (или БД не ответила)."""
+        try:
+            return comeback.boost_left(await repo.get_reward_boost(stats.bot_id, user_id))
+        except Exception:
+            log.exception("Не удалось прочитать удвоение наград пользователя %s", user_id)
+            return None
+
+    async def send_return_notice(bot: Bot, user_id: int) -> None:
+        """Вернулся после смены бота: после приветствия — уведомление с сайта, и с его отправки 24 часа награды за задания ×2."""
+        try:
+            cfg = await comeback.load_settings()
+            if not cfg.enabled:
+                return
+            await messaging.send_message(
+                bot, user_id, comeback.render(cfg.text, seed_of_bot()), profile.message_image_url,
+            )
+            await repo.set_reward_boost(stats.bot_id, user_id, datetime.now(timezone.utc) + comeback.BOOST_DURATION)
+        except TelegramForbiddenError as e:
+            await on_forbidden(e, user_id)
+        except TelegramAPIError as e:
+            log.warning("Уведомление о возврате пользователю %s не доставлено: %s", user_id, e)
+        except Exception:
+            log.exception("Уведомление о возврате пользователю %s не отправлено", user_id)
+
     async def grant_referral(bot: Bot, invited_id: int) -> None:
         """Новичок прошёл капчу по реферальной ссылке: пригласивший получает награду (один раз за друга)."""
         referrer = ref_pending.pop(invited_id, None)
@@ -775,8 +809,9 @@ def build_router(
         items = [tasks.task_from_row(r) for r in await repo.list_tasks(limit=tasks.MAX_TASKS)]
         # статусы нужны только для цвета кнопок одноразовых заданий (синяя — награда уже получена)
         statuses = await repo.get_task_statuses(stats.bot_id, user_id) if any(t.one_time for t in items) else {}
-        text = tasks.render_menu(texts.tasks_menu, texts.deco, balance)
-        markup = tasks.build_menu_keyboard(texts.tasks_menu, items, daily_left, statuses)
+        boost_left = await boost_left_of(user_id)
+        text = tasks.render_menu(texts.tasks_menu, texts.deco, balance, boost_left)
+        markup = tasks.build_menu_keyboard(texts.tasks_menu, items, daily_left, statuses, bool(boost_left))
         if edit:
             await edit_screen(call, bot, user_id, text, markup)
         else:
@@ -787,7 +822,7 @@ def build_router(
         completion = await repo.get_completion(stats.bot_id, user_id, task.id)
         status = tasks.card_status(task, completion.status if completion else None)
         await show_screen(
-            call, bot, user_id, tasks.render_task(texts.tasks_menu, task, seed_of_bot(), status),
+            call, bot, user_id, tasks.render_task(texts.tasks_menu, task, seed_of_bot(), status, await boost_left_of(user_id)),
             tasks.build_task_keyboard(texts.tasks_menu, task, status),
         )
 
@@ -818,7 +853,7 @@ def build_router(
         task = tasks.task_from_row(row)
         count = len(task_shots.get(user_id, ()))
         await show_screen(
-            call, bot, user_id, tasks.render_send_prompt(texts.tasks_menu, task, count, notice),
+            call, bot, user_id, tasks.render_send_prompt(texts.tasks_menu, task, count, notice, await boost_left_of(user_id)),
             tasks.build_collect_keyboard(texts.tasks_menu, task, count),
         )
 
@@ -879,15 +914,17 @@ def build_router(
         if not shots:
             await safe_answer(call, tasks.SHOTS_EMPTY, alert=True)
             return
-        if await repo.is_receipt_blocked(user_id):   # заблокировали, пока человек готовил скрины
+        if await repo.is_task_blocked(user_id):   # заблокировали, пока человек готовил скрины
             clear_task_wait(user_id)
             await safe_answer(call, tasks.TASK_BLOCKED_ALERT, alert=True)
             await show_free_menu(call, bot, user_id)
             return
         clear_task_wait(user_id)   # до обращения к БД: второе нажатие не отправит набор повторно
+        # награда запоминается в заявке в момент отправки: при действующем удвоении — ×2 (админ подтвердит именно эту сумму)
+        reward = tasks.boosted(row.reward) if await boost_left_of(user_id) else int(row.reward)
         try:
             cid = await repo.submit_task_screenshot(
-                stats.bot_id, user_id, row.id, int(row.reward), shots, stats_username(call.from_user),
+                stats.bot_id, user_id, row.id, reward, shots, stats_username(call.from_user),
                 repeatable=not bool(getattr(row, "one_time", True)),
             )
         except Exception:
@@ -959,25 +996,29 @@ def build_router(
             await show_task_card(call, bot, user_id, row)   # на проверке — карточка с актуальным статусом
             return
         if row.require_screenshot:   # «send» (и «done» по кнопке старого сообщения, если скриншот теперь нужен)
-            if await repo.is_receipt_blocked(user_id):
+            if await repo.is_task_blocked(user_id):
                 await safe_answer(call, tasks.TASK_BLOCKED_ALERT, alert=True)
                 return
             await safe_answer(call)
             task_wait[user_id] = row.id
             await show_collect_screen(call, bot, user_id, row)
             return
+        reward = tasks.boosted(row.reward) if await boost_left_of(user_id) else int(row.reward)
         balance = await repo.complete_task_instant(
-            stats.bot_id, user_id, row.id, int(row.reward), stats_username(call.from_user), repeatable=not task.one_time
+            stats.bot_id, user_id, row.id, reward, stats_username(call.from_user), repeatable=not task.one_time
         )
         if balance is None:
             await safe_answer(call)
             await show_task_card(call, bot, user_id, row)
             return
         await show_free_menu(call, bot, user_id, balance)
-        await safe_answer(call, tasks.fill(cfg.text("done_ok"), reward=int(row.reward)), alert=True)
+        await safe_answer(call, tasks.fill(cfg.text("done_ok"), reward=reward), alert=True)
 
     async def notify_task_decision(user_id: int, key: str, task_name: str, reward: int) -> None:
         """Решение админа из бота для чеков (app/task_review.py): пользователю пишет ЭТОТ бот-магазин, текст — его вариант."""
+        if key == "rejected":   # «Отклонить»: фиксированный текст заказчика, одинаковый у всех ботов и заданий
+            await reply(bot, user_id, tasks.REJECTED_NOTICE)
+            return
         name = html.escape(task_name, quote=False)
         await reply(bot, user_id, tasks.fill(texts.tasks_menu.text(key), task=name, reward=reward))
 

@@ -77,6 +77,7 @@ MAX_REWARD = 1_000_000_000
 MAX_TASKS = 80          # у Telegram не больше 100 кнопок под сообщением; две заняты подарком и ссылкой, одна — «Назад»
 MAX_DESC = 3000         # сколько символов описания пользователь реально увидит (после выбора вариантов [а/б], без значков)
 MAX_DESC_RAW = 8000     # лимит поля на сайте «как введено»
+MAX_COMMENT = 500       # комментарий к заданию для админа (обычный текст, пользователю не показывается)
 
 # ---------- списки текстов (индексы только добавляются в конец) ----------
 # Подписи кнопок: пара эмодзи «левый ... правый» статична, по seed подбирается только текст.
@@ -140,6 +141,12 @@ REJECTED = (
     "Задание «{task}» отклонено. Вы можете отправить скриншот ещё раз.",
     "Скриншот по заданию «{task}» не принят. Попробуйте отправить его снова.",
     "Задание «{task}» не засчитано. Отправьте скриншот повторно.",
+)
+# Что видит пользователь, когда админ нажал «Отклонить» под его заданием. Фиксированный текст заказчика (не рандомизируется,
+# одинаков у всех ботов и не зависит от названия задания); вид `rejected` в `tasks_menu` оставлен только ради сохранённых конфигов.
+REJECTED_NOTICE = (
+    "❌ Запрос о выполнении задания был отклонён, так как задание выполнено не полностью, "
+    "либо Вы прикрепили не все скриншоты."
 )
 STATUS_PENDING = ("Скриншот на проверке", "Задание на проверке", "Ожидает проверки")
 STATUS_DONE = ("Задание уже выполнено", "Вы уже выполнили это задание", "Награда за задание получена")
@@ -307,13 +314,14 @@ class Task:
     reward: int
     require_screenshot: bool
     one_time: bool = True   # награду можно получить один раз; после неё кнопка синяя, а повторить нельзя
+    comment: str = ""       # пояснение для админа (в боте для чеков вместо названия); пользователь его не видит
 
 
 def task_from_row(row) -> Task:
     return Task(
         id=int(row.id), button_text=str(row.button_text), about=str(row.about or ""),
         reward=int(row.reward), require_screenshot=bool(row.require_screenshot),
-        one_time=bool(getattr(row, "one_time", True)),
+        one_time=bool(getattr(row, "one_time", True)), comment=str(getattr(row, "comment", "") or ""),
     )
 
 
@@ -363,6 +371,14 @@ def normalize_description(value: str | None) -> str:
     return about
 
 
+def normalize_comment(value: str | None) -> str:
+    """Комментарий для админа — необязательный обычный текст (без оформления: в боте для чеков он экранируется)."""
+    text = (value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(text) > MAX_COMMENT:
+        raise ValueError(f"Комментарий к заданию — не длиннее {MAX_COMMENT} символов")
+    return text
+
+
 # ---------- время, ссылка, разбор /start ----------
 
 def fmt_left(seconds: float) -> str:
@@ -389,19 +405,70 @@ def parse_start_referrer(text: str | None) -> int | None:
     return int(m.group(1)) if m and int(m.group(1)) > 0 else None
 
 
+# ---------- «УДВОЕНИЕ наград» (app/comeback.py) ----------
+# Пока действует, награды за задания (не за ежедневный подарок и не за реферала) ×BOOST_FACTOR: в меню заданий внизу идёт строка с
+# остатком времени, а награда в кнопке и заголовке задания показана как «<зачёркнутая старая> новая».
+BOOST_FACTOR = 2
+BOOST_LINE = "🔥 Действует УДВОЕНИЕ суммы наград. Конец через: {left}"
+_STRIKE = "\u0336"   # объединяемый «длинный штрих»: кнопки Telegram не поддерживают разметку, зачёркивание делаем знаком
+
+
+def boosted(reward: int) -> int:
+    return int(reward) * BOOST_FACTOR
+
+
+def fmt_boost_left(seconds: float) -> str:
+    """«23ч 59м»: всегда часы и минуты (минуты округляются вверх, меньше минуты не показываем)."""
+    total = max(int(-(-float(seconds) // 60)), 1)
+    hours, minutes = divmod(total, 60)
+    return f"{hours}ч {minutes}м"
+
+
+def boost_line_html(seconds: float) -> str:
+    """Строка внизу меню (жирным): «🔥 Действует УДВОЕНИЕ суммы наград. Конец через: 23ч 59м»."""
+    return f"<b>{_esc(fill(BOOST_LINE, left=fmt_boost_left(seconds)))}</b>"
+
+
+def _reward_re(reward: int) -> "re.Pattern[str]":
+    return re.compile(rf"(?<![\d.,])({int(reward)})(\s?){re.escape(CANDY)}")
+
+
+def strike(text: str) -> str:
+    return "".join(ch + _STRIKE for ch in text)
+
+
+def boost_button_text(button_text: str, reward: int) -> str:
+    """Подпись кнопки при удвоении: «200🍬» -> «2̶0̶0̶🍬 400🍬» (старая сумма зачёркнута, рядом новая). Награда в тексте кнопки — это то,
+    что владелец сам написал (например, «Подписаться (200🍬)»); если суммы задания в подписи нет, текст не меняется."""
+    return _reward_re(reward).sub(
+        lambda m: f"{strike(m.group(1))}{m.group(2)}{CANDY} {boosted(reward)}{m.group(2)}{CANDY}", button_text
+    )
+
+
+def boost_title_html(button_text: str, reward: int) -> str:
+    """Заголовок карточки задания (HTML, экранирован): «200🍬» -> «<s>200🍬</s> 400🍬»."""
+    return _reward_re(reward).sub(
+        lambda m: f"<s>{m.group(1)}{m.group(2)}{CANDY}</s> {boosted(reward)}{m.group(2)}{CANDY}", _esc(button_text)
+    )
+
+
 # ---------- тексты сообщений ----------
 
 def _esc(text: str) -> str:
     return html.escape(text, quote=False)
 
 
-def render_menu(cfg: TasksConfig, deco, balance: int) -> str:
-    """Меню раздела: заголовок жирным, подсказка в общем маркере бота, баланс из БД."""
-    return (
+def render_menu(cfg: TasksConfig, deco, balance: int, boost_left: float | None = None) -> str:
+    """Меню раздела: заголовок жирным, подсказка в общем маркере бота, баланс из БД; при действующем удвоении наград
+    (boost_left — секунд до конца) внизу ещё строка с остатком времени."""
+    text = (
         f"<b>{_esc(cfg.heading)}</b>\n\n"
         f"{deco.wrap(_esc(cfg.text('hint')))}\n\n"
         f"{BALANCE_EMOJI} Ваш баланс: {int(balance)}{CANDY}"
     )
+    if boost_left:
+        text += f"\n\n{boost_line_html(boost_left)}"
+    return text
 
 
 def render_ref(cfg: TasksConfig, link: str, count: int, reward: int = REFERRAL_REWARD) -> str:
@@ -414,31 +481,42 @@ def render_ref(cfg: TasksConfig, link: str, count: int, reward: int = REFERRAL_R
     )
 
 
-def render_task(cfg: TasksConfig, task: Task, seed: str, status: str | None = None) -> str:
-    """Карточка задания: название жирным, описание из БД (оформление и варианты — как у товаров), награда, статус."""
-    text = f"<b>{_esc(task.button_text)}</b>"
+def render_task(cfg: TasksConfig, task: Task, seed: str, status: str | None = None, boost_left: float | None = None) -> str:
+    """Карточка задания: название жирным, описание из БД (оформление и варианты — как у товаров), награда, статус.
+    При удвоении наград: сумма в названии «<s>200🍬</s> 400🍬», в строке награды — новая сумма, внизу — строка с остатком времени."""
+    title = boost_title_html(task.button_text, task.reward) if boost_left else _esc(task.button_text)
+    text = f"<b>{title}</b>"
     about = shop.format_about(task.about, seed, task.id)
     if about:
         text += f"\n\n{about}"
-    text += f"\n\n{BALANCE_EMOJI} {_esc(fill(cfg.text('reward_line'), reward=task.reward))}"
+    reward = boosted(task.reward) if boost_left else task.reward
+    text += f"\n\n{BALANCE_EMOJI} {_esc(fill(cfg.text('reward_line'), reward=reward))}"
     if status == "approved":
         text += f"\n\n✅ {_esc(cfg.text('status_done'))}"
         if task.one_time:
             text += f"\n{_esc(ONE_TIME_NOTE)}"
     elif status == "pending":
         text += f"\n\n🤍 {_esc(cfg.text('status_pending'))}"
+    if boost_left:
+        text += f"\n\n{boost_line_html(boost_left)}"
     return text
 
 
-def render_send_prompt(cfg: TasksConfig, task: Task, count: int = 0, notice: str | None = None) -> str:
+def render_send_prompt(
+    cfg: TasksConfig, task: Task, count: int = 0, notice: str | None = None, boost_left: float | None = None
+) -> str:
     """Экран приёма скриншотов: название, подсказка (сколько можно прислать), счётчик принятых и, если нужно, замечание
-    (например, достигнут предел)."""
-    text = f"<b>{_esc(task.button_text)}</b>\n\n{_esc(fill(SHOTS_PROMPT, max=MAX_SHOTS))}"
-    text += f"\n\n{BALANCE_EMOJI} {_esc(fill(cfg.text('reward_line'), reward=task.reward))}"
+    (например, достигнут предел). При удвоении наград — как в карточке задания."""
+    title = boost_title_html(task.button_text, task.reward) if boost_left else _esc(task.button_text)
+    reward = boosted(task.reward) if boost_left else task.reward
+    text = f"<b>{title}</b>\n\n{_esc(fill(SHOTS_PROMPT, max=MAX_SHOTS))}"
+    text += f"\n\n{BALANCE_EMOJI} {_esc(fill(cfg.text('reward_line'), reward=reward))}"
     if count > 0:
         text += f"\n\n📎 {_esc(fill(SHOTS_COUNTER, count=count, max=MAX_SHOTS))}"
     if notice:
         text += f"\n{_esc(notice)}"
+    if boost_left:
+        text += f"\n\n{boost_line_html(boost_left)}"
     return text
 
 
@@ -472,11 +550,14 @@ def daily_button_label(cfg: TasksConfig, left: float | None) -> str:
     return text + cooldown_suffix(left)
 
 
-def menu_rows(cfg: TasksConfig, tasks: list[Task], daily_left: float | None = None) -> list[list[tuple[str, str]]]:
+def menu_rows(
+    cfg: TasksConfig, tasks: list[Task], daily_left: float | None = None, boost: bool = False
+) -> list[list[tuple[str, str]]]:
     """Ряды меню [(подпись, callback_data)] без aiogram (для тестов): подарок, ссылка, задания по порядку, «Назад».
-    daily_left — сколько секунд осталось до следующего подарка (None / 0 — можно забирать)."""
+    daily_left — сколько секунд осталось до следующего подарка (None / 0 — можно забирать). boost — действует удвоение наград:
+    сумма задания в подписи кнопки показана как «зачёркнутая старая + новая»."""
     rows = [[(daily_button_label(cfg, daily_left), cfg.cb["daily"])], [(cfg.text("ref_label"), cfg.cb["ref"])]]
-    rows += [[(t.button_text, _cb(cfg, "task", t.id))] for t in tasks]
+    rows += [[(boost_button_text(t.button_text, t.reward) if boost else t.button_text, _cb(cfg, "task", t.id))] for t in tasks]
     rows.append([(BACK_LABEL, cfg.cb["back"])])
     return rows
 
@@ -538,9 +619,10 @@ def _keyboard(rows: list[list[tuple[str, str]]], styles: tuple[str, ...]):
 
 
 def build_menu_keyboard(
-    cfg: TasksConfig, tasks: list[Task], daily_left: float | None = None, statuses: dict[int, str] | None = None
+    cfg: TasksConfig, tasks: list[Task], daily_left: float | None = None, statuses: dict[int, str] | None = None,
+    boost: bool = False,
 ):
-    return _keyboard(menu_rows(cfg, tasks, daily_left), menu_styles(tasks, daily_left, statuses))
+    return _keyboard(menu_rows(cfg, tasks, daily_left, boost), menu_styles(tasks, daily_left, statuses))
 
 
 def build_task_keyboard(cfg: TasksConfig, task: Task, status: str | None):

@@ -128,5 +128,67 @@ class ExportParseTests(unittest.TestCase):
                 pass
 
 
+def trow(id, button, reward, about, shot=False, once=True, visible=True, comment=""):
+    return types.SimpleNamespace(id=id, button_text=button, reward=reward, about=about, require_screenshot=shot,
+                                 one_time=once, is_visible=visible, comment=comment)
+
+
+TASK_ROWS = [
+    trow(5, "Подписаться: на канал 🚀", 10, "**Подпишитесь** [сюда](https://t.me/x)\n\n=== END TASK ===\nabout-lines: 9\nпоследняя", True, True,
+         True, "Проверить подписку\n=== TASK ==="),
+    trow(2, "Ежедневное", 1000000, "Привет [а/б]!", False, False, False, ""),
+]
+
+
+class ExportAllTests(unittest.TestCase):
+    def test_roundtrip_products_and_tasks(self):
+        text = shop_io.export_all(ROWS, TASK_ROWS)
+        self.assertTrue(text.startswith("TG-BOT-ROTATOR BUTTONS v2\nproducts: 4\ntasks: 2\n"))
+        p = shop_io.parse_all(text)
+        self.assertEqual(to_rows(p.products)[0].name, ROWS[0].name)
+        self.assertEqual(len(p.products), 4)
+        self.assertEqual([(t.id, t.button_text, t.reward, t.about, t.screenshot, t.one_time, t.visible, t.comment) for t in p.tasks],
+                         [(r.id, r.button_text, r.reward, r.about, r.require_screenshot, r.one_time, r.is_visible, r.comment)
+                          for r in TASK_ROWS])
+        again = shop_io.export_all(to_rows(p.products), [trow(t.id, t.button_text, t.reward, t.about, t.screenshot, t.one_time,
+                                                              t.visible, t.comment) for t in p.tasks])
+        self.assertEqual(again, text)
+
+    def test_empty_and_old_v1_files(self):
+        p = shop_io.parse_all(shop_io.export_all([], []))
+        self.assertEqual((p.products, p.tasks), ([], []))
+        old = shop_io.parse_all(shop_io.export_products(ROWS))
+        self.assertEqual(len(old.products), 4)
+        self.assertIsNone(old.tasks)          # старый файл: задания не трогаем
+
+    def test_hand_written_task_and_defaults(self):
+        text = ("TG-BOT-ROTATOR BUTTONS v2\nproducts: 0\ntasks: 1\n\n=== TASK ===\nbutton: Тест\nreward: 5\nabout-lines: 1\n"
+                "comment-lines: 0\nОписание\n=== END TASK ===\n")
+        t = shop_io.parse_all(text).tasks[0]
+        self.assertEqual((t.id, t.screenshot, t.one_time, t.visible, t.comment), (None, False, True, True, ""))
+
+    def test_broken_task_files_rejected(self):
+        good = shop_io.export_all(ROWS[:1], TASK_ROWS)
+        bad = [
+            good.replace("tasks: 2", "tasks: 3"),
+            good.replace("reward: 10", "reward: 0"),
+            good.replace("reward: 10", "reward: abc"),
+            good.replace("id: 2\nbutton", "id: 5\nbutton"),           # повтор id
+            good.replace("screenshot: yes", "screenshot: maybe"),
+            good.replace("about-lines: 5", "about-lines: 50"),
+            good[: good.index("=== TASK ===") + 40],                    # обрезан
+            "TG-BOT-ROTATOR BUTTONS v2\nproducts: 0\n",              # нет ни строки tasks, ни заданий — не стираем задания молча
+        ]
+        for text in bad:
+            with self.assertRaises(ValueError, msg=text[:80]):
+                shop_io.parse_all(text)
+        with self.assertRaises(ValueError):
+            shop_io.parse_all(good.replace("about-lines: 5", "about-lines: 4"))
+
+    def test_task_block_not_allowed_in_v1(self):
+        with self.assertRaises(ValueError):
+            shop_io.parse_products(shop_io.export_all([], TASK_ROWS))
+
+
 if __name__ == "__main__":
     unittest.main()

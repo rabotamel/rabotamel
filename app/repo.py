@@ -25,6 +25,7 @@ from .models import (
     TaskReviewMessage,
     UserPremium,
     ReceiptBlockedUser,
+    TaskBlockedUser,
     STATUS_ACTIVE,
     STATUS_BLOCKED,
     STATUS_QUEUED,
@@ -557,6 +558,16 @@ async def set_receipt_block(user_id: int, blocked: bool, by: int | None = None) 
     return await _set_block(ReceiptBlockedUser, user_id, blocked, by)
 
 
+async def is_task_blocked(user_id: int) -> bool:
+    async with db.SessionLocal() as s:
+        return (await s.execute(select(TaskBlockedUser.user_id).where(TaskBlockedUser.user_id == user_id))).first() is not None
+
+
+async def set_task_block(user_id: int, blocked: bool, by: int | None = None) -> bool:
+    """Блокировка/разблокировка отправки скриншотов заданий (отдельный список: чеки об оплате и «Предложку» не затрагивает)."""
+    return await _set_block(TaskBlockedUser, user_id, blocked, by)
+
+
 async def create_submission(
     bot_id: int, user_id: int, username: str | None, file_id: str, file_unique_id: str, duration: int
 ) -> Submission:
@@ -784,27 +795,79 @@ async def reorder_shop_products(ids: list[int]) -> None:
             r.position = pos
 
 
+async def _replace_products_tx(s, items: list) -> None:
+    """Тело replace_shop_products внутри уже открытой транзакции."""
+    await s.execute(delete(ShopProduct))
+
+    def make(pos, it):
+        return ShopProduct(id=it.id, name=it.name, price=it.price, about=it.about, color=it.color,
+                           position=pos, is_visible=it.visible)
+    s.add_all([make(pos, it) for pos, it in enumerate(items, start=1) if it.id is not None])
+    await s.flush()
+    # счётчик id — за максимальный сохранённый id, чтобы новые товары не столкнулись с восстановленными
+    await s.execute(text(
+        "SELECT setval(pg_get_serial_sequence('shop_products', 'id'), GREATEST(COALESCE(MAX(id), 0), 1), "
+        "COALESCE(MAX(id), 0) >= 1) FROM shop_products"
+    ))
+    s.add_all([make(pos, it) for pos, it in enumerate(items, start=1) if it.id is None])
+    await s.flush()
+
+
+async def _sync_tasks_tx(s, items: list) -> None:
+    """Задания из файла (shop_io.TaskItem) -> таблица bonus_tasks в порядке файла, внутри открытой транзакции.
+    Задания с id, который уже есть в БД, ОБНОВЛЯЮТСЯ на месте (отметки выполнения и заявки на проверку сохраняются);
+    id, которого нет в БД, создаются с этим же id; без id — получают новые; задания, которых нет в файле, удаляются
+    (вместе с отметками выполнения — каскадом)."""
+    existing = {r.id: r for r in (await s.execute(select(BonusTask).with_for_update())).scalars()}
+    keep = {it.id for it in items if it.id is not None}
+    for tid, row in existing.items():
+        if tid not in keep:
+            await s.delete(row)
+    await s.flush()
+
+    def fill(row, pos, it):
+        row.button_text, row.about, row.reward = it.button_text, it.about, it.reward
+        row.require_screenshot, row.one_time, row.comment = it.screenshot, it.one_time, it.comment
+        row.is_visible, row.position = it.visible, pos
+        return row
+    for pos, it in enumerate(items, start=1):
+        if it.id is not None:
+            row = existing.get(it.id)
+            if row is not None:
+                fill(row, pos, it)
+            else:
+                s.add(fill(BonusTask(id=it.id), pos, it))
+    await s.flush()
+    await s.execute(text(
+        "SELECT setval(pg_get_serial_sequence('bonus_tasks', 'id'), GREATEST(COALESCE(MAX(id), 0), 1), "
+        "COALESCE(MAX(id), 0) >= 1) FROM bonus_tasks"
+    ))
+    for pos, it in enumerate(items, start=1):
+        if it.id is None:
+            s.add(fill(BonusTask(), pos, it))
+    await s.flush()
+
+
 async def replace_shop_products(items) -> int:
     """Восстановление каталога из файла: ВСЕ текущие товары заменяются товарами из `items` (shop_io.Item) в их порядке —
     одной транзакцией: при любой ошибке текущий каталог остаётся нетронутым. Товары с id сохраняют его (от id зависят
     выбор вариантов и кнопки), товары без id получают новые. Возвращает число товаров."""
     items = list(items)
     async with db.SessionLocal() as s, s.begin():
-        await s.execute(delete(ShopProduct))
-        def make(pos, it):
-            return ShopProduct(id=it.id, name=it.name, price=it.price, about=it.about, color=it.color,
-                               position=pos, is_visible=it.visible)
-        with_id = [make(pos, it) for pos, it in enumerate(items, start=1) if it.id is not None]
-        s.add_all(with_id)
-        await s.flush()
-        # счётчик id — за максимальный сохранённый id, чтобы новые товары не столкнулись с восстановленными
-        await s.execute(text(
-            "SELECT setval(pg_get_serial_sequence('shop_products', 'id'), GREATEST(COALESCE(MAX(id), 0), 1), "
-            "COALESCE(MAX(id), 0) >= 1) FROM shop_products"
-        ))
-        s.add_all([make(pos, it) for pos, it in enumerate(items, start=1) if it.id is None])
-        await s.flush()
+        await _replace_products_tx(s, items)
     return len(items)
+
+
+async def restore_buttons(products: list, task_items: list | None) -> tuple[int, int | None]:
+    """Восстановление всей вкладки «Кнопки в боте» из файла экспорта ОДНОЙ транзакцией: товары заменяются, задания
+    синхронизируются (см. _sync_tasks_tx). task_items=None (файл старого формата) — задания не затрагиваются.
+    При любой ошибке не меняется ничего. Возвращает (число товаров, число заданий или None)."""
+    products = list(products)
+    async with db.SessionLocal() as s, s.begin():
+        await _replace_products_tx(s, products)
+        if task_items is not None:
+            await _sync_tasks_tx(s, list(task_items))
+    return len(products), (len(task_items) if task_items is not None else None)
 
 
 # ---------- «Бесплатные конфеты»: ежедневный подарок, рефералы, задания ----------
@@ -873,6 +936,38 @@ async def count_referrals(bot_id: int, user_id: int) -> int:
         )).scalar_one()
 
 
+async def get_reward_boost(bot_id: int, user_id: int) -> datetime | None:
+    """Момент окончания «УДВОЕНИЯ наград» пользователя (None — не было; прошедший момент тоже возвращается как есть)."""
+    async with db.SessionLocal() as s:
+        return (await s.execute(
+            select(BotUser.boost_until).where(BotUser.bot_id == bot_id, BotUser.user_id == user_id)
+        )).scalar_one_or_none()
+
+
+async def set_reward_boost(bot_id: int, user_id: int, until: datetime) -> bool:
+    """Включает удвоение наград до `until`. False — пользователя нет в БД бота."""
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(
+            update(BotUser).where(BotUser.bot_id == bot_id, BotUser.user_id == user_id).values(boost_until=until)
+        )
+        return res.rowcount > 0
+
+
+async def returned_after_switch(bot_id: int, user_id: int) -> bool:
+    """Пользователь уже проходил капчу у ДРУГОГО бота (запись в user_history), а у этого — ещё нет: он вернулся после смены бота.
+    Вызывать до того, как пользователь записан в историю этого бота (то есть до flush после успешной капчи)."""
+    async with db.SessionLocal() as s:
+        row = (await s.execute(
+            select(
+                select(func.count()).select_from(UserHistory)
+                .where(UserHistory.user_id == user_id, UserHistory.bot_id != bot_id).scalar_subquery(),
+                select(func.count()).select_from(UserHistory)
+                .where(UserHistory.user_id == user_id, UserHistory.bot_id == bot_id).scalar_subquery(),
+            )
+        )).one()
+    return int(row[0]) > 0 and int(row[1]) == 0
+
+
 async def list_tasks(only_visible: bool = True, limit: int | None = None) -> list[BonusTask]:
     """Задания в порядке показа. only_visible=True — только показываемые (меню в боте); False — все (панель)."""
     q = select(BonusTask).order_by(BonusTask.position, BonusTask.id)
@@ -893,14 +988,15 @@ async def get_task(task_id: int, only_visible: bool = True) -> BonusTask | None:
 
 
 async def add_task(
-    button_text: str, about: str, reward: int, require_screenshot: bool, visible: bool = True, one_time: bool = True
+    button_text: str, about: str, reward: int, require_screenshot: bool, visible: bool = True, one_time: bool = True,
+    comment: str = "",
 ) -> BonusTask:
     """Новое задание — в конец списка."""
     async with db.SessionLocal() as s, s.begin():
         last = (await s.execute(select(func.max(BonusTask.position)))).scalar_one_or_none() or 0
         row = BonusTask(
             button_text=button_text, about=about, reward=reward, require_screenshot=require_screenshot,
-            one_time=one_time, position=last + 1, is_visible=visible,
+            one_time=one_time, comment=comment, position=last + 1, is_visible=visible,
         )
         s.add(row)
         await s.flush()
@@ -908,7 +1004,7 @@ async def add_task(
 
 
 async def update_task(task_id: int, **values) -> BonusTask | None:
-    allowed = {k: v for k, v in values.items() if k in {"button_text", "about", "reward", "require_screenshot", "one_time", "is_visible"}}
+    allowed = {k: v for k, v in values.items() if k in {"button_text", "about", "reward", "require_screenshot", "one_time", "is_visible", "comment"}}
     async with db.SessionLocal() as s, s.begin():
         row = (await s.execute(select(BonusTask).where(BonusTask.id == task_id).with_for_update())).scalar_one_or_none()
         if row is None:
@@ -1059,13 +1155,14 @@ class TaskReview:
     moderator_username: str | None
     moderator_name: str | None
     balance: int | None = None   # баланс пользователя после начисления (только в ответе decide_task)
+    comment: str = ""            # комментарий к заданию для админа (bonus_tasks.comment); пусто — показываем название
 
 
-def _review(c: TaskCompletion, name: str) -> TaskReview:
+def _review(c: TaskCompletion, name: str, comment: str | None = "") -> TaskReview:
     return TaskReview(
         id=c.id, bot_id=c.bot_id, user_id=c.user_id, username=c.username, task_id=c.task_id, task_name=name,
         reward=c.reward, status=c.status, file_id=c.file_id, file_kind=c.file_kind, moderator_id=c.moderator_id,
-        moderator_username=c.moderator_username, moderator_name=c.moderator_name,
+        moderator_username=c.moderator_username, moderator_name=c.moderator_name, comment=comment or "",
     )
 
 
@@ -1074,10 +1171,10 @@ async def get_task_reviews(ids: list[int]) -> list[TaskReview]:
         return []
     async with db.SessionLocal() as s:
         rows = (await s.execute(
-            select(TaskCompletion, BonusTask.button_text)
+            select(TaskCompletion, BonusTask.button_text, BonusTask.comment)
             .join(BonusTask, BonusTask.id == TaskCompletion.task_id).where(TaskCompletion.id.in_(ids))
         )).all()
-        return [_review(c, name) for c, name in rows]
+        return [_review(c, name, comment) for c, name, comment in rows]
 
 
 async def decide_task(
@@ -1103,8 +1200,10 @@ async def decide_task(
         c = res.scalar_one_or_none()
         if c is None:
             return None
-        name = (await s.execute(select(BonusTask.button_text).where(BonusTask.id == c.task_id))).scalar_one_or_none() or ""
-        review = _review(c, name)
+        named = (await s.execute(
+            select(BonusTask.button_text, BonusTask.comment).where(BonusTask.id == c.task_id)
+        )).first()
+        review = _review(c, named[0] if named else "", named[1] if named else "")
         if approve:
             r = await s.execute(
                 update(BotUser).where(BotUser.bot_id == c.bot_id, BotUser.user_id == c.user_id)
@@ -1118,11 +1217,11 @@ async def list_pending_task_reviews(limit: int = 50) -> list[TaskReview]:
     """Заявки на проверке (старые первыми) по всем ботам — для /pending в боте для чеков."""
     async with db.SessionLocal() as s:
         rows = (await s.execute(
-            select(TaskCompletion, BonusTask.button_text)
+            select(TaskCompletion, BonusTask.button_text, BonusTask.comment)
             .join(BonusTask, BonusTask.id == TaskCompletion.task_id)
             .where(TaskCompletion.status == TASK_PENDING).order_by(TaskCompletion.id).limit(limit)
         )).all()
-        return [_review(c, name) for c, name in rows]
+        return [_review(c, name, comment) for c, name, comment in rows]
 
 
 async def save_task_review_message(completion_id: int, chat_id: int, message_id: int) -> None:

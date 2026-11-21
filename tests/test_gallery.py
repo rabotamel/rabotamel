@@ -170,5 +170,51 @@ class LegacyPremiumTests(unittest.TestCase):
         self.assertNotIn("Безлимит", n.premium_label)
 
 
+class PremiumUiTests(unittest.TestCase):
+    GT = greeting.generate_config("pu").template
+
+    def test_stable_per_bot_and_varies_between_bots(self):
+        uis = set()
+        for i in range(100):
+            c = gl.generate_config(f"pu{i}")
+            self.assertEqual(gl.premium_ui(c), gl.premium_ui(gl.GalleryConfig.from_json(c.to_json())))
+            u = gl.premium_ui(c)
+            uis.add((u.title, u.info, u.status_head, u.status_none, u.status_temp, u.status_forever, u.back, tuple(u.tariffs.values())))
+        self.assertGreater(len(uis), 20)
+        self.assertEqual(gl.premium_ui(None).status_none, "У вас нет премиума")
+
+    def test_three_statuses_and_dynamic_left(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for i in range(60):
+            c = gl.generate_config(f"ps{i}")
+            ui = gl.premium_ui(c)
+            none = gl.render_premium(c, self.GT, 5, None, False, now)
+            temp = gl.render_premium(c, self.GT, 5, now + timedelta(days=2, hours=3, minutes=4), False, now)
+            fv = gl.render_premium(c, self.GT, 5, None, True, now)
+            self.assertIn(f"🤷🏻‍♀️ {ui.status_none}", none)
+            self.assertIn(f"❤️‍🔥 {ui.status_temp.format(left='2д 3ч 4м')}", temp)
+            self.assertIn(f"💎 {ui.status_forever}", fv)
+            self.assertNotIn("{left}", temp)
+            for t in (none, temp, fv):
+                self.assertTrue(t.startswith(f"<b>💫 {ui.title} 💖</b>\n\n🌸 {ui.info} 🌸\n\n<b>🔥 {ui.status_head} 🩷</b>\n"))
+                self.assertTrue(t.endswith(gl.balance_line(self.GT, "5")))
+            # просроченный временный премиум = «нет премиума»
+            self.assertIn(ui.status_none, gl.render_premium(c, self.GT, 5, now - timedelta(minutes=1), False, now))
+
+    def test_buttons_prices_and_callbacks_unchanged(self):
+        for i in range(60):
+            c = gl.generate_config(f"pb{i}")
+            rows = gl.premium_rows(c)
+            self.assertEqual([r[0][1] for r in rows], [f"{c.premium_cb}:{k}" for k in ("3", "7", "forever", "b")])
+            for (text, _), k in zip((r[0] for r in rows[:3]), gl.PREMIUM_KEYS):
+                self.assertIn(f"({gl.PREMIUM_OPTIONS[k]['price']}🍬)", text)
+                self.assertTrue(text.endswith(" 👑"))
+            self.assertTrue(rows[3][0][0].startswith("⬅️ "))
+            for _, cb in (r[0] for r in rows):
+                self.assertIsNotNone(gl.parse_premium_key(c, cb))
+                self.assertLessEqual(len(cb.encode()), 64)
+
+
 if __name__ == "__main__":
     unittest.main()

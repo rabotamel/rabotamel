@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import auth, avatars, moderation, promo, push, repo, sandbox, shop, shop_io, tasks
+from . import auth, avatars, comeback, moderation, promo, push, repo, sandbox, shop, shop_io, tasks
 from .metrics import metrics
 from .events import bus
 from .models import STATUS_ACTIVE, STATUS_QUEUED
@@ -99,7 +99,7 @@ class UserTargetIn(BaseModel):
 
 class BlockIn(BaseModel):
     target: str = ""
-    scope: Literal["suggest", "receipts"]
+    scope: Literal["suggest", "receipts", "tasks"]
     action: Literal["block", "unblock"]
     confirm: bool = False
 
@@ -127,6 +127,10 @@ class AutoMessageIn(BaseModel):
     reply: str = ""                 # ответ бота, когда человек ввёл свой промокод
 
 
+class ReturnNoticeIn(BaseModel):
+    text: str = ""                  # уведомление «вы вернулись» (как введено); пусто — выключено
+
+
 class TaskIn(BaseModel):
     button_text: str = ""           # подпись кнопки задания в боте
     about: str = ""                 # описание задания (оформление и [а/б] — как у товаров)
@@ -134,6 +138,7 @@ class TaskIn(BaseModel):
     screenshot: bool = False        # требовать ли прикрепить скриншот (награду тогда начисляет модератор)
     visible: bool = True            # показывать ли задание в боте
     one_time: bool = True           # одноразовое: после награды повторно выполнить нельзя (кнопка синяя)
+    comment: str = ""               # пояснение для админа: что сделал пользователь (в боте для чеков — вместо названия)
 
 
 class ProductIn(BaseModel):
@@ -569,6 +574,15 @@ async def save_automessage(body: AutoMessageIn):
     return {"ok": True, "text": cfg.text, "percent": cfg.percent, "reply": cfg.reply}
 
 
+@api.post("/automessage/test")
+async def test_automessage(body: UserTargetIn, request: Request):
+    """Проверка без ожидания: шлёт сохранённое автосообщение выбранному пользователю (@username или ID) прямо сейчас."""
+    try:
+        return await sandbox.test_automessage(request.app.state.manager, body.target, body.confirm)
+    except sandbox.SandboxError as e:
+        raise HTTPException(e.status, e.message)
+
+
 @api.post("/automessage/length")
 async def automessage_length(body: AboutIn):
     """Счётчик под полями: сколько введено и сколько займёт в Telegram в худшем случае."""
@@ -576,6 +590,34 @@ async def automessage_length(body: AboutIn):
     return {
         "site": len(text), "site_max": promo.MAX_RAW,
         "telegram": promo.telegram_length(text), "telegram_max": promo.MAX_TEXT,
+    }
+
+
+# ---------- уведомление «вы вернулись» + удвоение наград (вкладка «Автосообщения») ----------
+
+@api.get("/returnnotice")
+async def get_return_notice():
+    cfg = await comeback.load_settings(fresh=True)
+    return {"text": cfg.text, "boost_hours": int(comeback.BOOST_DURATION.total_seconds() // 3600),
+            "factor": comeback.BOOST_FACTOR, "max_text": comeback.MAX_TEXT, "max_raw": comeback.MAX_RAW}
+
+
+@api.post("/returnnotice")
+async def save_return_notice(body: ReturnNoticeIn):
+    try:
+        cfg = comeback.normalize(body.text)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    await comeback.save_settings(cfg)
+    return {"ok": True, "text": cfg.text}
+
+
+@api.post("/returnnotice/length")
+async def return_notice_length(body: AboutIn):
+    text = body.about.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return {
+        "site": len(text), "site_max": comeback.MAX_RAW,
+        "telegram": comeback.telegram_length(text), "telegram_max": comeback.MAX_TEXT,
     }
 
 
@@ -654,36 +696,44 @@ async def delete_shop_product(product_id: int):
     return {"ok": True}
 
 
+@api.get("/buttons/export")
 @api.get("/shop/export")
-async def export_shop_products():
-    """Весь каталог (и скрытые товары, в порядке показа) одним .txt-файлом UTF-8."""
-    text = shop_io.export_products(await repo.list_shop_products(only_visible=False))
-    name = f"shop-products-{datetime.now().strftime('%Y%m%d-%H%M')}.txt"
+async def export_buttons():
+    """Все тексты вкладки «Кнопки в боте» одним .txt-файлом UTF-8: товары (и скрытые, в порядке показа) и задания."""
+    text = shop_io.export_all(await repo.list_shop_products(only_visible=False), await repo.list_tasks(only_visible=False))
+    name = f"bot-buttons-{datetime.now().strftime('%Y%m%d-%H%M')}.txt"
     return Response(
         text, media_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"},
     )
 
 
+@api.post("/buttons/import")
 @api.post("/shop/import")
-async def import_shop_products(body: ShopImportIn):
-    """Восстановление каталога из файла экспорта. Без confirm — только проверка (ничего не меняется); с confirm: true
-    текущие товары заменяются товарами из файла одной транзакцией. Повреждённый файл -> 400, каталог не тронут."""
+async def import_buttons(body: ShopImportIn):
+    """Восстановление вкладки «Кнопки в боте» из файла экспорта. Без confirm — только проверка (ничего не меняется); с
+    confirm: true товары заменяются, а задания синхронизируются с файлом одной транзакцией. Файл старого формата (только
+    товары) задания не трогает. Повреждённый файл -> 400, ничего не изменено."""
     try:
-        items = shop_io.parse_products(body.text)
+        parsed = shop_io.parse_all(body.text)
     except ValueError as e:
         raise HTTPException(400, str(e))
     current = len(await repo.list_shop_products(only_visible=False))
+    current_tasks = len(await repo.list_tasks(only_visible=False))
+    count_tasks = None if parsed.tasks is None else len(parsed.tasks)
     if not body.confirm:
-        return {"ok": True, "applied": False, "count": len(items), "current": current,
-                "names": [it.name for it in items[:10]]}
+        return {"ok": True, "applied": False, "count": len(parsed.products), "current": current,
+                "names": [it.name for it in parsed.products[:10]],
+                "tasks": count_tasks, "current_tasks": current_tasks,
+                "task_names": [it.button_text for it in (parsed.tasks or [])[:10]]}
     try:
-        await repo.replace_shop_products(items)
+        await repo.restore_buttons(parsed.products, parsed.tasks)
     except Exception:
-        logging.getLogger("bot.web").exception("Восстановление товаров из файла не удалось")
-        raise HTTPException(500, "Не удалось восстановить товары, текущие товары не изменены")
+        logging.getLogger("bot.web").exception("Восстановление вкладки «Кнопки в боте» из файла не удалось")
+        raise HTTPException(500, "Не удалось восстановить данные из файла, текущие данные не изменены")
     bus.publish({"type": "changed"})
-    return {"ok": True, "applied": True, "count": len(items), "current": current}
+    return {"ok": True, "applied": True, "count": len(parsed.products), "current": current,
+            "tasks": count_tasks, "current_tasks": current_tasks}
 
 
 # ---------- задания («Бесплатные конфеты»; настраиваются во вкладке «Кнопки в боте») ----------
@@ -693,7 +743,7 @@ def _task_dict(row) -> dict:
     return {
         "id": t.id, "button_text": t.button_text, "about": t.about, "reward": t.reward,
         "screenshot": t.require_screenshot, "visible": bool(row.is_visible), "one_time": t.one_time,
-        "position": row.position,
+        "comment": t.comment, "position": row.position,
     }
 
 
@@ -703,6 +753,7 @@ def _clean_task(body: TaskIn) -> dict:
             "button_text": tasks.normalize_button_text(body.button_text), "about": tasks.normalize_description(body.about),
             "reward": tasks.normalize_reward(body.reward), "require_screenshot": bool(body.screenshot),
             "is_visible": bool(body.visible), "one_time": bool(body.one_time),
+            "comment": tasks.normalize_comment(body.comment),
         }
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -724,7 +775,7 @@ async def add_task(body: TaskIn):
         raise HTTPException(400, "Слишком много заданий")
     row = await repo.add_task(
         values["button_text"], values["about"], values["reward"], values["require_screenshot"], values["is_visible"],
-        values["one_time"],
+        values["one_time"], values["comment"],
     )
     bus.publish({"type": "changed"})
     return {"ok": True, "task": _task_dict(row)}

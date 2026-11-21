@@ -65,8 +65,12 @@ async def init_db(database_url: str) -> None:
         await conn.execute(text("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS username varchar(64)"))
         # «Ежедневный подарок»: момент последнего получения (NULL — ещё не брал)
         await conn.execute(text("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS daily_at timestamptz"))
+        # удвоение наград за задания после возврата в бота (NULL — не действует)
+        await conn.execute(text("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS boost_until timestamptz"))
         # «Одноразовое» задание: у уже существующих заданий включено (так они и работали)
         await conn.execute(text("ALTER TABLE bonus_tasks ADD COLUMN IF NOT EXISTS one_time boolean NOT NULL DEFAULT true"))
+        # комментарий к заданию для админа (у существующих заданий пустой — в заявке остаётся название задания)
+        await conn.execute(text("ALTER TABLE bonus_tasks ADD COLUMN IF NOT EXISTS comment text NOT NULL DEFAULT ''"))
         # промокод: скидка действует 24 ч с момента ввода кода. Уже введённые, но ещё не потраченные коды получают
         # полные сутки от момента обновления (условие IS NULL — после первого раза строка не меняется)
         await conn.execute(text("ALTER TABLE user_promos ADD COLUMN IF NOT EXISTS activated_at timestamptz"))

@@ -138,7 +138,13 @@ async def change_candies(
     }
 
 
-BLOCK_SCOPES = ("suggest", "receipts")   # «Предложка» / «Отправка чеков»
+BLOCK_SCOPES = ("suggest", "receipts", "tasks")   # «Предложка» / «Отправка чеков» / «Задания» — три независимых списка
+
+
+def _block_setter(scope: str):
+    """Функция записи нужного списка блокировки (ищется в момент вызова, а не при импорте)."""
+    name = {"suggest": "set_author_block", "receipts": "set_receipt_block", "tasks": "set_task_block"}[scope]
+    return getattr(repo, name)
 
 
 def _resolve_for_block(manager: BotManager, raw: str) -> tuple[int, str]:
@@ -153,15 +159,39 @@ def _resolve_for_block(manager: BotManager, raw: str) -> tuple[int, str]:
 
 async def set_block(manager: BotManager, target: str, scope: str, block: bool, confirm: bool) -> dict:
     """Блокировка / разблокировка пользователя: scope `suggest` — отправка видео в «Предложку», `receipts` — отправка
-    чеков об оплате картой. Действует сразу для всех токенов бота."""
+    чеков об оплате картой, `tasks` — отправка скриншотов заданий. Списки независимы: блокировка в одном другие не трогает.
+    Действует сразу для всех токенов бота."""
     _require_confirm(confirm)
     if scope not in BLOCK_SCOPES:
         raise SandboxError(400, "Неизвестный раздел блокировки")
     uid, who = _resolve_for_block(manager, target)
-    setter = repo.set_author_block if scope == "suggest" else repo.set_receipt_block
-    changed = await setter(uid, block)
+    changed = await _block_setter(scope)(uid, block)
     log.info("Песочница: %s пользователя %s (%s), изменено: %s", "блокировка" if block else "разблокировка", uid, scope, changed)
     return {"ok": True, "who": who, "user_id": uid, "scope": scope, "blocked": block, "changed": changed}
+
+
+async def test_automessage(manager: BotManager, target: str, confirm: bool) -> dict:
+    """Кнопка «Проверить» на вкладке «Автосообщения»: шлёт пользователю рабочее автосообщение (с личным промокодом, если в
+    тексте есть {promo}) прямо сейчас, не дожидаясь 30 минут после капчи. Берётся СОХРАНЁННАЯ версия настроек."""
+    _require_confirm(confirm)
+    uid, who = resolve(manager, target)
+    stats, _ = _running(manager)
+    automsg = getattr(manager, "automsg", None)
+    if automsg is None:
+        raise SandboxError(409, "Основной бот сейчас не запущен — действие невозможно")
+    try:
+        res = await automsg.send_test(uid)
+    except ValueError as e:
+        raise SandboxError(400, str(e)) from None
+    except TelegramForbiddenError as e:
+        if messaging.is_blocked_by_user(e):
+            stats.remove(uid)   # человек сам заблокировал бота — удаляем из базы, как при выдаче конфет
+            await stats.flush()
+        raise SandboxError(409, "Не отправлено: пользователь заблокировал бота") from None
+    except TelegramAPIError as e:
+        raise SandboxError(502, f"Telegram не принял сообщение: {e}") from None
+    log.info("Песочница: тест автосообщения отправлен пользователю %s бота %s", uid, stats.bot_id)
+    return {"ok": True, "who": who, "user_id": uid, **res}
 
 
 async def remove_user(manager: BotManager, target: str, confirm: bool) -> dict:

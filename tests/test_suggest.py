@@ -804,11 +804,13 @@ class Flow(unittest.TestCase):
             await self.h["on_gallery_button"](self.call(g.premium_cb, msg_id=10), self.bot)
             self.assertEqual(self.bot.deleted, [10])
             mid, _chat, text, markup = self.sent[-1]
-            self.assertTrue(text.startswith(f"<b>{g.premium_label}</b>"))
-            self.assertIn("🤷🏻‍♀️ У вас нет премиума", text)
-            self.assertIn("бесплатно", text)
+            ui = gallery.premium_ui(g)
+            self.assertTrue(text.startswith(f"<b>💫 {ui.title} 💖</b>"))
+            self.assertIn(f"🤷🏻‍♀️ {ui.status_none}", text)
+            self.assertIn("бесплатн", text)
             self.assertEqual([r[0].text for r in markup.inline_keyboard],
-                             ["💕 3 дня (650🍬) 👑", "🔥 Неделя (1250🍬) 👑", "💎 Безлимит (1750🍬) 👑", "⬅️ Назад"])
+                             [f"💕 {ui.tariffs['3']} (650🍬) 👑", f"🔥 {ui.tariffs['7']} (1250🍬) 👑",
+                              f"💎 {ui.tariffs['forever']} (1750🍬) 👑", f"⬅️ {ui.back}"])
             self.assertEqual([r[0].callback_data for r in markup.inline_keyboard],
                              [f"{g.premium_cb}:3", f"{g.premium_cb}:7", f"{g.premium_cb}:forever", f"{g.premium_cb}:b"])
             self.assertEqual([r[0].style for r in markup.inline_keyboard], ["success"] * 3 + ["danger"])
@@ -841,7 +843,7 @@ class Flow(unittest.TestCase):
             c = self.call(f"{g.premium_cb}:forever")
             await self.h["on_gallery_button"](c, self.bot)
             self.assertEqual(self.db.premium[5], (None, True))
-            self.assertIn("💎 Ваш премиум безлимитный", self.sent[-1][2])
+            self.assertIn(f"💎 {gallery.premium_ui(g).status_forever}", self.sent[-1][2])
             before = self.db.candies[(1, 5)]
             c = self.call(f"{g.premium_cb}:3")
             await self.h["on_gallery_button"](c, self.bot)                       # безлимит уже есть — ничего не списывается
