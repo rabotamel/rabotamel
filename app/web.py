@@ -97,6 +97,12 @@ class UserTargetIn(BaseModel):
     confirm: bool = False
 
 
+class AutoTestIn(BaseModel):
+    target: str = ""
+    confirm: bool = False
+    kind: Literal["discount", "boost"] = "discount"   # что проверить: скидку (автосообщение) или повышение наград («Вы вернулись»)
+
+
 class BlockIn(BaseModel):
     target: str = ""
     scope: Literal["suggest", "receipts", "tasks"]
@@ -579,10 +585,11 @@ async def save_automessage(body: AutoMessageIn):
 
 
 @api.post("/automessage/test")
-async def test_automessage(body: UserTargetIn, request: Request):
-    """Проверка без ожидания: шлёт сохранённое автосообщение выбранному пользователю (@username или ID) прямо сейчас."""
+async def test_automessage(body: AutoTestIn, request: Request):
+    """Проверка без ожидания: шлёт выбранному пользователю (@username или ID) прямо сейчас сохранённое автосообщение со скидкой
+    (kind=discount) или уведомление «Вы вернулись» с повышением наград за задания (kind=boost)."""
     try:
-        return await sandbox.test_automessage(request.app.state.manager, body.target, body.confirm)
+        return await sandbox.test_automessage(request.app.state.manager, body.target, body.confirm, body.kind)
     except sandbox.SandboxError as e:
         raise HTTPException(e.status, e.message)
 

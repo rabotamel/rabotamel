@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramRetryAfter
 
-from . import messaging, promo, repo
+from . import comeback, messaging, promo, repo
 
 log = logging.getLogger("bot.automsg")
 
@@ -69,6 +69,17 @@ class AutoMessenger:
         text = promo.render(cfg.text, self.seed, code, cfg.percent)
         await messaging.send_message(self.bot, user_id, text)   # уведомление о скидке — без картинки бота
         return {"promo": code, "percent": cfg.percent}
+
+    async def send_boost_test(self, user_id: int) -> dict:
+        """Проверка с сайта: шлёт уведомление «Вы вернулись» СЕЙЧАС, как в бою: текст читается свежим, без картинки бота, и с
+        этого момента 24 часа награды за задания у человека удвоены (прежнее удвоение начинается заново). ValueError —
+        уведомление выключено; ошибки Telegram пробрасываются вызывающему."""
+        cfg = await comeback.load_settings(fresh=True)
+        if not cfg.enabled:
+            raise ValueError("Уведомление «Вы вернулись» выключено: напишите сообщение и нажмите «Сохранить»")
+        await messaging.send_message(self.bot, user_id, comeback.render(cfg.text, self.seed))
+        await repo.set_reward_boost(self.stats.bot_id, user_id, datetime.now(timezone.utc) + comeback.BOOST_DURATION)
+        return {"hours": int(comeback.BOOST_DURATION.total_seconds() // 3600), "factor": comeback.BOOST_FACTOR}
 
     async def on_captcha_passed(self, user_id: int) -> None:
         """Пользователь прошёл капчу: если автосообщение включено, ставим его в очередь. Ошибки БД на капчу не влияют."""

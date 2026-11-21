@@ -694,8 +694,9 @@ def build_router(
             return
         if not cfg.enabled:
             return
+        contact = await support.resolve_contact(bot, cfg.contact)   # ID -> @юзернейм, если Telegram его отдаёт
         await show_screen(
-            call, bot, user_id, support.message_text(support_key(), cfg.contact), support.back_keyboard(support_key()),
+            call, bot, user_id, support.message_text(support_key(), contact), support.back_keyboard(support_key()),
         )
 
     @router.callback_query(F.data.startswith(shop.PREFIXES))

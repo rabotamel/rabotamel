@@ -41,11 +41,13 @@ class TextTests(unittest.TestCase):
         for i in range(50):
             t = support.message_text(f"k{i}", "@help_team")
             self.assertTrue(t.endswith("@help_team"))
-            head, tail = t.split("\n")
+            title, blank, head, tail = t.split("\n")
+            self.assertEqual(title, f"<b>{support.button_label(f'k{i}')}</b>")     # жирный заголовок = подпись кнопки
+            self.assertEqual(blank, "")
             self.assertIn(head.split(" ")[0], support.MSG_LEAD)
             self.assertTrue(tail.startswith(tuple(support.MSG_POINTER)))
         self.assertEqual(support.message_text(None, "@help_team"),
-                         "Связь с администрацией (если не выдалась ссылка или есть вопросы):\n👉 @help_team")
+                         "<b>📲 Поддержка 👩🏻‍💻</b>\n\nСвязь с администрацией (если не выдалась ссылка или есть вопросы):\n👉 @help_team")
         self.assertIn('tg://user?id=777', support.message_text(None, "777"))
 
     def test_back_is_fixed_and_red_and_callbacks_per_bot(self):
@@ -55,6 +57,46 @@ class TextTests(unittest.TestCase):
         self.assertEqual(support.parse_action("a", support.cb_back("a")), "back")
         self.assertIsNone(support.parse_action("a", support.cb_open("b")))
         self.assertLessEqual(len(support.cb_open("a").encode()), 64)
+
+
+class ResolveTests(unittest.TestCase):
+    def setUp(self):
+        support.forget_resolved()
+
+    def test_id_becomes_username_when_telegram_gives_it(self):
+        import asyncio
+        import types
+
+        calls = []
+
+        class Bot:
+            async def get_chat(self, chat_id):
+                calls.append(chat_id)
+                return types.SimpleNamespace(username="help_team")
+
+        bot = Bot()
+        self.assertEqual(asyncio.run(support.resolve_contact(bot, "777")), "@help_team")
+        self.assertEqual(asyncio.run(support.resolve_contact(bot, "777")), "@help_team")
+        self.assertEqual(calls, [777])                                  # второй раз — из памяти
+        self.assertEqual(asyncio.run(support.resolve_contact(bot, "@x_team")), "@x_team")   # юзернейм не трогаем
+        self.assertEqual(calls, [777])
+
+    def test_falls_back_to_id_when_unknown_or_no_username(self):
+        import asyncio
+        import types
+
+        class Broken:
+            async def get_chat(self, chat_id):
+                raise RuntimeError("chat not found")
+
+        class NoName:
+            async def get_chat(self, chat_id):
+                return types.SimpleNamespace(username=None)
+
+        self.assertEqual(asyncio.run(support.resolve_contact(Broken(), "888")), "888")
+        support.forget_resolved()
+        self.assertEqual(asyncio.run(support.resolve_contact(NoName(), "888")), "888")
+        self.assertIn("tg://user?id=888", support.message_text(None, "888"))
 
 
 class ExportImportTests(unittest.TestCase):

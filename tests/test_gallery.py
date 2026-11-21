@@ -229,6 +229,8 @@ class PremiumUiTests(unittest.TestCase):
             seen.add(btn)
         self.assertEqual(seen, set(gl.PREMIUM_HEADS))
         self.assertEqual(gl.tariff_label(gl.premium_ui(None), "3"), "💕 3 дня (650🍬) 👑")
+        self.assertEqual(gl.PREMIUM_BACK_TEXTS, ("⬅️ Назад", "⬅️ Вернуться назад"))
+        self.assertFalse(any("🔙" in t for t in gl.PREMIUM_BACK_TEXTS))          # «🔙» в «Назад» премиума запрещён
 
 
 if __name__ == "__main__":

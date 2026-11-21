@@ -240,14 +240,6 @@
 
   <section id="tab-shop" hidden>
     <div class="card sb">
-      <h3>Поддержка</h3>
-      <p class="hint">Кнопка «Поддержка» появится в самом низу кнопок приветствия; по нажатию бот покажет этот контакт. Введите актуальный юзернейм или ID поддержки и сохраните. Пустое поле — кнопка скрыта. Контакт входит в экспорт и импорт .txt ниже.</p>
-      <label for="support-contact">Юзернейм или ID поддержки</label>
-      <input id="support-contact" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
-      <div class="msg" id="support-msg"></div>
-      <div class="row"><button type="button" class="btn green" id="support-save">Сохранить</button></div>
-    </div>
-    <div class="card sb">
       <h3>Экспорт и импорт всех текстов</h3>
       <div class="shop-tools">
         <button type="button" class="btn sm" id="shop-export">Экспорт в .txt</button>
@@ -255,6 +247,14 @@
         <input type="file" id="shop-file" accept=".txt,text/plain" hidden>
       </div>
       <p class="hint">Экспорт сохраняет всё содержимое вкладки одним файлом: контакт поддержки, товары (название, цена, цвет, описание, видимость, порядок) и задания (текст кнопки, описание, награда, скриншот, одноразовость, видимость, комментарий для админа, порядок). Импорт заменяет товары и приводит задания в точное соответствие с файлом — перед этим спросим подтверждение. Старые файлы только с товарами тоже подходят: задания при этом не меняются.</p>
+    </div>
+    <div class="card sb">
+      <h3>Поддержка</h3>
+      <p class="hint">Кнопка «Поддержка» появится в самом низу кнопок приветствия; по нажатию бот покажет этот контакт. Введите актуальный юзернейм или ID поддержки и сохраните. Пустое поле — кнопка скрыта. Контакт входит в экспорт и импорт .txt ниже.</p>
+      <label for="support-contact">Юзернейм или ID поддержки</label>
+      <input id="support-contact" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="msg" id="support-msg"></div>
+      <div class="row"><button type="button" class="btn green" id="support-save">Сохранить</button></div>
     </div>
     <div class="card sb">
       <h3 id="shop-form-title">Добавить товар</h3>
@@ -349,7 +349,12 @@
 
     <div class="card sb">
       <h3>Проверить сообщение</h3>
-      <p class="hint">Отправит сохранённое сообщение сразу, без ожидания. Пользователю выдастся новый промокод — прежний заменится.</p>
+      <p class="hint">Отправит сохранённое сообщение сразу, без ожидания. Выберите, что проверить: скидку — пользователю выдастся новый промокод (прежний заменится); повышение наград — придёт уведомление «Вы вернулись», и 24 часа награды за задания у него будут удвоены.</p>
+      <label for="am-test-kind">Что проверить</label>
+      <select id="am-test-kind">
+        <option value="discount">Скидку (автосообщение с промокодом)</option>
+        <option value="boost">Повышение наград за задания («Вы вернулись»)</option>
+      </select>
       <label for="am-test-user">Юзернейм или ID пользователя</label>
       <input id="am-test-user" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
       <div class="msg" id="am-test-msg"></div>
@@ -1007,16 +1012,23 @@ $('#am-test').addEventListener('click', async () => {
   const target = $('#am-test-user').value.trim();
   setMsg('#am-test-msg', '');
   if (!target) { setMsg('#am-test-msg', 'Укажите юзернейм или ID', true); return; }
-  const ok = await askConfirm({
-    title: 'Отправить автосообщение сейчас?',
+  const kind = $('#am-test-kind').value;
+  const ok = await askConfirm(kind === 'boost' ? {
+    title: 'Проверить повышение наград?',
+    text: `Пользователь ${target} получит сохранённое уведомление «Вы вернулись», и следующие 24 часа награды за задания (кроме ежедневного подарка) у него будут удвоены.`,
+    ok: 'Отправить',
+  } : {
+    title: 'Проверить скидку?',
     text: `Пользователь ${target} получит сохранённое автосообщение прямо сейчас. Если в нём есть {promo}, ему выдастся новый промокод, а прежний перестанет действовать.`,
     ok: 'Отправить',
   });
   if (!ok) return;
   $('#am-test').disabled = true;
   try {
-    const r = await api('POST', '/api/automessage/test', {target, confirm: true});
-    setMsg('#am-test-msg', `Отправлено: ${r.who}.` + (r.promo ? ` Промокод: ${r.promo} (скидка ${r.percent}%).` : ''));
+    const r = await api('POST', '/api/automessage/test', {target, confirm: true, kind});
+    setMsg('#am-test-msg', `Отправлено: ${r.who}.` + (kind === 'boost'
+      ? ` Награды за задания ×${r.factor} на ${r.hours} ч.`
+      : (r.promo ? ` Промокод: ${r.promo} (скидка ${r.percent}%).` : '')));
   } catch (err) { setMsg('#am-test-msg', err.message, true); }
   $('#am-test').disabled = false;
 });

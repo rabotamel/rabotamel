@@ -50,10 +50,29 @@ class ConfigTests(unittest.TestCase):
     def test_emoji_static_and_no_separators(self):
         for i in range(100):
             c = tasks.generate_config(f"e{i}")
-            self.assertTrue(c.text("label").startswith("🍭 ") and c.text("label").endswith(" 🍬"))
+            self.assertIn(c.text("label"), tasks.FREE_LABELS)            # «💝 Бесплатно 🌸» и близкие, без слов о конфетах
+            self.assertEqual(c.heading, c.text("label"))                 # заголовок раздела = подпись кнопки
+            self.assertNotIn("конфет", c.text("label").lower())
             self.assertTrue(c.text("daily_label").startswith("🤍 ") and c.text("daily_label").endswith(" 🤍"))
             self.assertTrue(c.text("ref_label").startswith("💫 ") and c.text("ref_label").endswith(" 💫"))
             self.assertFalse(any(bad in v for v in c.t.values() for bad in FORBIDDEN))
+
+    def test_section_button_label_variants(self):
+        self.assertEqual(len(tasks.FREE_LABELS), 8)
+        for lab in tasks.FREE_LABELS:
+            low = lab.lower()
+            self.assertTrue(lab.split(" ")[0] in ("💝", "💖", "🎁") and lab.split(" ")[-1] in ("🌸", "🌷", "✨", "🎁"))
+            self.assertFalse(any(w in low for w in ("конфет", "халяв", "бесплатные бонусы", "🍬")))
+        seen = {tasks.generate_config(f"fl{i}").text("label") for i in range(300)}
+        self.assertEqual(seen, set(tasks.FREE_LABELS))                   # все варианты используются
+        c = tasks.generate_config("fl1")
+        self.assertEqual(tasks.TasksConfig.from_json(c.to_json()).text("label"), c.text("label"))   # постоянная у бота
+        # уже сохранённый конфиг со старой подписью получает новую, callback_data не меняется
+        import json
+        d = json.loads(c.to_json()); d["t"]["label"] = "🍭 Бесплатные конфеты 🍬"
+        old = tasks.TasksConfig.from_json(json.dumps(d, ensure_ascii=False))
+        self.assertEqual(old.text("label"), c.text("label"))
+        self.assertEqual(old.cb, c.cb)
 
     def test_all_variants_have_required_placeholders(self):
         for key, needed in tasks.REQUIRED.items():

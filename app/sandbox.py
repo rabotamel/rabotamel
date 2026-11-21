@@ -170,17 +170,23 @@ async def set_block(manager: BotManager, target: str, scope: str, block: bool, c
     return {"ok": True, "who": who, "user_id": uid, "scope": scope, "blocked": block, "changed": changed}
 
 
-async def test_automessage(manager: BotManager, target: str, confirm: bool) -> dict:
-    """Кнопка «Проверить» на вкладке «Автосообщения»: шлёт пользователю рабочее автосообщение (с личным промокодом, если в
-    тексте есть {promo}) прямо сейчас, не дожидаясь 30 минут после капчи. Берётся СОХРАНЁННАЯ версия настроек."""
+TEST_KINDS = ("discount", "boost")
+
+
+async def test_automessage(manager: BotManager, target: str, confirm: bool, kind: str = "discount") -> dict:
+    """Кнопка «Проверить» на вкладке «Автосообщения». kind=`discount` — шлёт пользователю рабочее автосообщение со скидкой (с
+    личным промокодом, если в тексте есть {promo}) прямо сейчас, не дожидаясь 30 минут после капчи; kind=`boost` — шлёт
+    уведомление «Вы вернулись» и включает пользователю повышение наград за задания на 24 часа. Берётся СОХРАНЁННАЯ версия настроек."""
     _require_confirm(confirm)
+    if kind not in TEST_KINDS:
+        raise SandboxError(400, "Выберите, что проверить: скидку или повышение наград")
     uid, who = resolve(manager, target)
     stats, _ = _running(manager)
     automsg = getattr(manager, "automsg", None)
     if automsg is None:
         raise SandboxError(409, "Основной бот сейчас не запущен — действие невозможно")
     try:
-        res = await automsg.send_test(uid)
+        res = await (automsg.send_boost_test(uid) if kind == "boost" else automsg.send_test(uid))
     except ValueError as e:
         raise SandboxError(400, str(e)) from None
     except TelegramForbiddenError as e:
@@ -190,8 +196,8 @@ async def test_automessage(manager: BotManager, target: str, confirm: bool) -> d
         raise SandboxError(409, "Не отправлено: пользователь заблокировал бота") from None
     except TelegramAPIError as e:
         raise SandboxError(502, f"Telegram не принял сообщение: {e}") from None
-    log.info("Песочница: тест автосообщения отправлен пользователю %s бота %s", uid, stats.bot_id)
-    return {"ok": True, "who": who, "user_id": uid, **res}
+    log.info("Песочница: тест (%s) отправлен пользователю %s бота %s", kind, uid, stats.bot_id)
+    return {"ok": True, "who": who, "user_id": uid, "kind": kind, **res}
 
 
 async def remove_user(manager: BotManager, target: str, confirm: bool) -> dict:

@@ -355,6 +355,34 @@ class AutoMessengerTests(unittest.TestCase):
             asyncio.run(self._messenger().send_test(7))
         self.assertEqual((self.sent, self.issued), ([], []))
 
+    def test_send_boost_test_sends_return_notice_without_image_and_starts_boost(self):
+        from app import comeback
+
+        boosts = []
+
+        async def comeback_settings(fresh=False):
+            return comeback.Settings(self.return_text)
+
+        async def set_boost(bot_id, uid, until):
+            boosts.append((bot_id, uid, until))
+            return True
+
+        saved = (comeback.load_settings, getattr(automsg.repo, "set_reward_boost", None))
+        comeback.load_settings, automsg.repo.set_reward_boost = comeback_settings, set_boost
+        self.addCleanup(lambda: (setattr(comeback, "load_settings", saved[0]),
+                                 setattr(automsg.repo, "set_reward_boost", saved[1]) if saved[1] else
+                                 (hasattr(automsg.repo, "set_reward_boost") and delattr(automsg.repo, "set_reward_boost"))))
+        self.return_text = "С возвращением!"
+        res = asyncio.run(self._messenger().send_boost_test(7))
+        self.assertEqual(res, {"hours": 24, "factor": 2})
+        self.assertEqual(self.sent, [(7, "С возвращением!", None)])         # без картинки бота
+        self.assertEqual((len(boosts), boosts[0][1]), (1, 7))
+        self.assertEqual(self.issued, [])                                 # скидка не затрагивается
+        self.return_text = ""
+        with self.assertRaises(ValueError):
+            asyncio.run(self._messenger().send_boost_test(7))
+        self.assertEqual(len(boosts), 1)
+
     def test_forget_cancels_timer(self):
         async def go():
             m = self._messenger(delay=0.05)

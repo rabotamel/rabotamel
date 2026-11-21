@@ -69,7 +69,8 @@ TARIFF_TEXTS: dict[str, tuple[str, ...]] = {
     "7": ("🔥 Неделя ({price}🍬) 👑", "⚡ Неделя за {price}🍬 🔥"),
     "forever": ("💎 Безлимит ({price}🍬) 👑", "♾️ Безлимит за {price}🍬 💎"),
 }
-PREMIUM_BACK_TEXTS: tuple[str, ...] = ("⬅️ Назад", "🔙 Вернуться назад")
+# В кнопке «Назад» меню премиума допустима только стрелка «⬅️» (🔙 запрещён)
+PREMIUM_BACK_TEXTS: tuple[str, ...] = ("⬅️ Назад", "⬅️ Вернуться назад")
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,8 @@ def validate_tables() -> None:
                   *TARIFF_TEXTS.values()):
         if len(set(words)) != len(words):
             raise AssertionError("повторы в вариантах меню премиума")
+    if any("🔙" in t or not t.startswith("⬅️ ") for t in PREMIUM_BACK_TEXTS):
+        raise AssertionError("«Назад» в меню премиума — только со стрелкой ⬅️, без 🔙")
     if any("{left}" not in t for t in STATUS_TEMP) or any("{left}" in t for t in STATUS_NONE + STATUS_FOREVER):
         raise AssertionError("{left} (остаток времени) нужен ровно во «временном» статусе")
     if any("<b>бесплатн" not in t.lower() for t in PREMIUM_INFOS):

@@ -104,6 +104,7 @@ async def save_settings(cfg: Settings) -> None:
 
     await repo.kv_set(KEY, cfg.to_json())
     invalidate()
+    _resolved.clear()   # контакт мог смениться — юзернейм по ID определяем заново
 
 
 # ---------- тексты и кнопки ----------
@@ -129,12 +130,49 @@ def contact_html(contact: str) -> str:
 
 
 def message_text(key: str | None, contact: str) -> str:
-    """Сообщение со ссылкой на поддержку; блоки вариантов — свои у каждого бота, контакт не меняется."""
+    """Сообщение со ссылкой на поддержку: жирный заголовок = текущая подпись кнопки поддержки (button_label), пустая строка,
+    затем подводка и контакт. Блоки вариантов — свои у каждого бота, контакт не меняется."""
     pick = (lambda name, options: options[0]) if key is None else (lambda name, options: _variant(key, name, options))
     return (
+        f"<b>{html.escape(button_label(key), quote=False)}</b>\n\n"
         f"{pick('lead', MSG_LEAD)} с {pick('who', MSG_WHO)} (если не {pick('got', MSG_GOT)} ссылка или "
         f"{pick('have', MSG_HAVE)} вопросы):\n{pick('ptr', MSG_POINTER)} {contact_html(contact)}"
     )
+
+
+# ---------- ID -> юзернейм ----------
+# Если в настройках указан числовой ID, бот пробует узнать по нему юзернейм (Bot API getChat) и показывает «@username».
+# Это получается только для тех, кто уже писал этому боту (или публичных аккаунтов, известных Telegram боту); иначе остаётся
+# ссылка tg://user?id=…. Результат запоминается, чтобы не дёргать Telegram при каждом нажатии.
+RESOLVE_OK_TTL = 3600.0
+RESOLVE_FAIL_TTL = 600.0
+_resolved: dict[str, tuple[float, str | None]] = {}
+
+
+async def resolve_contact(bot, contact: str) -> str:
+    """«@username» -> без изменений; числовой ID -> «@username», если Telegram его отдал, иначе тот же ID."""
+    if not contact.isdigit() or bot is None:
+        return contact
+    now = time.monotonic()
+    cached = _resolved.get(contact)
+    if cached is not None and now < cached[0]:
+        return cached[1] or contact
+    username = None
+    try:
+        chat = await bot.get_chat(int(contact))
+        name = getattr(chat, "username", None)
+        if name and _USERNAME_RE.match(str(name)):
+            username = "@" + str(name)
+    except Exception:   # нет такого чата / бот его не видит / сеть: остаёмся на ID
+        username = None
+    if len(_resolved) > 200:
+        _resolved.clear()
+    _resolved[contact] = (now + (RESOLVE_OK_TTL if username else RESOLVE_FAIL_TTL), username)
+    return username or contact
+
+
+def forget_resolved() -> None:
+    _resolved.clear()
 
 
 def cb_open(key: str) -> str:

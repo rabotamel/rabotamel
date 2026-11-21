@@ -1,6 +1,6 @@
 """Раздел «Бесплатные конфеты»: ежедневный подарок, реферальная ссылка и задания из БД.
 
-Кнопка раздела стоит под приветствием (ниже «Купить конфеты»). Меню (HTML), каждый переход — НОВОЕ сообщение, прежнее
+Кнопка раздела стоит под приветствием (ниже «Купить конфеты»); её подпись — «💝 Бесплатно 🌸» и близкие (FREE_LABELS, без слов о конфетах). Меню (HTML), каждый переход — НОВОЕ сообщение, прежнее
 удаляется (как во всём боте); исключение — нажатие «Ежедневного подарка»: меню РЕДАКТИРУЕТСЯ на месте (handlers.claim_daily_gift):
     <b>{подпись кнопки раздела этого бота}</b>
 
@@ -86,7 +86,15 @@ DAILY_EMOJI = ("🤍", "🤍")
 REF_EMOJI = ("💫", "💫")
 ACTION_EMOJI = ("✅", "✅")
 
+# LABELS / LABEL_EMOJI — наследие прежних подписей кнопки раздела: нужны только чтобы остальные тексты и callback_data по seed не сдвинулись
+# (generate_config по-прежнему делает по ним шаг ГСЧ). Сама подпись кнопки раздела теперь берётся из FREE_LABELS (см. free_label).
 LABELS = ("Бесплатные конфеты", "Конфеты бесплатно", "Получить конфеты", "Заработать конфеты")
+# Подпись кнопки раздела заданий: акцент на «бесплатно» без слов о конфетах и внутренней валюте, понятна новичку. Готовые строки
+# (текст + небольшой разброс эмодзи 💝/💖/🎁 в начале и 🌸/🌷/✨/🎁 в конце). Без «халявы» и «бесплатных бонусов».
+FREE_LABELS = (
+    "💝 Бесплатно 🌸", "💝 Бесплатные награды 🌸", "💝 Бесплатные плюшки 🌸", "💖 Бесплатно 🌷",
+    "💖 Бесплатные награды ✨", "💝 Бесплатно ✨", "🎁 Бесплатно 🌸", "💝 Бесплатные награды 🎁",
+)
 DAILY_LABELS = ("Ежедневный подарок", "Подарок дня", "Подарок на сегодня", "Ежедневная награда")
 REF_LABELS = ("Реферальная ссылка", "Пригласить друзей", "Ссылка для друзей", "Моя реферальная ссылка")
 SEND_LABELS = ("Отправить скриншот", "Прикрепить скриншот", "Загрузить скриншот")
@@ -200,7 +208,20 @@ ID_ACTIONS = ("task", "send", "done")   # к этим callback_data добавл
 HASH_LEN = 10
 
 
+def free_label(open_cb: str) -> str:
+    """Подпись кнопки раздела заданий этого бота: постоянный выбор из FREE_LABELS по хэшу его callback_data «open»
+    (уникален у бота и меняется вместе с «Уникальные текста»). Заголовок раздела (TasksConfig.heading) — та же строка."""
+    h = int(hashlib.sha256(f"free-label:{open_cb}".encode()).hexdigest()[:8], 16)
+    return FREE_LABELS[h % len(FREE_LABELS)]
+
+
 def _check_tables() -> None:
+    if len(set(FREE_LABELS)) != len(FREE_LABELS):
+        raise AssertionError("повторы в подписях кнопки раздела")
+    for lab in FREE_LABELS:
+        low = lab.lower()
+        if "конфет" in low or CANDY in lab or "халяв" in low or "бесплатные бонусы" in low or "бесплатно" not in low and "бесплатн" not in low:
+            raise AssertionError(f"подпись кнопки раздела заданий не по правилам: {lab}")
     for _, words, emoji in FIELDS:
         if len(set(words)) != len(words):
             raise AssertionError("повторы в списке текстов")
@@ -253,7 +274,11 @@ class TasksConfig:
     @classmethod
     def from_json(cls, raw: str) -> "TasksConfig":
         d = json.loads(raw)
-        cfg = cls(idx=dict(d["idx"]), t={k: str(v) for k, v in d["t"].items()}, cb={k: str(v) for k, v in d["cb"].items()})
+        t = {k: str(v) for k, v in d["t"].items()}
+        cb = {k: str(v) for k, v in d["cb"].items()}
+        if cb.get("open"):
+            t["label"] = free_label(cb["open"])   # подпись кнопки раздела — новая и у уже сохранённых конфигов (без записи в БД)
+        cfg = cls(idx=dict(d["idx"]), t=t, cb=cb)
         cfg.validate()
         return cfg
 
@@ -297,6 +322,7 @@ def generate_config(seed: str, taken: set[str] | None = None) -> TasksConfig:
             action: prefix + hashlib.sha256(f"fc:{seed}:{salt}:{action}".encode()).hexdigest()[:HASH_LEN]
             for action, prefix in CB_PREFIXES.items()
         }
+        t["label"] = free_label(cb["open"])   # индекс idx["label"] — наследие: подпись выбирается по callback_data бота
         cfg = TasksConfig(idx=idx, t=t, cb=cb)
         if cfg.signature() not in taken:
             break

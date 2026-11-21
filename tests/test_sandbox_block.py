@@ -134,7 +134,15 @@ class AutoMessageTestButtonTests(unittest.TestCase):
         self.mgr.stats.bot_id = 1
         self.mgr.stats.remove = self.removed.append
         self.mgr.stats.flush = flush
-        self.mgr.automsg = NS(send_test=send_test)
+        self.boosted = []
+
+        async def send_boost_test(uid):
+            if self.error is not None:
+                raise self.error
+            self.boosted.append(uid)
+            return {"hours": 24, "factor": 2}
+
+        self.mgr.automsg = NS(send_test=send_test, send_boost_test=send_boost_test)
 
     def run_(self, *args):
         return asyncio.run(sandbox.test_automessage(self.mgr, *args))
@@ -144,6 +152,18 @@ class AutoMessageTestButtonTests(unittest.TestCase):
         self.assertEqual((r["ok"], r["user_id"], r["who"], r["promo"], r["percent"]), (True, 777, "@bob (777)", "ABCD1234", 15))
         self.run_("777", True)
         self.assertEqual(self.sent, [777, 777])
+
+    def test_kind_selects_what_to_check(self):
+        r = self.run_("777", True, "boost")
+        self.assertEqual((r["kind"], r["hours"], r["factor"]), ("boost", 24, 2))
+        self.assertEqual((self.boosted, self.sent), ([777], []))          # скидка при этом не проверялась
+        r = self.run_("777", True, "discount")
+        self.assertEqual((r["kind"], r["promo"]), ("discount", "ABCD1234"))
+        self.assertEqual((self.boosted, self.sent), ([777], [777]))
+        self.assertEqual(self.run_("777", True)["kind"], "discount")      # по умолчанию — скидка, как раньше
+        with self.assertRaises(sandbox.SandboxError) as e:
+            self.run_("777", True, "other")
+        self.assertEqual(e.exception.status, 400)
 
     def test_needs_confirm_valid_target_known_user_and_running_bot(self):
         for args, status in ((("@bobby", False), 400), (("not a user!", True), 400), (("@nobody1", True), 404),
