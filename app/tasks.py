@@ -1,21 +1,27 @@
 """Раздел «Бесплатные конфеты»: ежедневный подарок, реферальная ссылка и задания из БД.
 
-Кнопка раздела стоит под приветствием (над «Купить конфеты»). Меню (HTML), каждый переход — НОВОЕ сообщение, прежнее
-удаляется (как во всём боте):
+Кнопка раздела стоит под приветствием (ниже «Купить конфеты»). Меню (HTML), каждый переход — НОВОЕ сообщение, прежнее
+удаляется (как во всём боте); исключение — нажатие «Ежедневного подарка»: меню РЕДАКТИРУЕТСЯ на месте (handlers.claim_daily_gift):
     <b>{подпись кнопки раздела этого бота}</b>
 
     💫 {подсказка} 💫
 
     🍭 Ваш баланс: N🍬
-  кнопки: «Ежедневный подарок», «Реферальная ссылка», затем по кнопке на каждое ВИДИМОЕ задание из БД (текст кнопки
-  задан на сайте) и красная «⬅️ Назад» (в приветствие).
+  кнопки: «Ежедневный подарок» (зелёная; на время кулдауна — синяя с остатком « (5ч 12м)» после названия; остаток
+  считается при показе меню и сам не обновляется), зелёная «Реферальная ссылка», затем по кнопке на каждое ВИДИМОЕ
+  задание из БД (текст кнопки задан на сайте) и красная «⬅️ Назад» (в приветствие).
 
 ЗАДАНИЙ В КОДЕ НЕТ. Они лежат в таблице `bonus_tasks` (models.BonusTask), общей для всех токенов бота, и редактируются во
-вкладке «Магазин» на сайте: текст кнопки, описание, награда в 🍬 и «требовать скриншот».
-  * без скриншота — кнопка «Выполнено» сразу начисляет награду (один раз на пользователя);
+вкладке «Кнопки в боте» на сайте: текст кнопки, описание, награда в 🍬, «требовать скриншот» и «одноразовое».
+  * без скриншота — кнопка «Выполнено» сразу начисляет награду;
   * со скриншотом — пользователь присылает один или несколько скриншотов (до MAX_SHOTS) прямо в ответ боту, видит
     счётчик и жмёт «Отправить на проверку»; скрины уходят БОТОМ ДЛЯ ЧЕКОВ админам (вкладка «Модераторы») с кнопками
     «Подтвердить / Отклонить / Заблокировать» (app/task_review.py); награду начисляет решение админа.
+
+«Одноразовое» (по умолчанию включено): награду за задание можно получить один раз на пользователя (отклонённая заявка не
+считается). После награды кнопка задания в меню синяя (до неё — зелёная), в карточке написано, что задание выполнено и повторно его
+выполнить нельзя, а кнопка действия серая и не работает (нажатие — только всплывающее окно). Если «Одноразовое» выключено, задание
+можно выполнять снова и снова: кнопка всегда зелёная, награда начисляется каждый раз.
 
 Ежедневный подарок: DAILY_REWARD конфет раз в 24 часа (атомарно, repo.claim_daily). Реферальная ссылка:
 `https://t.me/<бот>?start=ref_<id>`; за каждого приглашённого, который прошёл капчу, пригласивший получает
@@ -43,6 +49,12 @@ BALANCE_EMOJI = "🍭"
 BACK_LABEL = "⬅️ Назад"
 BACK_STYLE = "danger"       # «⬅️ Назад» всегда красная
 ACTION_STYLE = "success"    # «Выполнено» / «Отправить скриншот» — зелёная
+DAILY_READY_STYLE = "success"   # «Ежедневный подарок» можно забрать — зелёная
+DAILY_WAIT_STYLE = "primary"    # идёт кулдаун подарка — синяя (с остатком времени в подписи)
+REF_STYLE = "success"           # «Реферальная ссылка» — зелёная
+TASK_STYLE = "success"          # кнопка задания в меню — зелёная
+TASK_DONE_STYLE = "primary"     # одноразовое задание, за которое уже получена награда, — синяя
+ACTION_DONE_STYLE = ""          # кнопка действия в карточке такого задания — серая (обычная, без цвета) и неактивная
 MENU_STYLE = "primary"      # кнопка под приветствием — синяя, как соседние
 
 
@@ -131,6 +143,9 @@ REJECTED = (
 )
 STATUS_PENDING = ("Скриншот на проверке", "Задание на проверке", "Ожидает проверки")
 STATUS_DONE = ("Задание уже выполнено", "Вы уже выполнили это задание", "Награда за задание получена")
+# Приписка к «уже выполнено» у одноразового задания. Фиксированный текст (не рандомизируется и не хранится в конфиге бота):
+# так он появляется и у уже работающих ботов, а их сохранённые тексты не трогаются.
+ONE_TIME_NOTE = "Повторно выполнить это задание нельзя."
 INVITED = (
     "По вашей ссылке пришёл друг: +{reward}🍬",
     "Ваш друг присоединился по ссылке: +{reward}🍬",
@@ -291,14 +306,25 @@ class Task:
     about: str
     reward: int
     require_screenshot: bool
+    one_time: bool = True   # награду можно получить один раз; после неё кнопка синяя, а повторить нельзя
 
 
 def task_from_row(row) -> Task:
     return Task(
         id=int(row.id), button_text=str(row.button_text), about=str(row.about or ""),
         reward=int(row.reward), require_screenshot=bool(row.require_screenshot),
+        one_time=bool(getattr(row, "one_time", True)),
     )
 
+
+def is_done(task: Task, status: str | None) -> bool:
+    """Одноразовое задание, за которое пользователь уже получил награду (отклонённое и «на проверке» не считаются)."""
+    return task.one_time and status == "approved"
+
+
+def card_status(task: Task, status: str | None) -> str | None:
+    """Статус для карточки: у неодноразового задания принятая попытка не блокирует новую, поэтому «выполнено» не показываем."""
+    return None if status == "approved" and not task.one_time else status
 
 # ---------- проверка ввода с сайта ----------
 
@@ -397,6 +423,8 @@ def render_task(cfg: TasksConfig, task: Task, seed: str, status: str | None = No
     text += f"\n\n{BALANCE_EMOJI} {_esc(fill(cfg.text('reward_line'), reward=task.reward))}"
     if status == "approved":
         text += f"\n\n✅ {_esc(cfg.text('status_done'))}"
+        if task.one_time:
+            text += f"\n{_esc(ONE_TIME_NOTE)}"
     elif status == "pending":
         text += f"\n\n🤍 {_esc(cfg.text('status_pending'))}"
     return text
@@ -425,28 +453,56 @@ def _cb(cfg: TasksConfig, action: str, task_id: int | None = None) -> str:
     return f"{cfg.cb[action]}:{int(task_id)}" if task_id is not None else cfg.cb[action]
 
 
-def menu_rows(cfg: TasksConfig, tasks: list[Task]) -> list[list[tuple[str, str]]]:
-    """Ряды меню [(подпись, callback_data)] без aiogram (для тестов): подарок, ссылка, задания по порядку, «Назад»."""
-    rows = [[(cfg.text("daily_label"), cfg.cb["daily"])], [(cfg.text("ref_label"), cfg.cb["ref"])]]
+def cooldown_suffix(seconds: float) -> str:
+    """« (5ч 12м)» — сколько осталось до следующего подарка: всегда часы и минуты, минуты округляются вверх, «0ч 0м» не показываем."""
+    total = max(int(-(-float(seconds) // 60)), 1)   # минуты вверх, не меньше одной
+    hours, minutes = divmod(total, 60)
+    return f" ({hours}ч {minutes}м)"
+
+
+def daily_button_label(cfg: TasksConfig, left: float | None) -> str:
+    """Подпись кнопки подарка. Во время кулдауна (left > 0 секунд) остаток вставляется после названия, перед закрывающим
+    эмодзи: «🤍 Ежедневный подарок (5ч 12м) 🤍»."""
+    text = cfg.text("daily_label")
+    if left is None or left <= 0:
+        return text
+    tail = " " + DAILY_EMOJI[1]
+    if text.endswith(tail):
+        return text[: -len(tail)] + cooldown_suffix(left) + tail
+    return text + cooldown_suffix(left)
+
+
+def menu_rows(cfg: TasksConfig, tasks: list[Task], daily_left: float | None = None) -> list[list[tuple[str, str]]]:
+    """Ряды меню [(подпись, callback_data)] без aiogram (для тестов): подарок, ссылка, задания по порядку, «Назад».
+    daily_left — сколько секунд осталось до следующего подарка (None / 0 — можно забирать)."""
+    rows = [[(daily_button_label(cfg, daily_left), cfg.cb["daily"])], [(cfg.text("ref_label"), cfg.cb["ref"])]]
     rows += [[(t.button_text, _cb(cfg, "task", t.id))] for t in tasks]
     rows.append([(BACK_LABEL, cfg.cb["back"])])
     return rows
 
 
-def menu_styles(tasks: list[Task]) -> tuple[str, ...]:
-    return ("", "") + ("",) * len(tasks) + (BACK_STYLE,)
+def menu_styles(
+    tasks: list[Task], daily_left: float | None = None, statuses: dict[int, str] | None = None
+) -> tuple[str, ...]:
+    """Цвета кнопок меню. Задание зелёное; одноразовое, за которое уже получена награда (`statuses` — {id: статус}), синее."""
+    daily = DAILY_WAIT_STYLE if daily_left is not None and daily_left > 0 else DAILY_READY_STYLE
+    statuses = statuses or {}
+    marks = tuple(TASK_DONE_STYLE if is_done(t, statuses.get(t.id)) else TASK_STYLE for t in tasks)
+    return (daily, REF_STYLE) + marks + (BACK_STYLE,)
 
 
 def task_rows(cfg: TasksConfig, task: Task, status: str | None) -> tuple[list[list[tuple[str, str]]], tuple[str, ...]]:
-    """Кнопки карточки: действие (если задание ещё можно выполнить) и «Назад» в меню раздела."""
+    """Кнопки карточки: действие (если задание можно выполнить) и «Назад» в меню раздела. У одноразового задания с уже
+    полученной наградой действие остаётся на месте, но серое и не работает (нажатие даёт только всплывающее окно)."""
     rows: list[list[tuple[str, str]]] = []
     styles: list[str] = []
-    if status not in ("approved", "pending"):
+    done = is_done(task, status)
+    if done or status not in ("approved", "pending"):
         if task.require_screenshot:
             rows.append([(cfg.text("send_label"), _cb(cfg, "send", task.id))])
         else:
             rows.append([(cfg.text("done_label"), _cb(cfg, "done", task.id))])
-        styles.append(ACTION_STYLE)
+        styles.append(ACTION_DONE_STYLE if done else ACTION_STYLE)
     rows.append([(BACK_LABEL, cfg.cb["menu"])])
     styles.append(BACK_STYLE)
     return rows, tuple(styles)
@@ -481,8 +537,10 @@ def _keyboard(rows: list[list[tuple[str, str]]], styles: tuple[str, ...]):
     )
 
 
-def build_menu_keyboard(cfg: TasksConfig, tasks: list[Task]):
-    return _keyboard(menu_rows(cfg, tasks), menu_styles(tasks))
+def build_menu_keyboard(
+    cfg: TasksConfig, tasks: list[Task], daily_left: float | None = None, statuses: dict[int, str] | None = None
+):
+    return _keyboard(menu_rows(cfg, tasks, daily_left), menu_styles(tasks, daily_left, statuses))
 
 
 def build_task_keyboard(cfg: TasksConfig, task: Task, status: str | None):

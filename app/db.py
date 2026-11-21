@@ -65,6 +65,14 @@ async def init_db(database_url: str) -> None:
         await conn.execute(text("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS username varchar(64)"))
         # «Ежедневный подарок»: момент последнего получения (NULL — ещё не брал)
         await conn.execute(text("ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS daily_at timestamptz"))
+        # «Одноразовое» задание: у уже существующих заданий включено (так они и работали)
+        await conn.execute(text("ALTER TABLE bonus_tasks ADD COLUMN IF NOT EXISTS one_time boolean NOT NULL DEFAULT true"))
+        # промокод: скидка действует 24 ч с момента ввода кода. Уже введённые, но ещё не потраченные коды получают
+        # полные сутки от момента обновления (условие IS NULL — после первого раза строка не меняется)
+        await conn.execute(text("ALTER TABLE user_promos ADD COLUMN IF NOT EXISTS activated_at timestamptz"))
+        await conn.execute(text(
+            "UPDATE user_promos SET activated_at = now() WHERE activated AND NOT used AND activated_at IS NULL"
+        ))
         # last_active_at: у уже существующих строк значением станет момент применения миграции (DEFAULT now() для
         # добавляемой колонки в PostgreSQL проставляется всем строкам сразу и без перезаписи таблицы), поэтому
         # текущие пользователи не попадут под очистку в первый же день
@@ -75,6 +83,16 @@ async def init_db(database_url: str) -> None:
         await conn.execute(
             text("CREATE INDEX IF NOT EXISTS idx_users_last_active_at ON bot_users (last_active_at)")
         )
+        # история пользователей («всего было»): таблицу создаёт create_all; пока она пуста (первый запуск после обновления),
+        # заполняем её теми, кто есть сейчас, и теми, кого уже приглашали по ссылке (они могли выйти). Дальше в неё только
+        # добавляют. Условие «таблица пуста» не зависит от строк внешнего запроса — Postgres проверяет его один раз по
+        # первичному ключу и на следующих запусках bot_users и referrals не читает.
+        await conn.execute(text(
+            "INSERT INTO user_history (bot_id, user_id) "
+            "SELECT u.bot_id, u.user_id FROM ("
+            "SELECT bot_id, user_id FROM bot_users UNION SELECT bot_id, invited_id FROM referrals"
+            ") u WHERE NOT EXISTS (SELECT 1 FROM user_history) ON CONFLICT DO NOTHING"
+        ))
         await conn.execute(text("UPDATE bot_profiles SET position = id WHERE position = 0"))
         await conn.execute(text("UPDATE bot_profiles SET active_since = now() WHERE is_active AND active_since IS NULL"))
 

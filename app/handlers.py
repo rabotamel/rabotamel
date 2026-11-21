@@ -10,7 +10,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from . import (
-    captcha, gallery, greeting, messaging, moderation, repo, shop, shop_buttons, suggest, task_review, tasks, topup, video_pool,
+    captcha, gallery, greeting, messaging, moderation, promo, repo, shop, shop_buttons, suggest, task_review, tasks, topup,
+    video_pool,
 )
 from .metrics import metrics
 from .models import BotProfile
@@ -32,7 +33,9 @@ MENU_BUTTON = "Меню"
 MENU_KEYBOARD_CARRIER = "🍭"
 
 
-def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bot | None = None) -> Router:
+def build_router(
+    stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bot | None = None, automsg=None
+) -> Router:
     """Каждый запуск polling получает свежий Router (один роутер нельзя подключить к двум Dispatcher).
 
     Логика: новый пользователь (его нет в БД) сначала проходит капчу; в БД он записывается только
@@ -51,6 +54,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
     # (и при новой капче) оно удаляется, чтобы в чате не копились одинаковые сообщения. В памяти: после
     # перезапуска бота прежнее приветствие просто останется в чате.
     last_greeting: dict[int, int] = {}
+    main_msg: dict[int, int] = {}   # id сообщения с главным меню (приветствие + кнопки): сверяется с last_greeting
     # user_id -> id сообщения раздела «Галерея» (в памяти). Нужно, чтобы /start не оставлял его висеть рядом с приветствием.
     last_gallery: dict[int, int] = {}
     # user_id -> id сообщения с открытым меню предложки (в памяти). Пока запись есть, всё, что пользователь
@@ -145,10 +149,17 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         if old_id is not None and old_id != msg.message_id:
             await safe_delete(bot, user_id, old_id)
 
-    def main_keyboard():
-        """Кнопки под приветствием: «Магазин» / «Галерея» (рандомизированные) ниже «Бесплатные конфеты» и «Купить конфеты»."""
+    async def main_keyboard(user_id: int | None = None):
+        """Кнопки под приветствием: «Магазин» / «Галерея» (рандомизированные), ниже «Купить конфеты», ещё ниже —
+        «Бесплатные конфеты». Пока у пользователя действует скидка по промокоду, к кнопке магазина дописано
+        «(🔥 -N% на Hч)»."""
+        suffix = ""
+        if user_id is not None:
+            percent, left = await get_discount(user_id)
+            suffix = shop.promo_button_suffix(percent, left)
         return shop_buttons.build_keyboard(
-            texts.shop_buttons, extra_rows=[tasks.menu_row(texts.tasks_menu), *topup_module.menu_rows()]
+            texts.shop_buttons, extra_rows=[*topup_module.menu_rows(), tasks.menu_row(texts.tasks_menu)],
+            shop_suffix=suffix,
         )
 
     async def drop_product_parts(bot: Bot, user_id: int) -> None:
@@ -183,6 +194,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         ref_pending.pop(user_id, None)
         topup_module.reset(user_id)
         shown.pop(user_id, None)
+        if automsg is not None:
+            automsg.forget(user_id)
         if stats.remove(user_id):
             log.info("Пользователь %s заблокировал бота %s — удалён из базы", user_id, stats.bot_id)
         try:
@@ -194,6 +207,9 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         """Любой 403 при отправке. Удаляем из базы только если пользователь точно сам заблокировал бота."""
         if messaging.is_blocked_by_user(e):
             await forget_user(user_id)
+
+    if automsg is not None:
+        automsg.on_blocked = forget_user   # автосообщение не дошло, потому что человек заблокировал бота
 
     async def reply(bot: Bot, user_id: int, text: str) -> None:
         """Короткое уведомление пользователю (результат проверки видео и т. п.): БЕЗ картинки бота."""
@@ -227,13 +243,14 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             # кнопки «Магазин» / «Галерея» крепятся прямо под приветствием (отдельного меню нет);
             # конфиг читается в момент отправки, а сохранён в БД, поэтому /start их не меняет
             msg = await messaging.send_message(
-                bot, user_id, text, profile.message_image_url, reply_markup=main_keyboard(),
+                bot, user_id, text, profile.message_image_url, reply_markup=await main_keyboard(user_id),
             )
             # подмена записи синхронная: при нескольких /start подряд прежнее приветствие удалит каждый следующий
             if len(last_greeting) > 5000:
                 last_greeting.clear()
             old_id = last_greeting.get(user_id)
             last_greeting[user_id] = msg.message_id
+            main_msg[user_id] = msg.message_id
             if old_id is not None and old_id != msg.message_id:
                 await safe_delete(bot, user_id, old_id)
         except TelegramForbiddenError as e:
@@ -360,6 +377,28 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             await drop_suggest(bot, user.id)
             await send_captcha(bot, user.id, force=True)
 
+    async def handle_promo(message: Message, bot: Bot, code: str) -> None:
+        """Сообщение из 8 букв/цифр от прошедшего капчу пользователя: если это ЕГО промокод — включаем скидку и отвечаем
+        текстом с сайта («Автосообщения»). Чужие и несуществующие коды игнорируются молча, как любой другой текст."""
+        user_id = message.from_user.id
+        try:
+            status, percent = await repo.activate_promo(stats.bot_id, user_id, code)
+            if status == "none":
+                return
+            if status == "used":
+                await reply(bot, user_id, promo.USED_TEXT)
+                return
+            if status == "expired":
+                await reply(bot, user_id, promo.EXPIRED_TEXT)
+                return
+            cfg = await promo.load_settings()
+            raw = cfg.reply or promo.DEFAULT_REPLY
+            await reply(bot, user_id, promo.render(raw, seed_of_bot(), code, percent))
+            if status == "ok":
+                await refresh_main_keyboard(bot, user_id)
+        except Exception:
+            log.exception("Не удалось обработать промокод пользователя %s", user_id)
+
     @router.message(F.chat.type == "private")
     async def on_private_message(message: Message, bot: Bot) -> None:
         user = message.from_user
@@ -380,6 +419,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                 await handle_task_screenshot(message, bot)
             elif user.id in suggest_menu:
                 await handle_suggestion(message, bot)
+            elif promo.parse_code(getattr(message, "text", None)):
+                await handle_promo(message, bot, promo.parse_code(message.text))
         else:
             # Любое другое сообщение от непрошедшего проверку — капча (если она уже в чате, повторно не шлём)
             await send_captcha(bot, user.id, force=False)
@@ -414,6 +455,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                 await ensure_menu_keyboard(bot, user_id, force=True)  # кнопка «Меню» у клавиатуры — после капчи всегда
                 await send_greeting(bot, user_id, 0)
                 await grant_referral(bot, user_id)   # пришёл по реферальной ссылке — награда пригласившему
+                if automsg is not None:
+                    await automsg.on_captcha_passed(user_id)   # автосообщение уйдёт через 30 минут (app/automsg.py)
             else:
                 await call.answer()
         else:
@@ -535,18 +578,46 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                 upper.append(sent.message_id)
         product_parts[user_id] = upper
 
+    async def get_discount(user_id: int) -> tuple[int, float | None]:
+        """Скидка пользователя по промокоду: (%, секунд до конца). (0, None) — нет (или БД не ответила — тогда
+        показываем обычные цены)."""
+        try:
+            percent, expires = await repo.get_promo_discount(stats.bot_id, user_id)
+        except Exception as e:
+            log.warning("Не удалось прочитать промокод пользователя %s: %s", user_id, e)
+            return 0, None
+        if not percent or expires is None:
+            return 0, None
+        left = (expires - datetime.now(timezone.utc)).total_seconds()
+        return (percent, left) if left > 0 else (0, None)
+
+    async def refresh_main_keyboard(bot: Bot, user_id: int) -> None:
+        """Скидка только что включилась: кнопки главного меню обновляются на месте, чтобы на кнопке магазина сразу
+        появилась приписка. Только если главное меню сейчас и есть последнее сообщение (иначе ничего не трогаем)."""
+        message_id = main_msg.get(user_id)
+        if message_id is None or last_greeting.get(user_id) != message_id:
+            return
+        try:
+            await bot.edit_message_reply_markup(chat_id=user_id, message_id=message_id,
+                                                reply_markup=await main_keyboard(user_id))
+        except Exception as e:   # сообщение удалено/не изменилось — не страшно, кнопка обновится при следующем показе меню
+            log.info("Кнопки главного меню пользователя %s не обновились: %s", user_id, e)
+
     async def show_shop_menu(call: CallbackQuery, bot: Bot, user_id: int) -> None:
         """Меню магазина: заголовок жирным, баланс из БД, кнопки видимых товаров из БД и «Назад» (товаров нет — только «Назад»)."""
         balance = await repo.get_candies(stats.bot_id, user_id)
         products = [shop.product_from_row(r) for r in await repo.list_shop_products(limit=shop.MAX_PRODUCTS)]
-        text = shop.render_menu(texts.shop_buttons.shop_heading, balance)
-        await show_screen(call, bot, user_id, text, shop.build_menu_keyboard(texts.shop_menu, products))
+        percent, left = await get_discount(user_id)
+        text = shop.render_menu(texts.shop_buttons.shop_heading, balance, percent, left)
+        await show_screen(call, bot, user_id, text, shop.build_menu_keyboard(texts.shop_menu, products, percent))
 
     async def show_main_menu(call: CallbackQuery, bot: Bot, user_id: int) -> None:
         """Главное меню = приветствие с кнопками «Магазин» / «Галерея» (то же сообщение, обновлённое на месте)."""
         balance = await repo.get_candies(stats.bot_id, user_id)
         text = greeting.render(texts.greeting, profile.name, balance)
-        await show_screen(call, bot, user_id, text, main_keyboard())
+        sent_id = await show_screen(call, bot, user_id, text, await main_keyboard(user_id))
+        if sent_id is not None:
+            main_msg[user_id] = sent_id
 
     async def topup_go_main(call: CallbackQuery, bot: Bot, user_id: int) -> None:
         await show_main_menu(call, bot, user_id)
@@ -592,10 +663,12 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         """Кнопки раздела «Магазин»: товар, «Купить», «Назад». Действие определяется по callback_data ЭТОГО бота
         (texts.shop_menu читается в момент нажатия): кнопки устаревших или чужих сообщений просто гасят «часики»."""
         parsed = shop.parse_callback(texts.shop_menu, call.data)
-        await safe_answer(call)
         user_id = call.from_user.id
         stats.touch_activity(user_id)
-        if parsed is None or not stats.has(user_id):
+        known = parsed is not None and stats.has(user_id)
+        if not (known and parsed[0] == "buy"):   # у «Купить» ответ на нажатие — всплывающее окно с итогом (buy_product)
+            await safe_answer(call)
+        if not known:
             return
         action, product_id = parsed
         if action == "product":
@@ -606,13 +679,38 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
                 return
             product = shop.product_from_row(row)
             seed = str(getattr(profile, "token", None) or stats.bot_id)   # seed бота: токен (как у остальных текстов)
-            await show_product_card(call, bot, user_id, shop.render_product_parts(product, seed),
-                                    shop.build_product_keyboard(texts.shop_menu, product))
+            percent, _ = await get_discount(user_id)
+            await show_product_card(call, bot, user_id, shop.render_product_parts(product, seed, percent),
+                                    shop.build_product_keyboard(texts.shop_menu, product, percent))
         elif action == "product_back":
             await show_shop_menu(call, bot, user_id)
         elif action == "back":
             await show_main_menu(call, bot, user_id)
-        # TODO: action == "buy" — покупка товара product_id за его цену (repo.spend_candies); пока заглушка, ничего не делает
+        elif action == "buy":
+            if product_id is None:   # кнопка старого сообщения без id товара
+                await safe_answer(call)
+                await show_shop_menu(call, bot, user_id)
+            else:
+                await buy_product(call, bot, user_id, product_id)
+
+    async def buy_product(call: CallbackQuery, bot: Bot, user_id: int, product_id: int) -> None:
+        """«Купить» в карточке товара: списание 🍬 по цене со скидкой (пока действуют 24 часа после ввода промокода)
+        одной транзакцией; скидка при этом не гасится. Не хватает конфет — окно «❌ У вас недостаточно средств».
+        Дальше — обновлённое меню магазина (баланс уже новый, строка про промокод на месте, пока скидка действует)."""
+        try:
+            result = await repo.buy_product(stats.bot_id, user_id, product_id)
+        except Exception:
+            log.exception("Покупка товара %s пользователем %s не удалась", product_id, user_id)
+            await safe_answer(call, "❌ Не удалось совершить покупку, попробуйте позже", alert=True)
+            return
+        if result.status == "gone":
+            await safe_answer(call)
+            await show_shop_menu(call, bot, user_id)   # товар скрыли или удалили, пока человек смотрел карточку
+        elif result.status == "funds":
+            await safe_answer(call, "❌ У вас недостаточно средств", alert=True)
+        else:
+            await safe_answer(call, f"✅ Вы приобрели «{result.name}» за {result.price}{shop.CANDY}", alert=True)
+            await show_shop_menu(call, bot, user_id)
 
     # ---------- «Бесплатные конфеты»: подарок, реферальная ссылка, задания из БД (app/tasks.py) ----------
 
@@ -630,20 +728,64 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             log.exception("Не удалось засчитать приглашение %s -> %s", referrer, invited_id)
             return
         if balance is not None:
+            if hasattr(stats, "note_referral"):
+                stats.note_referral()   # счётчик «приглашено по ссылке» на сайте (в памяти, без БД)
             await reply(bot, referrer, tasks.fill(texts.tasks_menu.text("invited"), reward=tasks.REFERRAL_REWARD))
 
-    async def show_free_menu(call, bot: Bot, user_id: int, balance: int | None = None) -> None:
-        """Меню «Бесплатные конфеты»: подарок, ссылка, видимые задания из БД и «Назад». Заданий нет — только подарок и ссылка."""
-        if balance is None:
-            balance = await repo.get_candies(stats.bot_id, user_id)
+    _UNKNOWN = object()   # «остаток кулдауна подарка ещё не известен» (None — известен: подарок можно забирать)
+
+    def daily_left_of(last) -> float | None:
+        """Сколько секунд осталось до следующего подарка по моменту последнего получения; None — можно забирать."""
+        if last is None:
+            return None
+        left = (last + tasks.DAILY_COOLDOWN - datetime.now(timezone.utc)).total_seconds()
+        return left if left > 0 else None
+
+    async def edit_screen(call, bot: Bot, user_id: int, text: str, markup) -> None:
+        """Обновляет экран НА МЕСТЕ (без удаления и повторной отправки). Если сообщение отредактировать нельзя (удалено,
+        слишком старое, подпись длиннее лимита) — присылает новый экран, как обычный переход."""
+        msg = getattr(call, "message", None)
+        if msg is None:
+            await show_screen(call, bot, user_id, text, markup)
+            return
+        try:
+            await messaging.edit_message(
+                bot, user_id, msg.message_id, text, markup, has_photo=bool(getattr(msg, "photo", None))
+            )
+        except TelegramForbiddenError as e:
+            await on_forbidden(e, user_id)
+            return
+        except TelegramAPIError as e:
+            log.info("Меню пользователя %s не отредактировано (%s) — присылаю новое", user_id, e)
+            await show_screen(call, bot, user_id, text, markup)
+            return
+        last_greeting[user_id] = msg.message_id   # это по-прежнему «главное меню»: /start его заменит
+
+    async def show_free_menu(call, bot: Bot, user_id: int, balance: int | None = None, daily_left=_UNKNOWN,
+                             edit: bool = False) -> None:
+        """Меню «Бесплатные конфеты»: подарок (зелёный, на время кулдауна — синий с остатком времени), ссылка, видимые
+        задания из БД и «Назад». Заданий нет — только подарок и ссылка. edit=True — отредактировать сообщение на месте,
+        иначе новое сообщение (прежнее удаляется). Баланс и остаток кулдауна, если не переданы, берутся одним запросом."""
+        if balance is None or daily_left is _UNKNOWN:
+            db_balance, last = await repo.get_balance_and_daily(stats.bot_id, user_id)
+            if balance is None:
+                balance = db_balance
+            if daily_left is _UNKNOWN:
+                daily_left = daily_left_of(last)
         items = [tasks.task_from_row(r) for r in await repo.list_tasks(limit=tasks.MAX_TASKS)]
+        # статусы нужны только для цвета кнопок одноразовых заданий (синяя — награда уже получена)
+        statuses = await repo.get_task_statuses(stats.bot_id, user_id) if any(t.one_time for t in items) else {}
         text = tasks.render_menu(texts.tasks_menu, texts.deco, balance)
-        await show_screen(call, bot, user_id, text, tasks.build_menu_keyboard(texts.tasks_menu, items))
+        markup = tasks.build_menu_keyboard(texts.tasks_menu, items, daily_left, statuses)
+        if edit:
+            await edit_screen(call, bot, user_id, text, markup)
+        else:
+            await show_screen(call, bot, user_id, text, markup)
 
     async def show_task_card(call, bot: Bot, user_id: int, row) -> None:
         task = tasks.task_from_row(row)
         completion = await repo.get_completion(stats.bot_id, user_id, task.id)
-        status = completion.status if completion else None
+        status = tasks.card_status(task, completion.status if completion else None)
         await show_screen(
             call, bot, user_id, tasks.render_task(texts.tasks_menu, task, seed_of_bot(), status),
             tasks.build_task_keyboard(texts.tasks_menu, task, status),
@@ -653,7 +795,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         cfg = texts.tasks_menu
         ok, balance, last = await repo.claim_daily(stats.bot_id, user_id, tasks.DAILY_REWARD, tasks.DAILY_COOLDOWN)
         if ok:
-            await show_free_menu(call, bot, user_id, balance)   # новое меню с обновлённым балансом
+            # то же сообщение, на месте: новый баланс и синяя кнопка подарка с остатком кулдауна
+            await show_free_menu(call, bot, user_id, balance, tasks.DAILY_COOLDOWN.total_seconds(), edit=True)
             await safe_answer(call, tasks.fill(cfg.text("daily_ok"), amount=tasks.DAILY_REWARD), alert=True)
         elif last is not None:
             left = (last + tasks.DAILY_COOLDOWN - datetime.now(timezone.utc)).total_seconds()
@@ -744,7 +887,8 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
         clear_task_wait(user_id)   # до обращения к БД: второе нажатие не отправит набор повторно
         try:
             cid = await repo.submit_task_screenshot(
-                stats.bot_id, user_id, row.id, int(row.reward), shots, stats_username(call.from_user)
+                stats.bot_id, user_id, row.id, int(row.reward), shots, stats_username(call.from_user),
+                repeatable=not bool(getattr(row, "one_time", True)),
             )
         except Exception:
             log.exception("Не удалось сохранить скриншоты задания от %s", user_id)
@@ -752,7 +896,7 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             await show_free_menu(call, bot, user_id)
             return
         await safe_answer(call)
-        if cid is None:   # уже выполнено или уже на проверке
+        if cid is None:   # одноразовое уже выполнено или задание уже на проверке
             await show_task_card(call, bot, user_id, row)
             return
         await reply(bot, user_id, cfg.text("sent"))
@@ -803,10 +947,16 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             await safe_answer(call)
             await show_task_card(call, bot, user_id, row)
             return
+        task = tasks.task_from_row(row)
         completion = await repo.get_completion(stats.bot_id, user_id, row.id)
-        if completion is not None and completion.status in ("approved", "pending"):
+        status = completion.status if completion else None
+        if tasks.is_done(task, status):
+            # одноразовое задание, награда уже получена: серая кнопка не работает — только всплывающее окно, экран не трогаем
+            await safe_answer(call, f"{cfg.text('status_done')}. {tasks.ONE_TIME_NOTE}", alert=True)
+            return
+        if status == "pending" or (status == "approved" and task.one_time):
             await safe_answer(call)
-            await show_task_card(call, bot, user_id, row)   # уже выполнено или на проверке — карточка с актуальным статусом
+            await show_task_card(call, bot, user_id, row)   # на проверке — карточка с актуальным статусом
             return
         if row.require_screenshot:   # «send» (и «done» по кнопке старого сообщения, если скриншот теперь нужен)
             if await repo.is_receipt_blocked(user_id):
@@ -816,7 +966,9 @@ def build_router(stats: UserStats, texts: BotTexts, profile: BotProfile, bot: Bo
             task_wait[user_id] = row.id
             await show_collect_screen(call, bot, user_id, row)
             return
-        balance = await repo.complete_task_instant(stats.bot_id, user_id, row.id, int(row.reward), stats_username(call.from_user))
+        balance = await repo.complete_task_instant(
+            stats.bot_id, user_id, row.id, int(row.reward), stats_username(call.from_user), repeatable=not task.one_time
+        )
         if balance is None:
             await safe_answer(call)
             await show_task_card(call, bot, user_id, row)

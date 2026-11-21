@@ -30,7 +30,7 @@ from typing import Any, Awaitable, Callable
 
 from . import messaging, moderation, repo, task_review
 from .config import _secret
-from .currency import format_money
+from .currency import CANDY_STARS, format_money
 
 log = logging.getLogger("bot.topup")
 
@@ -92,7 +92,7 @@ def to_rub(candies: int) -> Decimal:
 
 
 def to_stars(candies: int) -> Decimal:
-    return Decimal(candies)
+    return Decimal(candies) * CANDY_STARS   # курс звёзд общий с «Песочницей» (currency.CANDY_STARS)
 
 
 def money(value: Decimal | int | str) -> str:

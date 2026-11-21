@@ -10,12 +10,16 @@ from sqlalchemy.exc import IntegrityError
 
 from . import db
 from .cleanup_sql import build_delete_inactive_sql
+from . import shop as shop_logic
 from .models import (
+    AutoMessageQueue,
+    UserPromo,
     TASK_APPROVED,
     TASK_PENDING,
     TASK_REJECTED,
     BonusTask,
     Referral,
+    UserHistory,
     TaskCompletion,
     TaskCompletionFile,
     TaskReviewMessage,
@@ -252,9 +256,12 @@ async def load_users(bot_id: int) -> dict[int, str | None]:
 
 async def save_users(
     bot_id: int, add: dict[int, str | None], rename: dict[int, str | None], remove: set[int]
-) -> None:
+) -> int:
     """Одна транзакция на пачку: сначала удаления, затем вставки, затем смена юзернеймов.
-    Порядок важен: удалённый и снова прошедший капчу пользователь начинает с чистого баланса."""
+    Порядок важен: удалённый и снова прошедший капчу пользователь начинает с чистого баланса.
+    Вставка в историю (`user_history`, для счётчика «всего было») идёт в той же транзакции и тем же пакетом, отдельных
+    обращений к БД не добавляет. Возвращает, сколько из добавленных пользователей прошли капчу у этого бота ВПЕРВЫЕ."""
+    new_total = 0
     async with db.SessionLocal() as s, s.begin():
         rem_list = list(remove)
         for i in range(0, len(rem_list), 5000):
@@ -269,6 +276,13 @@ async def save_users(
                 .values([{"bot_id": bot_id, "user_id": u, "username": n} for u, n in chunk])
                 .on_conflict_do_nothing()
             )
+            fresh = await s.execute(
+                pg_insert(UserHistory)
+                .values([{"bot_id": bot_id, "user_id": u} for u, _ in chunk])
+                .on_conflict_do_nothing()
+                .returning(UserHistory.user_id)
+            )
+            new_total += len(fresh.all())
 
         if rename:
             # executemany одной командой; имена параметров не совпадают с колонками (иначе SQLAlchemy ругнётся)
@@ -279,6 +293,20 @@ async def save_users(
                 .values(username=bindparam("b_name")),
                 [{"b_bot": bot_id, "b_uid": u, "b_name": n} for u, n in rename.items()],
             )
+    return new_total
+
+
+async def load_user_totals(bot_id: int) -> tuple[int, int, int]:
+    """(всего прошедших капчу у этого бота за всё время, из них приглашённых по реферальной ссылке, всего у всех ботов за
+    всё время) — ОДНИМ запросом из трёх count по первичным ключам. Вызывается один раз при запуске бота; дальше счётчики
+    ведутся в памяти (UserStats), а сайт читает их оттуда."""
+    async with db.SessionLocal() as s:
+        row = (await s.execute(select(
+            select(func.count()).select_from(UserHistory).where(UserHistory.bot_id == bot_id).scalar_subquery(),
+            select(func.count()).select_from(Referral).where(Referral.bot_id == bot_id).scalar_subquery(),
+            select(func.count()).select_from(UserHistory).scalar_subquery(),
+        ))).one()
+    return int(row[0]), int(row[1]), int(row[2])
 
 
 async def get_candies(bot_id: int, user_id: int) -> int:
@@ -781,6 +809,16 @@ async def replace_shop_products(items) -> int:
 
 # ---------- «Бесплатные конфеты»: ежедневный подарок, рефералы, задания ----------
 
+async def get_balance_and_daily(bot_id: int, user_id: int) -> tuple[int, datetime | None]:
+    """Баланс 🍬 и момент последнего ежедневного подарка (None — не брал) ОДНИМ запросом по ключу: меню «Бесплатные
+    конфеты» показывает и то, и другое. Пользователя нет в базе — (0, None)."""
+    async with db.SessionLocal() as s:
+        row = (await s.execute(
+            select(BotUser.candies, BotUser.daily_at).where(BotUser.bot_id == bot_id, BotUser.user_id == user_id)
+        )).one_or_none()
+    return (int(row[0] or 0), row[1]) if row is not None else (0, None)
+
+
 async def claim_daily(bot_id: int, user_id: int, amount: int, cooldown: timedelta) -> tuple[bool, int | None, datetime | None]:
     """Ежедневный подарок: ОДИН условный UPDATE (подарок не брали или с прошлого прошло >= cooldown), поэтому два быстрых
     нажатия подряд не выдадут его дважды. (True, новый баланс, None) — выдан; (False, None, когда брали прошлый) — рано;
@@ -854,13 +892,15 @@ async def get_task(task_id: int, only_visible: bool = True) -> BonusTask | None:
         return (await s.execute(q)).scalar_one_or_none()
 
 
-async def add_task(button_text: str, about: str, reward: int, require_screenshot: bool, visible: bool = True) -> BonusTask:
+async def add_task(
+    button_text: str, about: str, reward: int, require_screenshot: bool, visible: bool = True, one_time: bool = True
+) -> BonusTask:
     """Новое задание — в конец списка."""
     async with db.SessionLocal() as s, s.begin():
         last = (await s.execute(select(func.max(BonusTask.position)))).scalar_one_or_none() or 0
         row = BonusTask(
             button_text=button_text, about=about, reward=reward, require_screenshot=require_screenshot,
-            position=last + 1, is_visible=visible,
+            one_time=one_time, position=last + 1, is_visible=visible,
         )
         s.add(row)
         await s.flush()
@@ -868,7 +908,7 @@ async def add_task(button_text: str, about: str, reward: int, require_screenshot
 
 
 async def update_task(task_id: int, **values) -> BonusTask | None:
-    allowed = {k: v for k, v in values.items() if k in {"button_text", "about", "reward", "require_screenshot", "is_visible"}}
+    allowed = {k: v for k, v in values.items() if k in {"button_text", "about", "reward", "require_screenshot", "one_time", "is_visible"}}
     async with db.SessionLocal() as s, s.begin():
         row = (await s.execute(select(BonusTask).where(BonusTask.id == task_id).with_for_update())).scalar_one_or_none()
         if row is None:
@@ -906,13 +946,28 @@ async def get_completion(bot_id: int, user_id: int, task_id: int) -> TaskComplet
         )).scalar_one_or_none()
 
 
-async def _upsert_completion(s, bot_id: int, user_id: int, task_id: int, **values) -> int | None:
-    """Создаёт запись о выполнении или обновляет ОТКЛОНЁННУЮ (повторная попытка). pending/approved не трогает — тогда None."""
+async def get_task_statuses(bot_id: int, user_id: int) -> dict[int, str]:
+    """{id задания: статус выполнения} этого пользователя — одним запросом (для цвета кнопок в меню заданий)."""
+    async with db.SessionLocal() as s:
+        rows = (await s.execute(
+            select(TaskCompletion.task_id, TaskCompletion.status)
+            .where(TaskCompletion.bot_id == bot_id, TaskCompletion.user_id == user_id)
+        )).all()
+        return {int(t): str(st) for t, st in rows}
+
+
+async def _upsert_completion(
+    s, bot_id: int, user_id: int, task_id: int, repeatable: bool = False, **values
+) -> int | None:
+    """Создаёт запись о выполнении или обновляет ОТКЛОНЁННУЮ (повторная попытка). pending не трогает — тогда None.
+    Принятую (approved) обновляет только у неодноразового задания (`repeatable=True`): новая попытка заменяет прежнюю
+    запись, а награда за прежнюю уже начислена и не отзывается; у одноразового approved тоже даёт None."""
     stmt = pg_insert(TaskCompletion).values(bot_id=bot_id, user_id=user_id, task_id=task_id, **values)
+    redo = [TASK_REJECTED, TASK_APPROVED] if repeatable else [TASK_REJECTED]
     stmt = stmt.on_conflict_do_update(
         index_elements=["bot_id", "user_id", "task_id"],
         set_={**values, "created_at": func.now(), "decided_at": None},
-        where=TaskCompletion.status == TASK_REJECTED,
+        where=TaskCompletion.status.in_(redo),
     ).returning(TaskCompletion.id)
     return (await s.execute(stmt)).scalar_one_or_none()
 
@@ -921,13 +976,16 @@ class _NoUser(Exception):
     """Пользователя нет в базе: транзакцию откатываем целиком (отметка о задании не должна остаться без награды)."""
 
 
-async def complete_task_instant(bot_id: int, user_id: int, task_id: int, reward: int, username: str | None = None) -> int | None:
-    """Задание без скриншота: отметка и награда одной транзакцией. Новый баланс; None — уже выполнено/на проверке
-    или пользователя нет в базе (тогда отметка откатывается и конфеты не теряются)."""
+async def complete_task_instant(
+    bot_id: int, user_id: int, task_id: int, reward: int, username: str | None = None, repeatable: bool = False
+) -> int | None:
+    """Задание без скриншота: отметка и награда одной транзакцией. Новый баланс; None — уже выполнено (одноразовое)/на
+    проверке или пользователя нет в базе (тогда отметка откатывается и конфеты не теряются). `repeatable=True` — у
+    неодноразового задания награду можно получать снова."""
     try:
         async with db.SessionLocal() as s, s.begin():
             cid = await _upsert_completion(
-                s, bot_id, user_id, task_id, status=TASK_APPROVED, reward=reward, username=username,
+                s, bot_id, user_id, task_id, repeatable, status=TASK_APPROVED, reward=reward, username=username,
                 file_id=None, file_kind=None,
             )
             if cid is None:
@@ -946,16 +1004,17 @@ async def complete_task_instant(bot_id: int, user_id: int, task_id: int, reward:
 
 
 async def submit_task_screenshot(
-    bot_id: int, user_id: int, task_id: int, reward: int, files: list[tuple[str, str]], username: str | None = None
+    bot_id: int, user_id: int, task_id: int, reward: int, files: list[tuple[str, str]], username: str | None = None,
+    repeatable: bool = False,
 ) -> int | None:
     """Скриншоты на проверку: `files` — [(file_id, 'photo'|'document')], от 1 штуки. id заявки; None — задание уже
-    выполнено или уже на проверке. Заявка и набор файлов пишутся одной транзакцией (при повторной отправке после
+    выполнено (одноразовое) или уже на проверке; `repeatable=True` — у неодноразового задания можно слать снова. Заявка и набор файлов пишутся одной транзакцией (при повторной отправке после
     отказа старые файлы заменяются)."""
     if not files:
         return None
     async with db.SessionLocal() as s, s.begin():
         cid = await _upsert_completion(
-            s, bot_id, user_id, task_id, status=TASK_PENDING, reward=reward, username=username,
+            s, bot_id, user_id, task_id, repeatable, status=TASK_PENDING, reward=reward, username=username,
             file_id=files[0][0], file_kind=files[0][1],
         )
         if cid is None:
@@ -1349,3 +1408,129 @@ async def list_topup_orders(status: str, method: str | None = None) -> list[Topu
         if method:
             q = q.where(TopupOrder.method == method)
         return list((await s.execute(q.order_by(TopupOrder.id).limit(200))).scalars())
+
+
+# ---------- «Автосообщения» и промокоды (app/promo.py, app/automsg.py) ----------
+
+async def queue_auto_message(bot_id: int, user_id: int, due_at: datetime) -> None:
+    """Ставит пользователя в очередь автосообщения (повторно прошёл капчу — срок обновляется)."""
+    async with db.SessionLocal() as s, s.begin():
+        stmt = pg_insert(AutoMessageQueue).values(bot_id=bot_id, user_id=user_id, due_at=due_at)
+        await s.execute(stmt.on_conflict_do_update(index_elements=["bot_id", "user_id"], set_={"due_at": due_at}))
+
+
+async def load_auto_queue(bot_id: int) -> list[tuple[int, datetime]]:
+    """Все, кому автосообщение этого бота ещё не ушло: один запрос при запуске бота."""
+    async with db.SessionLocal() as s:
+        rows = (await s.execute(
+            select(AutoMessageQueue.user_id, AutoMessageQueue.due_at).where(AutoMessageQueue.bot_id == bot_id)
+        )).all()
+    return [(int(uid), due) for uid, due in rows]
+
+
+async def claim_auto_message(bot_id: int, user_id: int) -> bool:
+    """Забирает запись из очереди ОДНИМ DELETE: True только тому, кто реально удалил (два процесса во время деплоя
+    не отправят сообщение дважды)."""
+    async with db.SessionLocal() as s, s.begin():
+        res = await s.execute(
+            delete(AutoMessageQueue)
+            .where(AutoMessageQueue.bot_id == bot_id, AutoMessageQueue.user_id == user_id)
+            .returning(AutoMessageQueue.user_id)
+        )
+        return res.scalar_one_or_none() is not None
+
+
+async def issue_promo(bot_id: int, user_id: int, percent: int) -> str:
+    """Выдаёт пользователю новый уникальный промокод (прежний, если был, заменяется; скидка снова не активна)."""
+    from .promo import generate_code
+
+    for _ in range(10):
+        code = generate_code()
+        try:
+            async with db.SessionLocal() as s, s.begin():
+                stmt = pg_insert(UserPromo).values(
+                    bot_id=bot_id, user_id=user_id, code=code, percent=percent, activated=False, used=False
+                )
+                await s.execute(stmt.on_conflict_do_update(
+                    index_elements=["bot_id", "user_id"],
+                    set_={"code": code, "percent": percent, "activated": False, "used": False, "activated_at": None,
+                          "created_at": func.now()},
+                ))
+            return code
+        except IntegrityError:   # такой код уже есть у другого пользователя — пробуем другой
+            continue
+    raise RuntimeError("не удалось подобрать уникальный промокод")
+
+
+def _promo_expires(promo: UserPromo | None) -> datetime | None:
+    """Когда истекает скидка по промокоду; None — скидки нет (код не введён, погашен по старым правилам или срок вышел)."""
+    if promo is None or not promo.activated or promo.used or promo.activated_at is None:
+        return None
+    expires = promo.activated_at + shop_logic.PROMO_DURATION
+    return expires if expires > datetime.now(timezone.utc) else None
+
+
+async def get_promo_discount(bot_id: int, user_id: int) -> tuple[int, datetime | None]:
+    """(скидка в %, момент окончания) прямо сейчас; (0, None) — скидки нет. Скидка действует PROMO_DURATION (24 ч)
+    с ввода промокода — на любое число покупок."""
+    async with db.SessionLocal() as s:
+        promo = (await s.execute(
+            select(UserPromo).where(UserPromo.bot_id == bot_id, UserPromo.user_id == user_id)
+        )).scalar_one_or_none()
+    expires = _promo_expires(promo)
+    return (int(promo.percent), expires) if expires is not None else (0, None)
+
+
+async def activate_promo(bot_id: int, user_id: int, code: str) -> tuple[str, int | None]:
+    """Пользователь ввёл код в чат. ('none', None) — такого кода у этого пользователя нет (чужой тоже «нет»);
+    ('used', %) — погашен по прежним правилам (первой покупкой); ('expired', %) — 24 часа с ввода уже прошли;
+    ('ok', %) — активирован сейчас (с этого момента идут 24 часа); ('active', %) — уже активирован и ещё действует."""
+    async with db.SessionLocal() as s, s.begin():
+        row = (await s.execute(
+            select(UserPromo).where(UserPromo.code == code, UserPromo.bot_id == bot_id, UserPromo.user_id == user_id)
+            .with_for_update()
+        )).scalar_one_or_none()
+        if row is None:
+            return "none", None
+        if row.used:
+            return "used", int(row.percent)
+        if row.activated:
+            if _promo_expires(row) is None:
+                return "expired", int(row.percent)
+            return "active", int(row.percent)
+        row.activated = True
+        row.activated_at = datetime.now(timezone.utc)
+        return "ok", int(row.percent)
+
+
+@dataclass(frozen=True)
+class Purchase:
+    status: str            # ok | gone (товар скрыт/удалён) | funds (не хватает конфет)
+    name: str = ""
+    price: int = 0         # сколько списано (или сколько нужно, если не хватило) — уже со скидкой
+    balance: int = 0
+    percent: int = 0       # какая скидка была применена (0 — без скидки)
+
+
+async def buy_product(bot_id: int, user_id: int, product_id: int) -> Purchase:
+    """Покупка товара за 🍬 одной транзакцией: цена со скидкой (пока действует промокод — 24 ч с ввода, на любое число
+    покупок) и списание (только если хватает)."""
+    async with db.SessionLocal() as s, s.begin():
+        prod = await s.get(ShopProduct, product_id)
+        if prod is None or not prod.is_visible:
+            return Purchase("gone")
+        promo = (await s.execute(
+            select(UserPromo).where(UserPromo.bot_id == bot_id, UserPromo.user_id == user_id).with_for_update()
+        )).scalar_one_or_none()
+        percent = int(promo.percent) if _promo_expires(promo) is not None else 0
+        price = shop_logic.discounted_price(int(prod.price), percent)
+        res = await s.execute(
+            update(BotUser)
+            .where(BotUser.bot_id == bot_id, BotUser.user_id == user_id, BotUser.candies >= price)
+            .values(candies=BotUser.candies - price, last_active_at=func.now())
+            .returning(BotUser.candies)
+        )
+        balance = res.scalar_one_or_none()
+        if balance is None:
+            return Purchase("funds", prod.name, price, 0, percent)
+        return Purchase("ok", prod.name, price, int(balance), percent)

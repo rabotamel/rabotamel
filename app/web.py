@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from . import auth, avatars, moderation, push, repo, sandbox, shop, shop_io, tasks
+from . import auth, avatars, moderation, promo, push, repo, sandbox, shop, shop_io, tasks
 from .metrics import metrics
 from .events import bus
 from .models import STATUS_ACTIVE, STATUS_QUEUED
@@ -87,7 +87,7 @@ class PushTestIn(BaseModel):
 class CandiesIn(BaseModel):
     target: str = ""
     amount: str = ""  # строкой, чтобы не терять знаки после запятой у рублей/долларов
-    currency: Literal["candy", "rub", "usd"] = "candy"
+    currency: Literal["candy", "rub", "usd", "star"] = "candy"
     action: Literal["give", "take"]
     confirm: bool = False
 
@@ -121,12 +121,19 @@ class AboutIn(BaseModel):
     about: str = ""
 
 
+class AutoMessageIn(BaseModel):
+    text: str = ""                  # сообщение, которое уходит через 30 минут после капчи (как введено)
+    percent: int | str | None = ""  # скидка по промокоду, %
+    reply: str = ""                 # ответ бота, когда человек ввёл свой промокод
+
+
 class TaskIn(BaseModel):
     button_text: str = ""           # подпись кнопки задания в боте
     about: str = ""                 # описание задания (оформление и [а/б] — как у товаров)
     reward: int | str = ""          # награда в конфетах 🍬
     screenshot: bool = False        # требовать ли прикрепить скриншот (награду тогда начисляет модератор)
     visible: bool = True            # показывать ли задание в боте
+    one_time: bool = True           # одноразовое: после награды повторно выполнить нельзя (кнопка синяя)
 
 
 class ProductIn(BaseModel):
@@ -243,6 +250,8 @@ async def build_state(request: Request) -> dict:
             "running": running,
             "note": st["note"] if not running else "работает",
             "users": manager.users_count() if running else None,
+            # счётчики за всё время — только из памяти (UserStats), БД на каждое обновление страницы не трогаем
+            "totals": manager.user_totals() if running else None,
             # сколько видео сейчас в галерее этого бота (одобренные заявки)
             "videos": await repo.count_gallery_videos(active.id) if running else None,
             "since": active.active_since.isoformat() if active.active_since else None,
@@ -539,6 +548,37 @@ async def delete_moderator(mod_id: int):
     return {"ok": True}
 
 
+# ---------- автосообщения и промокоды ----------
+
+@api.get("/automessage")
+async def get_automessage():
+    cfg = await promo.load_settings(fresh=True)
+    return {
+        "text": cfg.text, "percent": cfg.percent, "reply": cfg.reply,
+        "delay_minutes": promo.AUTO_DELAY // 60, "max_text": promo.MAX_TEXT, "max_raw": promo.MAX_RAW,
+    }
+
+
+@api.post("/automessage")
+async def save_automessage(body: AutoMessageIn):
+    try:
+        cfg = promo.normalize(body.text, body.percent, body.reply)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    await promo.save_settings(cfg)
+    return {"ok": True, "text": cfg.text, "percent": cfg.percent, "reply": cfg.reply}
+
+
+@api.post("/automessage/length")
+async def automessage_length(body: AboutIn):
+    """Счётчик под полями: сколько введено и сколько займёт в Telegram в худшем случае."""
+    text = body.about.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return {
+        "site": len(text), "site_max": promo.MAX_RAW,
+        "telegram": promo.telegram_length(text), "telegram_max": promo.MAX_TEXT,
+    }
+
+
 # ---------- товары магазина ----------
 
 def _product_dict(row) -> dict:
@@ -646,13 +686,14 @@ async def import_shop_products(body: ShopImportIn):
     return {"ok": True, "applied": True, "count": len(items), "current": current}
 
 
-# ---------- задания («Бесплатные конфеты»; настраиваются во вкладке «Магазин») ----------
+# ---------- задания («Бесплатные конфеты»; настраиваются во вкладке «Кнопки в боте») ----------
 
 def _task_dict(row) -> dict:
     t = tasks.task_from_row(row)
     return {
         "id": t.id, "button_text": t.button_text, "about": t.about, "reward": t.reward,
-        "screenshot": t.require_screenshot, "visible": bool(row.is_visible), "position": row.position,
+        "screenshot": t.require_screenshot, "visible": bool(row.is_visible), "one_time": t.one_time,
+        "position": row.position,
     }
 
 
@@ -661,7 +702,7 @@ def _clean_task(body: TaskIn) -> dict:
         return {
             "button_text": tasks.normalize_button_text(body.button_text), "about": tasks.normalize_description(body.about),
             "reward": tasks.normalize_reward(body.reward), "require_screenshot": bool(body.screenshot),
-            "is_visible": bool(body.visible),
+            "is_visible": bool(body.visible), "one_time": bool(body.one_time),
         }
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -682,7 +723,8 @@ async def add_task(body: TaskIn):
     if len(await repo.list_tasks(only_visible=False)) >= 200:
         raise HTTPException(400, "Слишком много заданий")
     row = await repo.add_task(
-        values["button_text"], values["about"], values["reward"], values["require_screenshot"], values["is_visible"]
+        values["button_text"], values["about"], values["reward"], values["require_screenshot"], values["is_visible"],
+        values["one_time"],
     )
     bus.publish({"type": "changed"})
     return {"ok": True, "task": _task_dict(row)}

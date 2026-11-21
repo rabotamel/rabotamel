@@ -28,6 +28,13 @@ class PureTests(unittest.TestCase):
         self.assertEqual((topup.money(topup.to_rub(7)), topup.money(topup.to_usd(150)), topup.money(topup.to_stars(5))),
                          ("5,6", "1,5", "5"))
 
+    def test_sandbox_star_rate_matches_topup(self):
+        """«Песочница» выдаёт конфеты за звёзды по тому же курсу, что и «Купить конфеты»."""
+        from app import currency
+        for candies in (1, 7, 1000):
+            stars = topup.to_stars(candies)
+            self.assertEqual(currency.to_candies(stars, currency.STAR), candies)
+
     def test_parse_amount(self):
         self.assertEqual([topup.parse_amount(t) for t in ("100", " 1 000 ", "500 конфет", "x", "", None, "0", "-5", "1000001")],
                          [100, 1000, 500, None, None, None, None, 5, None])

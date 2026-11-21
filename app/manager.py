@@ -14,6 +14,7 @@ from aiogram.exceptions import (
 )
 
 from . import avatars, push, repo, task_review, topup, video_pool
+from .automsg import AutoMessenger
 from .config import Settings
 from .events import bus
 from .handlers import build_router
@@ -104,6 +105,10 @@ class BotManager:
 
     def users_count(self) -> int | None:
         return self.stats.count if self.stats else None
+
+    def user_totals(self) -> dict | None:
+        """Счётчики «за всё время» (с вышедшими и удалёнными, по ссылке, у всех ботов) — из памяти, без БД."""
+        return self.stats.totals if self.stats else None
 
     def is_running(self) -> bool:
         return bool(self.state["running"] and self.bot and self.stats and self.texts and self.profile)
@@ -230,6 +235,7 @@ class BotManager:
         forwarder = asyncio.create_task(forward_switch())
         stopper = asyncio.create_task(stop.wait())
         stats_task: asyncio.Task | None = None
+        automsg: AutoMessenger | None = None
         stats: UserStats | None = None
         dp: Dispatcher | None = None
         polling: asyncio.Task | None = None
@@ -283,12 +289,16 @@ class BotManager:
             self.bot, self.profile, self.texts = bot, profile, texts
             self._set_state(True, profile.id, me.username, "работает")
 
+            # автосообщение через 30 минут после капчи: те, кто ждал его до перезапуска, получают таймеры заново
+            automsg = AutoMessenger(bot, stats, profile)
+            await automsg.start()
+
             # 3. polling с защитой от «падений»
             crashes = 0
             loop = asyncio.get_running_loop()
             while not stop.is_set():
                 dp = Dispatcher()
-                dp.include_router(build_router(stats, texts, profile, bot))
+                dp.include_router(build_router(stats, texts, profile, bot, automsg))
                 polling = asyncio.create_task(
                     dp.start_polling(
                         bot,
@@ -316,6 +326,8 @@ class BotManager:
 
         finally:
             self.bot = self.profile = self.texts = None
+            if automsg is not None:
+                await automsg.close()
             topup.detach(profile.id)
             task_review.detach(profile.id)
             forwarder.cancel()
@@ -342,11 +354,13 @@ class BotManager:
     async def _stats_loop(self, stats: UserStats, stop: asyncio.Event) -> None:
         """Раз в секунду сообщает браузерам новое число (если оно изменилось), раз в 15 секунд сбрасывает в БД."""
         last: int | None = None
+        last_totals: dict | None = None
         tick = 0
         while not stop.is_set():
-            if stats.count != last:
-                last = stats.count
-                bus.publish({"type": "stats", "bot_id": stats.bot_id, "users": last})
+            totals = stats.totals
+            if stats.count != last or totals != last_totals:
+                last, last_totals = stats.count, totals
+                bus.publish({"type": "stats", "bot_id": stats.bot_id, "users": last, "totals": totals})
             await self._sleep(stop, 1)
             tick += 1
             if tick % 15 == 0:

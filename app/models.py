@@ -87,6 +87,18 @@ class BotUser(Base):
     daily_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class UserHistory(Base):
+    """Все, кто когда-либо прошёл капчу у бота: запись создаётся один раз и НЕ удаляется вместе с `bot_users` (ни при
+    удалении в «Песочнице», ни при автоочистке, ни когда человек заблокировал бота). Нужна только для счётчика «сколько
+    всего было пользователей» без двойного счёта тех, кто вернулся. Без внешних ключей: история не пропадает и вместе с
+    ботом. Читается один раз при запуске бота (count), дальше счётчик ведётся в памяти (app/stats.py)."""
+
+    __tablename__ = "user_history"
+
+    bot_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+
 class PushSubscription(Base):
     __tablename__ = "push_subscriptions"
 
@@ -262,11 +274,12 @@ TASK_REJECTED = "rejected"   # отклонено (можно отправить
 
 class BonusTask(Base):
     """Задание раздела «Бесплатные конфеты». Список общий для всех токенов бота (как товары магазина): при ротации
-    токена задания остаются. В коде заданий нет — бот берёт их отсюда, а править их можно во вкладке «Магазин» на сайте.
+    токена задания остаются. В коде заданий нет — бот берёт их отсюда, а править их можно во вкладке «Кнопки в боте» на сайте.
 
     `about` хранится как введено (с `**…**`, `[а/б]` и т. д.; в HTML переводится при показе через shop.format_about).
     `require_screenshot` — нужно ли прикреплять скриншот (тогда награду начисляет модератор после проверки); без скриншота
-    награда начисляется сразу по кнопке выполнения (один раз на пользователя). Показываются только is_visible, в порядке (position, id)."""
+    награда начисляется сразу по кнопке выполнения. `one_time` (по умолчанию да) — награду можно получить один раз на
+    пользователя; если выключено, задание можно выполнять снова и снова. Показываются только is_visible, в порядке (position, id)."""
 
     __tablename__ = "bonus_tasks"
     __table_args__ = (Index("ix_bonus_tasks_order", "is_visible", "position", "id"),)
@@ -276,6 +289,8 @@ class BonusTask(Base):
     about: Mapped[str] = mapped_column(Text, default="", server_default="")
     reward: Mapped[int] = mapped_column(BigInteger)
     require_screenshot: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    # одноразовое: после награды (отклонение не считается) пользователь не может выполнить задание повторно, кнопка синяя
+    one_time: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     position: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     is_visible: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -283,8 +298,9 @@ class BonusTask(Base):
 
 class TaskCompletion(Base):
     """Выполнение задания пользователем. Баланс 🍬 у каждого бота свой, поэтому и выполнение привязано к bot_id.
-    Один пользователь — одна запись на задание: повторно награду не получить (пока запись pending/approved); после
-    отклонения скриншот можно отправить заново. Награда запоминается в момент отправки (`reward`)."""
+    Один пользователь — одна запись на задание: у одноразового задания повторно награду не получить (пока запись
+    pending/approved); у неодноразового запись после принятия перезаписывается новой попыткой. После отклонения
+    скриншот можно отправить заново. Награда запоминается в момент отправки (`reward`)."""
 
     __tablename__ = "task_completions"
     __table_args__ = (
@@ -346,4 +362,37 @@ class Referral(Base):
     bot_id: Mapped[int] = mapped_column(ForeignKey("bot_profiles.id", ondelete="CASCADE"), primary_key=True)
     invited_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     referrer_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ---------- «Автосообщения» и промокоды ----------
+
+class AutoMessageQueue(Base):
+    """Очередь автосообщения: запись создаётся, когда пользователь прошёл капчу, и удаляется в момент отправки
+    (спустя promo.AUTO_DELAY). Лежит в БД, чтобы перезапуск приложения (на бесплатном Render они частые) не терял
+    тех, кому сообщение ещё не ушло; при запуске бот один раз читает свои записи и ставит таймеры в памяти."""
+
+    __tablename__ = "auto_message_queue"
+
+    bot_id: Mapped[int] = mapped_column(ForeignKey("bot_profiles.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class UserPromo(Base):
+    """Персональный промокод пользователя (8 символов A-Z0-9, уникален во всей таблице). Баланс 🍬 у каждого бота
+    свой, поэтому и промокод привязан к bot_id. `percent` запоминается в момент выдачи. Скидка действует, когда
+    `activated` (человек ввёл код в чат с ботом) и с `activated_at` не прошло shop.PROMO_DURATION (24 ч): за это время
+    скидку можно применять к любому числу покупок. `used` — наследие прежних правил («до первой покупки»): помеченные им
+    промокоды остаются погашенными, а новыми покупками флаг больше не ставится."""
+
+    __tablename__ = "user_promos"
+
+    bot_id: Mapped[int] = mapped_column(ForeignKey("bot_profiles.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    code: Mapped[str] = mapped_column(String(8), unique=True)
+    percent: Mapped[int] = mapped_column(Integer)
+    activated: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    used: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)   # когда ввёл код
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

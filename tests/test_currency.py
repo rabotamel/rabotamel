@@ -35,6 +35,17 @@ class CurrencyTests(unittest.TestCase):
         r = c.convert_all(D("100"), c.CANDY)
         self.assertEqual((r[c.RUB], r[c.USD]), (D("80.0"), D("1.00")))
 
+    def test_stars_use_the_bot_star_rate(self):
+        self.assertEqual(c.CANDY_STARS, D("1"))
+        self.assertEqual(c.to_candies(D("250"), c.STAR), 250)             # 1⭐ = 1🍬 (тот же курс, что в «Купить конфеты»)
+        self.assertEqual(c.parse_amount(" 1 000 ", c.STAR), D("1000"))
+        for raw in ("1.5", "0", "-3", "abc"):
+            with self.assertRaises(ValueError, msg=raw):
+                c.parse_amount(raw, c.STAR)
+        self.assertEqual(c.SYMBOLS[c.STAR], "⭐")
+        r = c.convert_all(D("100"), c.STAR)
+        self.assertEqual((r[c.CANDY], r[c.RUB], r[c.USD], r[c.STAR]), (D("100"), D("80.0"), D("1.00"), D("100")))
+
     def test_format_money(self):
         self.assertEqual(c.format_money(D("100")), "100")
         self.assertEqual(c.format_money(D("1.5")), "1,5")

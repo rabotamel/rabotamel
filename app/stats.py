@@ -32,6 +32,9 @@ class UserStats:
         дублируются (блокировка), поэтому несколько человек, прошедших капчу одновременно, дают один INSERT;
       * смена юзернейма пользователя тоже копится и пишется пачкой, а не на каждое его сообщение;
       * если изменений нет, flush() не обращается к БД вовсе;
+      * счётчики «за всё время» (`totals`): три числа читаются из БД ОДИН раз при запуске бота (`repo.load_user_totals`),
+        дальше растут в памяти: «впервые прошёл капчу» приходит из того же пакетного сохранения (flush), приглашённый
+        по ссылке — из `note_referral`. Сайт и события берут числа отсюда, к БД ради них не ходим;
       * активность (`bot_users.last_active_at`, по ней чистятся давно ушедшие, см. app/cleanup.py) пишется с
         троттлингом: кэш «когда в БД записывали активность» в памяти, повторные сообщения в пределах 6 часов БД не
         трогают, а те, что нужно записать, уходят той же пачкой — одним UPDATE на всех.
@@ -48,9 +51,17 @@ class UserStats:
         self._to_rename: dict[int, str | None] = {}
         self._to_remove: set[int] = set()
         self._lock = asyncio.Lock()
+        # «за всё время»: None, пока не загружено (или БД не ответила) — сайт покажет прочерк
+        self._joined: int | None = None      # прошли капчу у этого бота за всё время (с вышедшими и удалёнными)
+        self._referred: int | None = None    # из них приглашены по реферальной ссылке
+        self._joined_all: int | None = None  # прошли капчу у всех ботов за всё время
 
     async def load(self) -> None:
         self._names = await repo.load_users(self.bot_id)
+        try:
+            self._joined, self._referred, self._joined_all = await repo.load_user_totals(self.bot_id)
+        except Exception as e:   # статистика не должна мешать запуску бота
+            log.warning("Не удалось загрузить счётчики пользователей бота %s: %s", self.bot_id, e)
         # кэш троттлинга заполняется из БД одним запросом: после перезапуска процесса (на бесплатном Render они частые)
         # уже записанная недавно активность заново не пишется
         stored = await repo.load_last_active(self.bot_id)
@@ -61,6 +72,19 @@ class UserStats:
     @property
     def count(self) -> int:
         return len(self._names)
+
+    @property
+    def totals(self) -> dict | None:
+        """Счётчики за всё время для сайта (только память): joined — у этого бота, referred — из них по ссылке,
+        all_bots — у всех ботов. None — не загружены."""
+        if self._joined is None or self._referred is None or self._joined_all is None:
+            return None
+        return {"joined": self._joined, "referred": self._referred, "all_bots": self._joined_all}
+
+    def note_referral(self) -> None:
+        """Засчитан новый приглашённый по ссылке (запись в БД уже сделана repo.register_referral)."""
+        if self._referred is not None:
+            self._referred += 1
 
     def has(self, user_id: int) -> bool:
         return user_id in self._names
@@ -165,7 +189,10 @@ class UserStats:
             self._to_add, self._to_rename, self._to_remove, self._to_activity = {}, {}, set(), set()
             if add or rename or remove:
                 try:
-                    await repo.save_users(self.bot_id, add, rename, remove)
+                    new = await repo.save_users(self.bot_id, add, rename, remove)
+                    if isinstance(new, int) and new > 0 and self._joined is not None and self._joined_all is not None:
+                        self._joined += new         # впервые прошли капчу (вернувшиеся после удаления не в счёт)
+                        self._joined_all += new
                 except Exception as e:
                     log.warning("Не удалось сохранить пользователей бота %s: %s", self.bot_id, e)
                     # вернём в очередь, но не поверх более свежих изменений

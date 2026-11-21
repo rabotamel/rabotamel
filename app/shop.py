@@ -19,7 +19,7 @@
   кнопки: «🍭 Купить ({цена}🍬)» (зелёная, пока заглушка) и «⬅️ Назад» (красная; обратно в меню магазина).
 
 Товары лежат в таблице `shop_products` (общий каталог для всех токенов бота; см. models.ShopProduct, repo.*_shop_product,
-вкладка «Магазин» в панели). Описание хранится ТАК, КАК ЕГО ВВЕЛИ (с `**...**` и т. п.), а в HTML переводится при показе
+вкладка «Кнопки в боте» в панели). Описание хранится ТАК, КАК ЕГО ВВЕЛИ (с `**...**` и т. п.), а в HTML переводится при показе
 (`format_about`): так правка правил оформления действует сразу на все товары, а в БД не лежит готовый HTML.
 
 Рандомизация — по схеме проекта (NOTES.md): по seed (токен бота) для каждого бота один раз подбираются `callback_data`
@@ -34,6 +34,7 @@ import json
 import random
 import re
 from dataclasses import dataclass
+from datetime import timedelta
 
 CANDY = "🍬"
 PRODUCT_NAME = "Абсолют | MAXIMUM POWER 🚀"
@@ -466,43 +467,107 @@ def split_html(text: str, limit: int = PART_LIMIT) -> list[str]:
     return parts
 
 
+# ---------- скидка по промокоду ----------
+# percent = 0 — скидки нет, все функции ниже работают как раньше. Промокоды: app/promo.py, хранение — repo (user_promos).
+PROMO_DURATION = timedelta(hours=24)   # сколько действует скидка с момента ввода промокода (на любое число покупок)
+STRIKE = "\u0336"   # «combining long stroke overlay»: зачёркивает символ, к которому приписан
+
+
+def discounted_price(price: int, percent: int) -> int:
+    """Цена со скидкой, в целых конфетах: округление половины вверх, но не меньше 1🍬 (100 при 15% -> 85)."""
+    pct = max(0, min(99, int(percent or 0)))
+    if not pct:
+        return int(price)
+    return max(1, (int(price) * (100 - pct) + 50) // 100)
+
+
+def strike(text: str) -> str:
+    """Зачёркнутый текст для КНОПОК: в подписях inline-кнопок Telegram не поддерживает форматирование (<s>), поэтому
+    зачёркивание делается юникодом — после каждого символа (кроме пробелов) идёт U+0336."""
+    return "".join(ch if ch.isspace() else ch + STRIKE for ch in text)
+
+
+def price_text(price: int, percent: int = 0) -> str:
+    """Цена для кнопки: «100🍬» или со скидкой «1̶0̶0̶🍬̶ 85🍬» (старая зачёркнута, рядом новая)."""
+    if not percent:
+        return f"{int(price)}{CANDY}"
+    return f"{strike(f'{int(price)}{CANDY}')} {discounted_price(price, percent)}{CANDY}"
+
+
+def left_hm(seconds: float) -> str:
+    """«23ч 40м» — сколько осталось: всегда часы и минуты, минуты округляются вверх, «0ч 0м» не показываем."""
+    total = max(int(-(-float(seconds) // 60)), 1)
+    hours, minutes = divmod(total, 60)
+    return f"{hours}ч {minutes}м"
+
+
+def left_short(seconds: float) -> str:
+    """Для кнопки: от часа — целые часы вниз («23ч»), меньше часа — минуты вверх («40м», не меньше «1м»)."""
+    seconds = max(float(seconds), 0.0)
+    if seconds >= 3600:
+        return f"{int(seconds // 3600)}ч"
+    minutes = max(int(-(-seconds // 60)), 1)
+    return "1ч" if minutes >= 60 else f"{minutes}м"
+
+
+def promo_button_suffix(percent: int, left: float | None) -> str:
+    """Приписка к кнопке магазина под приветствием: «(🔥 -15% на 23ч)». Пусто, если скидки нет."""
+    if not percent or left is None or left <= 0:
+        return ""
+    return f"(🔥 -{int(percent)}% на {left_short(left)})"
+
+
+def promo_line(percent: int, left: float | None = None) -> str:
+    """Строка внизу меню магазина, пока действует промокод (HTML, жирным); left — секунд до конца скидки."""
+    text = f"🔥 Действует промокод на {int(percent)}%!"
+    if left is not None and left > 0:
+        text += f" Скидка истечёт через {left_hm(left)}"
+    return f"<b>{text}</b>"
+
+
 # ---------- тексты сообщений ----------
 
-def product_label(p: Product) -> str:
-    """Подпись кнопки товара в меню: «Название — Цена🍬» (цена в конце — только на кнопке)."""
-    return f"{p.name} — {int(p.price)}{CANDY}"
+def product_label(p: Product, percent: int = 0) -> str:
+    """Подпись кнопки товара в меню: «Название — Цена🍬» (цена в конце — только на кнопке); со скидкой старая
+    цена зачёркнута, рядом новая."""
+    return f"{p.name} — {price_text(p.price, percent)}"
 
 
-def buy_label(p: Product) -> str:
-    return f"🍭 Купить ({int(p.price)}{CANDY})"
+def buy_label(p: Product, percent: int = 0) -> str:
+    return f"🍭 Купить ({discounted_price(p.price, percent)}{CANDY})"
 
 
-def render_menu(heading: str, balance: int) -> str:
+def render_menu(heading: str, balance: int, percent: int = 0, left: float | None = None) -> str:
     """Меню магазина (HTML). heading — подпись кнопки магазина этого бота (shop_buttons.shop_heading):
-    выводится ЖИРНЫМ шрифтом и экранируется."""
-    return (
+    выводится ЖИРНЫМ шрифтом и экранируется. percent > 0 — внизу строка «🔥 Действует промокод на N%! Скидка истечёт
+    через Hч Mм» (left — секунд до конца скидки; без него — без второй фразы)."""
+    text = (
         f"<b>{html.escape(heading, quote=False)}</b>\n\n"
         f"{MENU_HINT}\n\n"
         f"{BALANCE_EMOJI} Ваш баланс: {int(balance)}{CANDY}"
     )
+    return f"{text}\n\n{promo_line(percent, left)}" if percent else text
 
 
-def render_product(p: Product, seed: str = "") -> str:
+def render_product(p: Product, seed: str = "", percent: int = 0) -> str:
     """Карточка товара (HTML): название без « — 6789🍬», цена отдельной строкой, описание из БД с оформлением.
-    seed — seed бота: по нему из [а/б] в описании выбираются варианты (у одного бота всегда одни и те же)."""
+    seed — seed бота: по нему из [а/б] в описании выбираются варианты (у одного бота всегда одни и те же).
+    percent > 0 — цена со скидкой (старая зачёркнута) и внизу строка про промокод."""
+    price = f"{int(p.price)}{CANDY}" if not percent else f"<s>{int(p.price)}{CANDY}</s> {discounted_price(p.price, percent)}{CANDY}"
     text = (
         f"<b>📦 Товар:</b> {html.escape(p.name, quote=False)}\n"
-        f"{BALANCE_EMOJI} <b>Цена:</b> {int(p.price)}{CANDY}\n\n"
+        f"{BALANCE_EMOJI} <b>Цена:</b> {price}\n\n"
         f"<b>ℹ️ О товаре:</b>"
     )
     about = format_about(p.about, seed, p.id)
-    return f"{text}\n\n{about}" if about else text
+    text = f"{text}\n\n{about}" if about else text
+    return f"{text}\n\n{promo_line(percent)}" if percent else text
 
 
-def render_product_parts(p: Product, seed: str = "") -> list[str]:
+def render_product_parts(p: Product, seed: str = "", percent: int = 0) -> list[str]:
     """Карточка товара одним или несколькими сообщениями: до MAX_ABOUT символов описания в одно сообщение
     (4096) не влезают, поэтому длинная карточка делится по строкам (split_html). Кнопки крепятся к последней части."""
-    return split_html(render_product(p, seed))
+    return split_html(render_product(p, seed, percent))
 
 
 # ---------- клавиатуры и разбор нажатий ----------
@@ -511,10 +576,10 @@ def _cb(prefix_cb: str, product_id: int) -> str:
     return f"{prefix_cb}:{int(product_id)}"
 
 
-def menu_rows(cfg: ShopConfig, products: list[Product]) -> list[list[tuple[str, str]]]:
+def menu_rows(cfg: ShopConfig, products: list[Product], percent: int = 0) -> list[list[tuple[str, str]]]:
     """Ряды кнопок меню [(подпись, callback_data)] без зависимости от aiogram (удобно для тестов):
     товары в переданном порядке, «⬅️ Назад» — всегда последняя."""
-    rows = [[(product_label(p), _cb(cfg.product_cb, p.id))] for p in products]
+    rows = [[(product_label(p, percent), _cb(cfg.product_cb, p.id))] for p in products]
     rows.append([(BACK_LABEL, cfg.back_cb)])
     return rows
 
@@ -524,8 +589,8 @@ def menu_styles(products: list[Product]) -> tuple[str, ...]:
     return tuple(p.color for p in products) + (BACK_STYLE,)
 
 
-def product_rows(cfg: ShopConfig, p: Product) -> list[list[tuple[str, str]]]:
-    return [[(buy_label(p), _cb(cfg.buy_cb, p.id))], [(BACK_LABEL, cfg.product_back_cb)]]
+def product_rows(cfg: ShopConfig, p: Product, percent: int = 0) -> list[list[tuple[str, str]]]:
+    return [[(buy_label(p, percent), _cb(cfg.buy_cb, p.id))], [(BACK_LABEL, cfg.product_back_cb)]]
 
 
 PRODUCT_STYLES = (BUY_STYLE, BACK_STYLE)
@@ -543,12 +608,12 @@ def _keyboard(rows: list[list[tuple[str, str]]], styles: tuple[str, ...]):
     )
 
 
-def build_menu_keyboard(cfg: ShopConfig, products: list[Product]):
-    return _keyboard(menu_rows(cfg, products), menu_styles(products))
+def build_menu_keyboard(cfg: ShopConfig, products: list[Product], percent: int = 0):
+    return _keyboard(menu_rows(cfg, products, percent), menu_styles(products))
 
 
-def build_product_keyboard(cfg: ShopConfig, p: Product):
-    return _keyboard(product_rows(cfg, p), PRODUCT_STYLES)
+def build_product_keyboard(cfg: ShopConfig, p: Product, percent: int = 0):
+    return _keyboard(product_rows(cfg, p, percent), PRODUCT_STYLES)
 
 
 def parse_callback(cfg: ShopConfig, data: str | None) -> tuple[str, int | None] | None:

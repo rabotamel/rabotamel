@@ -16,8 +16,8 @@ handlers = test_handlers.handlers
 FORBIDDEN = ("---", "***", "———", "═", "─", "│")
 
 
-def T(id=1, button="Подписаться", about="Подпишитесь на канал", reward=10, shot=False):
-    return tasks.Task(id=id, button_text=button, about=about, reward=reward, require_screenshot=shot)
+def T(id=1, button="Подписаться", about="Подпишитесь на канал", reward=10, shot=False, once=True):
+    return tasks.Task(id=id, button_text=button, about=about, reward=reward, require_screenshot=shot, one_time=once)
 
 
 class ConfigTests(unittest.TestCase):
@@ -152,6 +152,21 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(tasks.menu_styles(items)[-1], "danger")
         self.assertEqual(len(tasks.menu_styles(items)), len(rows))
 
+    def test_daily_and_referral_button_colors_and_cooldown_label(self):
+        self.assertEqual(tasks.menu_styles([])[:2], ("success", "success"))                 # подарок готов, ссылка — зелёные
+        self.assertEqual(tasks.menu_styles([], 3600)[:2], ("primary", "success"))           # кулдаун — подарок синий
+        self.assertEqual(tasks.menu_styles([], 0)[0], "success")
+        base = self.cfg.text("daily_label")
+        self.assertEqual(tasks.daily_button_label(self.cfg, None), base)
+        for left, shown in ((66600, "(18ч 30м)"), (3600, "(1ч 0м)"), (300, "(0ч 5м)"), (20, "(0ч 1м)"), (86400, "(24ч 0м)")):
+            label = tasks.daily_button_label(self.cfg, left)
+            self.assertIn(" " + shown, label)
+            self.assertTrue(label.startswith("🤍 ") and label.endswith(" 🤍"))   # эмодзи остаются по краям
+            self.assertEqual(label.replace(" " + shown, ""), base)
+        rows = tasks.menu_rows(self.cfg, [], 66600)
+        self.assertEqual(rows[0][0][1], self.cfg.cb["daily"])                    # callback_data тот же
+        self.assertEqual(tasks.menu_rows(self.cfg, [])[0][0][0], base)
+
     def test_menu_without_tasks_has_gift_link_and_back(self):
         self.assertEqual(len(tasks.menu_rows(self.cfg, [])), 3)
 
@@ -160,16 +175,64 @@ class RenderTests(unittest.TestCase):
         rows, styles = tasks.task_rows(self.cfg, shot, None)
         self.assertEqual(rows[0][0], (self.cfg.text("send_label"), f"{self.cfg.cb['send']}:2"))
         self.assertEqual(tasks.task_rows(self.cfg, plain, None)[0][0][0], (self.cfg.text("done_label"), f"{self.cfg.cb['done']}:3"))
-        # после принятия и пока на проверке действия нет — только «Назад»
-        for status in ("approved", "pending"):
-            r, st = tasks.task_rows(self.cfg, shot, status)
-            self.assertEqual(r, [[(tasks.BACK_LABEL, self.cfg.cb["menu"])]])
-            self.assertEqual(st, ("danger",))
+        # пока на проверке действия нет — только «Назад»
+        r, st = tasks.task_rows(self.cfg, shot, "pending")
+        self.assertEqual(r, [[(tasks.BACK_LABEL, self.cfg.cb["menu"])]])
+        self.assertEqual(st, ("danger",))
+        # после принятия (одноразовое) кнопка действия остаётся, но серая; «Назад» красная
+        r, st = tasks.task_rows(self.cfg, shot, "approved")
+        self.assertEqual(r, [[(self.cfg.text("send_label"), f"{self.cfg.cb['send']}:2")], [(tasks.BACK_LABEL, self.cfg.cb["menu"])]])
+        self.assertEqual(st, ("", "danger"))
         # отклонённое можно отправить заново
         self.assertEqual(tasks.task_rows(self.cfg, shot, "rejected")[0][0][0][1], f"{self.cfg.cb['send']}:2")
         text = tasks.render_task(self.cfg, shot, "seed", None)
         self.assertIn("<b>Подписаться</b>", text)
         self.assertIn("25🍬", text)
+
+    def test_one_time_task_buttons_green_until_reward_then_blue(self):
+        once, many = T(1, "А"), T(2, "Б", once=False)
+        base = tasks.menu_styles([once, many])
+        self.assertEqual(base[2:4], ("success", "success"))                       # изначально зелёные
+        self.assertEqual(tasks.menu_styles([once, many], None, {1: "approved", 2: "approved"})[2:4], ("primary", "success"))
+        for status in ("pending", "rejected"):                                    # на проверке и отклонённое — не награда
+            self.assertEqual(tasks.menu_styles([once], None, {1: status})[2], "success")
+        self.assertEqual(tasks.menu_styles([once], None, {7: "approved"})[2], "success")   # чужое задание не влияет
+        self.assertEqual(tasks.menu_styles([once], None, {1: "approved"})[-1], "danger")   # «Назад» по-прежнему красная
+        self.assertEqual(len(tasks.menu_styles([once, many], None, {1: "approved"})), len(tasks.menu_rows(self.cfg, [once, many])))
+
+    def test_one_time_done_card_text_and_grey_action_button(self):
+        for shot in (True, False):
+            t = T(2, shot=shot)
+            text = tasks.render_task(self.cfg, t, "seed", "approved")
+            self.assertIn(self.cfg.text("status_done"), text)
+            self.assertIn(tasks.ONE_TIME_NOTE, text)                              # написано, что повторить нельзя
+            rows, styles = tasks.task_rows(self.cfg, t, "approved")
+            key = "send" if shot else "done"
+            self.assertEqual(rows[0][0], (self.cfg.text(f"{key}_label"), f"{self.cfg.cb[key]}:2"))   # кнопка на месте
+            self.assertEqual(styles, ("", "danger"))                              # серая (без цвета), «Назад» красная
+        # до награды кнопка действия зелёная, у отклонённого — тоже, и текста «выполнено» нет
+        for status in (None, "rejected"):
+            self.assertEqual(tasks.task_rows(self.cfg, T(2), status)[1][0], "success")
+            self.assertNotIn(tasks.ONE_TIME_NOTE, tasks.render_task(self.cfg, T(2), "seed", status))
+        rows, styles = tasks.task_rows(self.cfg, T(2), "pending")                 # на проверке действия нет
+        self.assertEqual((len(rows), styles), (1, ("danger",)))
+
+    def test_repeatable_task_never_shows_done_state(self):
+        t = T(2, once=False)
+        self.assertFalse(tasks.is_done(t, "approved"))
+        self.assertIsNone(tasks.card_status(t, "approved"))
+        self.assertEqual(tasks.card_status(t, "pending"), "pending")
+        self.assertTrue(tasks.is_done(T(2), "approved"))
+        self.assertEqual(tasks.card_status(T(2), "approved"), "approved")
+        text = tasks.render_task(self.cfg, t, "seed", tasks.card_status(t, "approved"))
+        self.assertNotIn(tasks.ONE_TIME_NOTE, text)
+        self.assertEqual(tasks.task_rows(self.cfg, t, tasks.card_status(t, "approved"))[1][0], "success")
+
+    def test_task_from_row_defaults_to_one_time(self):
+        row = types.SimpleNamespace(id=1, button_text="a", about="", reward=1, require_screenshot=False)
+        self.assertTrue(tasks.task_from_row(row).one_time)
+        row.one_time = False
+        self.assertFalse(tasks.task_from_row(row).one_time)
 
     def test_task_text_is_escaped_and_formatted(self):
         t = T(1, button="<b>x</b>", about="**жирно** <script>")
@@ -234,7 +297,7 @@ class BotFlowTests(unittest.TestCase):
 
         repo, messaging = handlers.repo, handlers.messaging   # именно те модули, которыми пользуется handlers
 
-        self.sent, self.answers, self.deleted = [], [], []
+        self.sent, self.answers, self.deleted, self.edited = [], [], [], []
         self.db = {"candies": 7, "daily": (False, None, None), "tasks": [], "completion": None, "instant": 17,
                    "referral": 12, "submitted": [], "refs": []}
         self._saved = {}
@@ -253,6 +316,14 @@ class BotFlowTests(unittest.TestCase):
         async def get_candies(bot_id, uid):
             return self.db["candies"]
 
+        async def get_balance_and_daily(bot_id, uid):
+            return self.db["candies"], self.db.get("daily_at")
+
+        async def fake_edit(b, chat_id, message_id, text, reply_markup=None, *, has_photo=False):
+            if self.db.get("edit_fails"):
+                raise test_handlers.handlers.TelegramAPIError("message to edit not found")
+            self.edited.append((message_id, chat_id, text, reply_markup, has_photo))
+
         async def list_tasks(only_visible=True, limit=None):
             return self.db["tasks"]
 
@@ -265,10 +336,15 @@ class BotFlowTests(unittest.TestCase):
         async def claim_daily(bot_id, uid, amount, cooldown):
             return self.db["daily"]
 
-        async def complete(bot_id, uid, task_id, reward, username=None):
+        async def get_task_statuses(bot_id, uid):
+            return dict(self.db.get("statuses", {}))
+
+        async def complete(bot_id, uid, task_id, reward, username=None, repeatable=False):
+            self.db.setdefault("repeatable", []).append(repeatable)
             return self.db["instant"]
 
-        async def submit(bot_id, uid, task_id, reward, files, username=None):
+        async def submit(bot_id, uid, task_id, reward, files, username=None, repeatable=False):
+            self.db.setdefault("repeatable", []).append(repeatable)
             self.db["submitted"].append((uid, task_id, reward, list(files)))
             return 55
 
@@ -290,8 +366,9 @@ class BotFlowTests(unittest.TestCase):
             return False
 
         patch(messaging, "send_message", fake_send)
-        for name, fn in (("get_candies", get_candies), ("list_tasks", list_tasks), ("get_task", get_task),
-                         ("get_completion", get_completion), ("claim_daily", claim_daily),
+        patch(messaging, "edit_message", fake_edit)
+        for name, fn in (("get_candies", get_candies), ("get_balance_and_daily", get_balance_and_daily), ("list_tasks", list_tasks), ("get_task", get_task),
+                         ("get_completion", get_completion), ("get_task_statuses", get_task_statuses), ("claim_daily", claim_daily),
                          ("complete_task_instant", complete), ("submit_task_screenshot", submit),
                          ("register_referral", register_referral), ("count_referrals", count_referrals),
                          ("is_receipt_blocked", is_blocked)):
@@ -348,19 +425,53 @@ class BotFlowTests(unittest.TestCase):
         self.press(self.cfg.cb["open"])
         self.assertEqual(self.sent, [])
 
-    def test_daily_gift_given_then_cooldown(self):
+    def test_daily_gift_given_edits_message_in_place_and_turns_button_blue(self):
         self.db["daily"] = (True, 17, None)
-        self.press(self.cfg.cb["daily"])
-        self.assertIn("17🍬", self.last_text())
+        self.press(self.cfg.cb["daily"], msg_id=10)
+        self.assertEqual(self.sent, [])               # новое сообщение не отправлялось
+        self.assertEqual(self.deleted, [])            # и исходное не удалялось
+        msg_id, chat_id, text, markup, has_photo = self.edited[-1]
+        self.assertEqual((msg_id, chat_id), (10, 5))  # отредактировано именно исходное сообщение
+        self.assertIn("🍭 Ваш баланс: 17🍬", text)
+        daily = markup.inline_keyboard[0][0]
+        self.assertEqual(daily.callback_data, self.cfg.cb["daily"])
+        self.assertEqual(daily.style, "primary")      # на время кулдауна — синяя
+        self.assertIn("(24ч 0м)", daily.text)
+        self.assertEqual(markup.inline_keyboard[1][0].style, "success")   # реферальная — зелёная
         self.assertTrue(self.answers[-1][1])
         self.assertIn(str(tasks.DAILY_REWARD), self.answers[-1][0])
+
+    def test_daily_gift_edit_failure_falls_back_to_new_message(self):
+        self.db["daily"] = (True, 17, None)
+        self.db["edit_fails"] = True
+        self.press(self.cfg.cb["daily"], msg_id=10)
+        self.assertIn("17🍬", self.last_text())       # не удалось отредактировать — пришло новое меню
+        self.assertIn(10, self.deleted)
+
+    def test_daily_gift_cooldown_alert_keeps_screen(self):
         from datetime import datetime, timezone
-        n = len(self.sent)
         self.db["daily"] = (False, None, datetime.now(timezone.utc) - timedelta(hours=18, minutes=30))
         self.press(self.cfg.cb["daily"])
-        self.assertEqual(len(self.sent), n)           # экран не меняется
+        self.assertEqual((self.sent, self.edited, self.deleted), ([], [], []))   # экран не меняется
         self.assertIn("5ч", self.answers[-1][0])      # осталось около 5 часов
         self.assertTrue(self.answers[-1][1])
+
+    def test_open_menu_shows_green_daily_button_when_ready(self):
+        self.press(self.cfg.cb["open"])
+        rows = self.sent[-1][3].inline_keyboard
+        self.assertEqual((rows[0][0].style, rows[0][0].text), ("success", self.cfg.text("daily_label")))
+        self.assertEqual(rows[1][0].style, "success")
+
+    def test_open_menu_shows_blue_daily_button_with_time_left_during_cooldown(self):
+        from datetime import datetime, timezone
+        self.db["daily_at"] = datetime.now(timezone.utc) - timedelta(hours=18, minutes=30)
+        self.press(self.cfg.cb["open"])
+        daily = self.sent[-1][3].inline_keyboard[0][0]
+        self.assertEqual(daily.style, "primary")
+        self.assertRegex(daily.text, r"\(5ч (2[89]|30)м\)")
+        self.db["daily_at"] = datetime.now(timezone.utc) - timedelta(hours=25)   # кулдаун прошёл — снова зелёная
+        self.press(self.cfg.cb["open"])
+        self.assertEqual(self.sent[-1][3].inline_keyboard[0][0].style, "success")
 
     def test_referral_screen_shows_personal_link(self):
         self.press(self.cfg.cb["ref"])
@@ -384,6 +495,59 @@ class BotFlowTests(unittest.TestCase):
         self.press(f"{self.cfg.cb['done']}:4")
         self.assertEqual(len(self.sent), n + 1)
         self.assertIn("<b>Канал</b>", self.last_text())
+
+    def test_menu_task_button_blue_after_reward_for_one_time_only(self):
+        self.db["tasks"] = [
+            types.SimpleNamespace(id=4, button_text="Канал", about="a", reward=3, require_screenshot=False, one_time=True),
+            types.SimpleNamespace(id=5, button_text="Чат", about="a", reward=3, require_screenshot=False, one_time=True),
+            types.SimpleNamespace(id=6, button_text="Опрос", about="a", reward=3, require_screenshot=False, one_time=False),
+        ]
+        self.press(self.cfg.cb["open"])
+        self.assertEqual([r[0].style for r in self.sent[-1][3].inline_keyboard[2:5]], ["success"] * 3)
+        self.db["statuses"] = {4: "approved", 5: "rejected", 6: "approved"}
+        self.press(self.cfg.cb["open"])
+        self.assertEqual([r[0].style for r in self.sent[-1][3].inline_keyboard[2:5]], ["primary", "success", "success"])
+
+    def test_done_one_time_task_card_and_dead_button(self):
+        row = types.SimpleNamespace(id=4, button_text="Канал", about="a", reward=3, require_screenshot=True, one_time=True)
+        self.db["tasks"] = [row]
+        self.db["completion"] = types.SimpleNamespace(status="approved")
+        self.press(f"{self.cfg.cb['task']}:4")
+        self.assertIn(tasks.ONE_TIME_NOTE, self.last_text())
+        button = self.sent[-1][3].inline_keyboard[0][0]
+        self.assertEqual(button.text, self.cfg.text("send_label"))
+        self.assertFalse(getattr(button, "style", ""))                            # серая
+        n_sent, n_edit = len(self.sent), len(self.edited)
+        self.press(button.callback_data)                                          # нажатие ничего не делает
+        self.assertEqual((len(self.sent), len(self.edited), self.deleted[-1:]), (n_sent, n_edit, self.deleted[-1:]))
+        self.assertTrue(self.answers[-1][1])
+        self.assertIn(tasks.ONE_TIME_NOTE, self.answers[-1][0])
+        self.assertEqual(self.db["submitted"], [])
+        self.assertNotIn(5, getattr(self.router, "task_wait", {}))
+        # то же для задания без скриншота: награда не просится у repo
+        row.require_screenshot = False
+        self.db["instant"] = 999
+        self.press(f"{self.cfg.cb['done']}:4")
+        self.assertNotIn("repeatable", self.db)
+        self.assertIn(tasks.ONE_TIME_NOTE, self.answers[-1][0])
+
+    def test_repeatable_task_can_be_done_again(self):
+        row = types.SimpleNamespace(id=4, button_text="Опрос", about="a", reward=3, require_screenshot=False, one_time=False)
+        self.db["tasks"] = [row]
+        self.db["completion"] = types.SimpleNamespace(status="approved")
+        self.press(f"{self.cfg.cb['task']}:4")
+        self.assertNotIn(tasks.ONE_TIME_NOTE, self.last_text())
+        self.assertEqual(self.sent[-1][3].inline_keyboard[0][0].style, "success")
+        self.press(f"{self.cfg.cb['done']}:4")
+        self.assertEqual(self.db["repeatable"], [True])                           # repo получил разрешение на повтор
+        self.assertIn("17🍬", self.last_text())
+        self.assertIn("3", self.answers[-1][0])
+
+    def test_one_time_task_passes_repeatable_false(self):
+        row = types.SimpleNamespace(id=4, button_text="Канал", about="a", reward=3, require_screenshot=False)   # без поля — одноразовое
+        self.db["tasks"] = [row]
+        self.press(f"{self.cfg.cb['done']}:4")
+        self.assertEqual(self.db["repeatable"], [False])
 
     SHOT_TASK = types.SimpleNamespace(id=9, button_text="Отзыв", about="a", reward=30, require_screenshot=True)
 

@@ -7,7 +7,7 @@
 <style>
   :root{
     --bg:#f5f6f8;--card:#fff;--text:#14171c;--muted:#6b7280;--line:#e6e8ec;
-    --green:#16a34a;--blue:#2563eb;--red:#dc2626;--gray:#9ca3af;--pink:#ec4899;
+    --green:#16a34a;--blue:#2563eb;--red:#dc2626;--gray:#9ca3af;--pink:#ec4899;--yellow:#eab308;
     --amber-bg:#fff7db;--amber-line:#f5c542;--amber-text:#6b4e00;
     --radius:16px;color-scheme:light dark;
   }
@@ -67,6 +67,7 @@
   .stat{padding:18px}
   .stat .label{color:var(--muted);font-size:13px}
   .stat .value{font-size:30px;font-weight:650;letter-spacing:-.02em;margin-top:4px;font-variant-numeric:tabular-nums}
+  .stat .hint-s{color:var(--muted);font-size:12px;margin-top:2px}
   .stat .value.sm{font-size:19px;line-height:1.5;padding-top:6px}
   /* подвал: «живая» статистика за всё время */
   dialog.foot{width:min(560px,calc(100vw - 32px));overflow-y:auto}
@@ -148,6 +149,7 @@
   .dd-btn.green{background:var(--green);border-color:var(--green)}
   .dd-btn.red{background:var(--red);border-color:var(--red)}
   .dd-btn.pink{background:var(--pink);border-color:var(--pink)}
+  .dd-btn.yellow{background:var(--yellow);border-color:var(--yellow)}
   .dd-btn:disabled{opacity:.6;cursor:default}
   .dd-btn svg.ic{width:22px;height:22px;display:block}
   .dd-btn svg.ic.candy{width:30px;height:30px}
@@ -200,7 +202,8 @@
   <button class="tab" data-tab="tokens">Токены</button>
   <button class="tab" data-tab="sandbox">Песочница</button>
   <button class="tab" data-tab="moderators">Модераторы</button>
-  <button class="tab" data-tab="shop">Магазин</button>
+  <button class="tab" data-tab="shop">Кнопки в боте</button>
+  <button class="tab" data-tab="automsg">Автосообщения</button>
 </nav>
 
 <main class="wrap">
@@ -277,6 +280,7 @@
       <label for="task-reward">Награда (конфет 🍬)</label>
       <input id="task-reward" type="text" inputmode="numeric" autocomplete="off" placeholder="10">
       <label class="chk"><input type="checkbox" id="task-shot"> Требовать скриншот</label>
+      <label class="chk"><input type="checkbox" id="task-once" checked> Одноразовое</label>
       <label class="chk"><input type="checkbox" id="task-visible" checked> Показывать в боте</label>
       <div class="msg" id="task-msg"></div>
       <div class="row">
@@ -291,8 +295,50 @@
     </div>
   </section>
 
+  <section id="tab-automsg" hidden>
+    <div class="card sb">
+      <h3>Автосообщение</h3>
+      <p class="hint">Каждому пользователю бот пришлёт это сообщение через 30 минут после прохождения капчи. Пустое поле — автосообщение выключено. Изменения действуют и на тех, кто его ещё ждёт.</p>
+      <label for="am-text">Сообщение</label>
+      <textarea id="am-text" maxlength="8000" placeholder="Привет! [Дарим/Держите] скидку — ваш промокод: **{promo}**"></textarea>
+      <p class="hint" id="am-text-count">В Telegram — до 4000 символов (считается после выбора вариантов [а/б], без значков оформления).</p>
+      <p class="hint">Оформление: **жирный**, __подчёркнутый__, *курсив*, ~~зачёркнутый~~, ||спойлер||, `код`, [текст](https://адрес), «# Заголовок» в начале строки. В боте это превращается в настоящее форматирование.</p>
+      <p class="hint">Варианты фраз: [привет/здравствуй] — каждый бот получит свой постоянный вариант. Можно несколько в тексте и вложенные: [а/б [в/г]].</p>
+      <p class="hint">Переменная {promo} заменяется личным промокодом пользователя: 8 символов — большие английские буквы и цифры, у каждого свой. Введя его в чат с ботом, человек получает скидку на все товары магазина на 24 часа с момента ввода (на любое число покупок).</p>
+
+      <label for="am-percent">Скидка по промокоду, %</label>
+      <input id="am-percent" type="text" inputmode="numeric" autocomplete="off" maxlength="3" placeholder="15">
+      <p class="hint">Целое число от 1 до 99. Процент запоминается в момент выдачи промокода: если изменить его позже, у уже выданных промокодов скидка останется прежней.</p>
+
+      <label for="am-reply">Ответ бота на введённый промокод</label>
+      <textarea id="am-reply" maxlength="8000" placeholder="✅ Промокод принят! Скидка {percent}% действует на все товары 24 часа."></textarea>
+      <p class="hint" id="am-reply-count">Оформление и варианты — те же. Доступны {promo} и {percent} (процент скидки). Пустое поле — бот ответит стандартной фразой.</p>
+
+      <div class="msg" id="am-msg"></div>
+      <div class="row"><button type="button" class="btn green" id="am-save">Сохранить</button></div>
+    </div>
+  </section>
+
   <section id="tab-sandbox" hidden>
     <div class="card sb"><div class="sb-note" id="sb-note">—</div></div>
+
+    <div class="card sb">
+      <h3>Конфеты 🍬</h3>
+      <p class="hint">Выдача и изъятие конфет у пользователя в разных валютах.</p>
+      <label for="sb-user">Юзернейм или ID пользователя</label>
+      <input id="sb-user" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label for="sb-amount">Сумма</label>
+      <div class="amt">
+        <div class="dd" id="dd-sign"></div>
+        <input id="sb-amount" type="text" inputmode="numeric" placeholder="100" autocomplete="off" spellcheck="false">
+        <div class="dd" id="dd-cur"></div>
+      </div>
+      <div class="conv" id="sb-conv">≈ 0🍬, ≈ 0₽, ≈ 0$, ≈ 0⭐</div>
+      <div class="msg" id="sb-candy-msg"></div>
+      <div class="row sb-submit-row">
+        <button type="button" class="btn green" id="sb-submit">Выдать</button>
+      </div>
+    </div>
 
     <div class="card sb">
       <h3>Блокировка 🚫</h3>
@@ -306,24 +352,6 @@
       <div class="msg" id="sb-block-msg"></div>
       <div class="row sb-submit-row">
         <button type="button" class="btn red" id="sb-block-submit">Заблокировать</button>
-      </div>
-    </div>
-
-    <div class="card sb">
-      <h3>Конфеты 🍬</h3>
-      <p class="hint">Выдача и изъятие конфет у пользователя в разных валютах.</p>
-      <label for="sb-user">Юзернейм или ID пользователя</label>
-      <input id="sb-user" placeholder="@username или 123456789" autocomplete="off" autocapitalize="off" spellcheck="false">
-      <label for="sb-amount">Сумма</label>
-      <div class="amt">
-        <div class="dd" id="dd-sign"></div>
-        <input id="sb-amount" type="text" inputmode="numeric" placeholder="100" autocomplete="off" spellcheck="false">
-        <div class="dd" id="dd-cur"></div>
-      </div>
-      <div class="conv" id="sb-conv">≈ 0🍬, ≈ 0₽, ≈ 0$</div>
-      <div class="msg" id="sb-candy-msg"></div>
-      <div class="row sb-submit-row">
-        <button type="button" class="btn green" id="sb-submit">Выдать</button>
       </div>
     </div>
 
@@ -551,8 +579,20 @@ function renderBot() {
       <div class="card stat"><div class="label">Пользователей в боте</div><div class="value" id="users">${c.users ?? '—'}</div></div>
       <div class="card stat"><div class="label">Основной бот уже</div><div class="value sm" id="uptime">—</div></div>
       <div class="card stat" style="grid-column:1/-1"><div class="label">Видео в галерее</div><div class="value" id="videos">${c.videos ?? '—'}</div></div>
+      <div class="card stat"><div class="label">Всего было в боте</div><div class="value" id="tot-joined">${totalsText(c, 'joined')}</div><div class="hint-s">с вышедшими и удалёнными</div></div>
+      <div class="card stat"><div class="label">Из них по ссылке</div><div class="value" id="tot-ref">${totalsText(c, 'referred')}</div><div class="hint-s">по реферальной ссылке</div></div>
+      <div class="card stat" style="grid-column:1/-1"><div class="label">Пользователей во всех ботах за всё время</div><div class="value" id="tot-all">${totalsText(c, 'all_bots')}</div></div>
     </div>`;
   tickUptime();
+}
+
+// счётчики «за всё время»: числа приходят в состоянии и в событии stats (из памяти сервера); нет данных — прочерк
+function totalsText(c, key) { return c && c.totals && c.totals[key] != null ? String(c.totals[key]) : '—'; }
+function paintTotals() {
+  const c = S && S.current;
+  [['#tot-joined', 'joined'], ['#tot-ref', 'referred'], ['#tot-all', 'all_bots']].forEach(([sel, key]) => {
+    const el = $(sel); if (el) el.textContent = totalsText(c, key);
+  });
 }
 
 function fmtDuration(sec) {
@@ -624,8 +664,10 @@ document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () 
   $('#tab-tokens').hidden = tab !== 'tokens';
   $('#tab-moderators').hidden = tab !== 'moderators';
   $('#tab-shop').hidden = tab !== 'shop';
+  $('#tab-automsg').hidden = tab !== 'automsg';
   $('#tab-sandbox').hidden = tab !== 'sandbox';
   if (tab === 'shop') { loadShop(); loadTasks(); }
+  if (tab === 'automsg') loadAutoMsg();
 }));
 
 $('#btn-edit').addEventListener('click', () => { editing = !editing; if (S) renderList(); });
@@ -841,8 +883,52 @@ $('#mod-list').addEventListener('click', async (e) => {
   } catch (err) { toast(err.message); }
 });
 
-/* ---------- вкладка «Магазин» ---------- */
+/* ---------- вкладка «Кнопки в боте» (id tab-shop): товары магазина и задания ---------- */
 const SHOP_COLORS = {'': 'стандартная', danger: 'красная', success: 'зелёная', primary: 'синяя'};
+/* ---------- «Автосообщения» ---------- */
+let amLoaded = false;
+
+async function loadAutoMsg() {
+  try {
+    const r = await api('GET', '/api/automessage');
+    // не затираем то, что владелец уже начал печатать
+    if (!amLoaded) {
+      $('#am-text').value = r.text; $('#am-percent').value = r.percent || ''; $('#am-reply').value = r.reply;
+      amLoaded = true;
+      amCount('#am-text', '#am-text-count'); amCount('#am-reply', '#am-reply-count');
+    }
+  } catch (err) { toast(err.message); }
+}
+
+// счётчик под полем: считает сервер теми же правилами, что и при сохранении
+const amTimers = {};
+function amCount(field, out) {
+  clearTimeout(amTimers[field]);
+  amTimers[field] = setTimeout(async () => {
+    const el = $(out);
+    try {
+      const r = await api('POST', '/api/automessage/length', {about: $(field).value});
+      el.textContent = 'Введено: ' + r.site + ' из ' + r.site_max + ' · в Telegram займёт до ' + r.telegram + ' из ' + r.telegram_max;
+      el.style.color = (r.telegram > r.telegram_max || r.site > r.site_max) ? 'var(--red, #d33)' : '';
+    } catch (err) { /* счётчик необязателен */ }
+  }, 300);
+}
+$('#am-text').addEventListener('input', () => amCount('#am-text', '#am-text-count'));
+$('#am-reply').addEventListener('input', () => amCount('#am-reply', '#am-reply-count'));
+
+$('#am-save').addEventListener('click', async () => {
+  setMsg('#am-msg', '');
+  $('#am-save').disabled = true;
+  try {
+    const r = await api('POST', '/api/automessage', {
+      text: $('#am-text').value, percent: $('#am-percent').value, reply: $('#am-reply').value,
+    });
+    $('#am-text').value = r.text; $('#am-percent').value = r.percent || ''; $('#am-reply').value = r.reply;
+    setMsg('#am-msg', r.text ? 'Сохранено. Автосообщение включено.' : 'Сохранено. Автосообщение выключено (поле пустое).');
+  } catch (err) { setMsg('#am-msg', err.message, true); }
+  $('#am-save').disabled = false;
+});
+
 let shopItems = [];
 let shopEditId = null;
 
@@ -997,7 +1083,7 @@ $('#shop-file').addEventListener('change', async (e) => {
   } catch (err) { toast(err.message); }
 });
 
-/* ---------- «Задания» (вкладка «Магазин»): раздел «Бесплатные конфеты» в боте ---------- */
+/* ---------- «Задания» (вкладка «Кнопки в боте»): раздел «Бесплатные конфеты» в боте ---------- */
 let taskItems = [];
 let taskEditId = null;
 
@@ -1015,7 +1101,7 @@ function renderTasks() {
   $('#task-list').innerHTML = taskItems.length ? taskItems.map((t, i) => {
     const about = t.about ? esc(t.about.length > 80 ? t.about.slice(0, 80) + '…' : t.about).replace(/\n/g, ' ') : 'без описания';
     return `<div class="mod-row"><div class="grow"><div class="name">${esc(t.button_text)} — ${esc(fmtNum(t.reward))}🍬${t.visible ? '' : ' · скрыто'}</div>` +
-      `<div class="sub">${t.screenshot ? 'со скриншотом' : 'без скриншота'} · ${about}</div></div>` +
+      `<div class="sub">${t.screenshot ? 'со скриншотом' : 'без скриншота'} · ${t.one_time ? 'одноразовое' : 'многоразовое'} · ${about}</div></div>` +
       `<button type="button" class="btn sm" data-task-up="${t.id}" ${i === 0 ? 'disabled' : ''}>↑</button>` +
       `<button type="button" class="btn sm" data-task-down="${t.id}" ${i === taskItems.length - 1 ? 'disabled' : ''}>↓</button>` +
       `<button type="button" class="btn sm" data-task-edit="${t.id}">Изменить</button>` +
@@ -1027,7 +1113,7 @@ function renderTasks() {
 function taskFormReset() {
   taskEditId = null;
   $('#task-button').value = ''; $('#task-about').value = ''; $('#task-reward').value = '';
-  $('#task-shot').checked = false; $('#task-visible').checked = true;
+  $('#task-shot').checked = false; $('#task-once').checked = true; $('#task-visible').checked = true;
   $('#task-form-title').textContent = 'Добавить задание';
   $('#task-save').textContent = 'Добавить';
   $('#task-cancel').hidden = true;
@@ -1035,7 +1121,7 @@ function taskFormReset() {
 }
 
 function taskBody(t) {
-  return {button_text: t.button_text, about: t.about, reward: String(t.reward), screenshot: t.screenshot, visible: t.visible};
+  return {button_text: t.button_text, about: t.about, reward: String(t.reward), screenshot: t.screenshot, one_time: t.one_time, visible: t.visible};
 }
 
 let taskCountTimer = null;
@@ -1056,7 +1142,7 @@ $('#task-save').addEventListener('click', async () => {
   setMsg('#task-msg', '');
   const body = {
     button_text: $('#task-button').value, about: $('#task-about').value, reward: $('#task-reward').value,
-    screenshot: $('#task-shot').checked, visible: $('#task-visible').checked,
+    screenshot: $('#task-shot').checked, one_time: $('#task-once').checked, visible: $('#task-visible').checked,
   };
   $('#task-save').disabled = true;
   try {
@@ -1084,7 +1170,7 @@ $('#task-list').addEventListener('click', async (e) => {
     if (d.taskEdit) {
       taskEditId = t.id;
       $('#task-button').value = t.button_text; $('#task-about').value = t.about; $('#task-reward').value = t.reward;
-      $('#task-shot').checked = t.screenshot; $('#task-visible').checked = t.visible;
+      $('#task-shot').checked = t.screenshot; $('#task-once').checked = t.one_time; $('#task-visible').checked = t.visible;
       updateTaskAboutCount();
       $('#task-form-title').textContent = 'Изменить задание';
       $('#task-save').textContent = 'Сохранить';
@@ -1140,6 +1226,8 @@ const IC = {
   minus: '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M5 12h14"/></svg>',
   // конфетка в обёртке: белая на розовой кнопке, розовые полоски на «шарике»
   candy: '<svg class="ic candy" viewBox="0 0 24 24" fill="none"><path d="M1.8 7.6 7.6 12l-5.8 4.4c-.5.4-1.2 0-1.2-.6V8.2c0-.6.7-1 1.2-.6z" fill="#fff"/><path d="M22.2 7.6 16.4 12l5.8 4.4c.5.4 1.2 0 1.2-.6V8.2c0-.6-.7-1-1.2-.6z" fill="#fff"/><circle cx="12" cy="12" r="6.4" fill="#fff"/><path d="M8.6 8.6c2.6.5 4.6 2.5 5.2 5.2M10.8 6.9c2.2.6 3.9 2.3 4.5 4.5" stroke="var(--pink)" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  // звезда Telegram Stars: белая на жёлтой кнопке
+  star: '<svg class="ic" viewBox="0 0 24 24" fill="#fff"><path d="M12 2.4l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 17.2l-5.9 3.2 1.2-6.5L2.5 9.3l6.6-.9z"/></svg>',
   rub: '<span aria-hidden="true">₽</span>',
   usd: '<span aria-hidden="true">$</span>',
   block: '<span>Заблокировать</span>', unblock: '<span>Разблокировать</span>',
@@ -1149,8 +1237,8 @@ const IC = {
 const DD = {
   sign: {el: '#dd-sign', order: ['plus', 'minus'], color: {plus: 'green', minus: 'red'},
          label: {plus: 'Выдать', minus: 'Изъять'}},
-  cur:  {el: '#dd-cur', order: ['candy', 'rub', 'usd'], color: {candy: 'pink', rub: 'green', usd: 'green'},
-         label: {candy: 'Конфеты', rub: 'Рубли', usd: 'Доллары'}},
+  cur:  {el: '#dd-cur', order: ['candy', 'rub', 'usd', 'star'], color: {candy: 'pink', rub: 'green', usd: 'green', star: 'yellow'},
+         label: {candy: 'Конфеты', rub: 'Рубли', usd: 'Доллары', star: 'Звёзды'}},
 };
 DD.bact = {el: '#dd-bact', order: ['block', 'unblock'], color: {block: 'red', unblock: 'green'},
            label: {block: 'Заблокировать', unblock: 'Разблокировать'}};
@@ -1180,35 +1268,39 @@ function applySbState() {
   const btn = $('#sb-submit');
   btn.textContent = give ? 'Выдать' : 'Изъять';
   btn.className = 'btn ' + (give ? 'green' : 'red');
-  $('#sb-amount').inputMode = sb.cur === 'candy' ? 'numeric' : 'decimal';
+  $('#sb-amount').inputMode = isWhole(sb.cur) ? 'numeric' : 'decimal';
   updateConv();
 }
 
-/* Курс: 1🍬 = 0,8 ₽ = 0,01 $. Считаем в целых «копейках/центах», чтобы не ловить ошибки float.
-   Копейки: 1🍬 = 80 коп., 1🍬 = 1 цент. */
+/* Курс: 1🍬 = 0,8 ₽ = 0,01 $ = 1⭐. Считаем в целых «копейках/центах», чтобы не ловить ошибки float.
+   Копейки: 1🍬 = 80 коп., 1🍬 = 1 цент. Звёзды — целые, курс как в «Купить конфеты» (CANDY_STARS в app/currency.py). */
+const CANDY_STARS = 1;                                  // звёзд за 1🍬
+const isWhole = (cur) => cur === 'candy' || cur === 'star';   // конфеты и звёзды — только целые числа
 function parseAmt(raw, cur) {
   const t = String(raw || '').trim().replace(/\s/g, '').replace(',', '.');
-  if (cur === 'candy') return /^\d+$/.test(t) ? {n: Number(t)} : null;
+  if (isWhole(cur)) return /^\d+$/.test(t) ? {n: Number(t)} : null;
   return /^\d+(\.\d{1,2})?$/.test(t) ? {cents: Math.round(parseFloat(t) * 100)} : null;
 }
 function toCandies(a, cur) {       // то же округление, что на сервере (половина вверх)
   if (cur === 'candy') return a.n;
+  if (cur === 'star') return Math.floor(a.n / CANDY_STARS + 0.5);
   if (cur === 'rub') return Math.floor((a.cents + 40) / 80);
   return a.cents;
 }
 function convertAll(a, cur) {      // приблизительные значения во всех валютах бота
   let candies, rubC, usdC;
   if (cur === 'candy') { candies = a.n; rubC = a.n * 80; usdC = a.n; }
+  else if (cur === 'star') { candies = a.n / CANDY_STARS; rubC = candies * 80; usdC = candies; }
   else if (cur === 'rub') { candies = a.cents / 80; rubC = a.cents; usdC = a.cents / 80; }
   else { candies = a.cents; rubC = a.cents * 80; usdC = a.cents; }
-  return {candies: Math.floor(candies + 0.5), rub: rubC / 100, usd: usdC / 100};
+  return {candies: Math.floor(candies + 0.5), rub: rubC / 100, usd: usdC / 100, stars: Math.floor(candies * CANDY_STARS + 0.5)};
 }
 const fmtMoney = (v) => Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 2, useGrouping: false});
-const SYM = {rub: '₽', usd: '$'};
+const SYM = {rub: '₽', usd: '$', star: '⭐'};
 function updateConv() {
-  const a = parseAmt($('#sb-amount').value, sb.cur) || (sb.cur === 'candy' ? {n: 0} : {cents: 0});
+  const a = parseAmt($('#sb-amount').value, sb.cur) || (isWhole(sb.cur) ? {n: 0} : {cents: 0});
   const c = convertAll(a, sb.cur);
-  $('#sb-conv').textContent = `≈ ${fmtNum(c.candies)}🍬, ≈ ${fmtMoney(c.rub)}₽, ≈ ${fmtMoney(c.usd)}$`;
+  $('#sb-conv').textContent = `≈ ${fmtNum(c.candies)}🍬, ≈ ${fmtMoney(c.rub)}₽, ≈ ${fmtMoney(c.usd)}$, ≈ ${fmtNum(c.stars)}⭐`;
 }
 
 document.addEventListener('click', (e) => {
@@ -1223,14 +1315,14 @@ document.addEventListener('click', (e) => {
   }
   sb[name] = t.dataset.val;                       // выбрали вариант из списка: список скрывается, кнопка меняется
   closeDd();
-  if (name === 'cur' && sb.cur === 'candy') $('#sb-amount').value = $('#sb-amount').value.replace(/[.,]\d*/, '');  // у конфет дроби нет
+  if (name === 'cur' && isWhole(sb.cur)) $('#sb-amount').value = $('#sb-amount').value.replace(/[.,]\d*/, '');  // у конфет и звёзд дроби нет
   applySbState();
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDd(); });
 $('#sb-amount').addEventListener('input', (e) => {
   // только цифры и один разделитель (у конфет разделителя нет)
-  let v = e.target.value.replace(sb.cur === 'candy' ? /\D/g : /[^\d.,]/g, '');
-  if (sb.cur !== 'candy') { const i = v.search(/[.,]/); if (i >= 0) v = v.slice(0, i + 1) + v.slice(i + 1).replace(/[.,]/g, ''); }
+  let v = e.target.value.replace(isWhole(sb.cur) ? /\D/g : /[^\d.,]/g, '');
+  if (!isWhole(sb.cur)) { const i = v.search(/[.,]/); if (i >= 0) v = v.slice(0, i + 1) + v.slice(i + 1).replace(/[.,]/g, ''); }
   if (v !== e.target.value) e.target.value = v;
   updateConv();
 });
@@ -1243,13 +1335,13 @@ async function sbSubmit() {
   setMsg('#sb-candy-msg', '');
   if (!target) { setMsg('#sb-candy-msg', 'Укажите юзернейм или ID', true); return; }
   const a = parseAmt(raw, cur);
-  if (!a || (cur === 'candy' ? a.n < 1 : a.cents < 1)) {
-    setMsg('#sb-candy-msg', cur === 'candy' ? 'Количество — целое число больше нуля' : 'Сумма — число больше нуля, не больше двух знаков после запятой', true);
+  if (!a || (isWhole(cur) ? a.n < 1 : a.cents < 1)) {
+    setMsg('#sb-candy-msg', isWhole(cur) ? 'Количество — целое число больше нуля' : 'Сумма — число больше нуля, не больше двух знаков после запятой', true);
     return;
   }
   const candies = toCandies(a, cur);
   if (candies < 1) { setMsg('#sb-candy-msg', 'Сумма меньше одной конфеты', true); return; }
-  const paid = cur === 'candy' ? '' : fmtMoney(a.cents / 100) + SYM[cur];
+  const paid = cur === 'candy' ? '' : (cur === 'star' ? fmtNum(a.n) : fmtMoney(a.cents / 100)) + SYM[cur];
   const ok = await askConfirm({
     title: give ? 'Выдать конфеты?' : 'Изъять конфеты?',
     text: give
@@ -1517,7 +1609,9 @@ function connect() {
     if (ev.type === 'stats') {
       if (S && S.current && S.current.id === ev.bot_id) {
         S.current.users = ev.users;
+        S.current.totals = ev.totals || null;
         const u = $('#users'); if (u) u.textContent = ev.users;
+        paintTotals();
       }
     } else if (ev.type === 'gallery') {
       if (S && S.current && S.current.id === ev.bot_id) {

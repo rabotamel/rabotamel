@@ -16,6 +16,17 @@ class FakeRepo(types.ModuleType):
         self.stored_activity = {}      # user_id -> unix-время, которое «лежит в БД» при load()
         self.activity_calls = []       # каждый вызов touch_users_active (= один UPDATE в БД)
         self.activity_fail = False
+        self.totals = (10, 3, 25)      # что «лежит в БД»: у бота всего было, из них по ссылке, у всех ботов
+        self.totals_calls = 0
+        self.totals_fail = False
+        self.history = set()           # (bot_id, user_id), которые уже есть в user_history
+        self.history_seen = set()
+
+    async def load_user_totals(self, bot_id):
+        self.totals_calls += 1
+        if self.totals_fail:
+            raise RuntimeError("db down")
+        return self.totals
 
     async def load_users(self, bot_id):
         return {1: "old", 2: None}
@@ -34,6 +45,9 @@ class FakeRepo(types.ModuleType):
         if self.fail:
             raise RuntimeError("db down")
         self.calls.append((dict(add), dict(rename), set(remove)))
+        new = {(bot_id, u) for u in add} - self.history
+        self.history |= new
+        return len(new)
 
 
 fake = FakeRepo()
@@ -55,6 +69,67 @@ class StatsTests(unittest.TestCase):
         fake.stored_activity = {}
         fake.activity_calls.clear()
         fake.activity_fail = False
+        fake.totals, fake.totals_calls, fake.totals_fail = (10, 3, 25), 0, False
+        fake.history = set()
+
+    def test_totals_loaded_once_and_grow_in_memory_without_db(self):
+        async def go():
+            st = UserStats(7)
+            self.assertIsNone(st.totals)                       # до загрузки — нет данных (сайт покажет прочерк)
+            await st.load()
+            self.assertEqual(st.totals, {"joined": 10, "referred": 3, "all_bots": 25})
+            st.note_referral()
+            st.add(100, None)
+            self.assertEqual(st.totals["referred"], 4)
+            self.assertEqual(st.totals["joined"], 10)          # «прошёл капчу» учитывается при записи пачки
+            await st.flush()
+            self.assertEqual(st.totals, {"joined": 11, "referred": 4, "all_bots": 26})
+            for _ in range(50):
+                st.totals                                      # чтение сайтом БД не трогает
+            self.assertEqual(fake.totals_calls, 1)
+        run(go())
+
+    def test_rejoin_after_removal_is_not_counted_twice(self):
+        async def go():
+            st = UserStats(7)
+            await st.load()
+            st.add(100, None)
+            await st.flush()
+            self.assertEqual(st.totals["joined"], 11)
+            st.remove(100)                                     # удалён (Песочница / автоочистка)
+            await st.flush()
+            self.assertEqual(st.totals["joined"], 11)          # «всего было» не уменьшается
+            st.add(100, None)                                  # снова прошёл капчу — тот же человек
+            await st.flush()
+            self.assertEqual(st.totals["joined"], 11)
+            self.assertEqual(st.totals["all_bots"], 26)
+        run(go())
+
+    def test_failed_flush_does_not_count_and_retry_counts_once(self):
+        async def go():
+            st = UserStats(7)
+            await st.load()
+            st.add(100, None)
+            fake.fail = True
+            await st.flush()
+            self.assertEqual(st.totals["joined"], 10)
+            fake.fail = False
+            await st.flush()
+            self.assertEqual(st.totals["joined"], 11)
+        run(go())
+
+    def test_totals_failure_does_not_break_bot_start(self):
+        async def go():
+            fake.totals_fail = True
+            st = UserStats(7)
+            await st.load()
+            self.assertEqual(st.count, 2)                      # пользователи загружены
+            self.assertIsNone(st.totals)
+            st.note_referral()                                 # без загруженных чисел ничего не ломается
+            st.add(100, None)
+            await st.flush()
+            self.assertIsNone(st.totals)
+        run(go())
 
     def test_only_added_users_are_counted_and_unknown_are_not_written(self):
         async def go():

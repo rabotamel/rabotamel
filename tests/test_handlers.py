@@ -4,6 +4,7 @@ import os
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -263,11 +264,11 @@ class MenuButtonTests(unittest.TestCase):
         router = self._setup()
         asyncio.run(router.handlers["on_start"](self._user("/start"), self.bot))
         rows = self.sent[-1][2].inline_keyboard
-        self.assertEqual(rows[-1][0].text, "🍭 Купить конфеты 🍬")
-        self.assertTrue(rows[-1][0].callback_data.startswith("tp"))
-        # над «Купить конфеты» — «Бесплатные конфеты» (подпись и callback_data этого бота)
-        self.assertEqual(rows[-2][0].text, self.texts.tasks_menu.text("label"))
-        self.assertEqual(rows[-2][0].callback_data, self.texts.tasks_menu.cb["open"])
+        # самая нижняя — «Бесплатные конфеты» (подпись и callback_data этого бота), над ней — «Купить конфеты»
+        self.assertEqual(rows[-1][0].text, self.texts.tasks_menu.text("label"))
+        self.assertEqual(rows[-1][0].callback_data, self.texts.tasks_menu.cb["open"])
+        self.assertEqual(rows[-2][0].text, "🍭 Купить конфеты 🍬")
+        self.assertTrue(rows[-2][0].callback_data.startswith("tp"))
         labels = [b.text for row in rows[:-2] for b in row]
         self.assertEqual(sorted(labels), sorted([self.texts.shop_buttons.shop_label, self.texts.shop_buttons.gallery_label]))
 
@@ -349,6 +350,9 @@ class ShopNavigationTests(unittest.TestCase):
             async def edit_message_caption(self, chat_id, message_id, caption, parse_mode, reply_markup):
                 edits.append(("caption", message_id, caption, reply_markup))
 
+            async def edit_message_reply_markup(self, chat_id, message_id, reply_markup):
+                edits.append(("markup", message_id, None, reply_markup))
+
         self.sent_markup = []
 
         async def fake_send(b, chat_id, text, image=None, reply_markup=None):
@@ -367,12 +371,26 @@ class ShopNavigationTests(unittest.TestCase):
         async def fake_get(product_id, only_visible=True):
             return next((r for r in self.catalog if r.id == product_id and (r.is_visible or not only_visible)), None)
 
-        names = ("get_candies", "list_shop_products", "get_shop_product")
+        self.discount = 0          # скидка пользователя по промокоду, % (0 — нет)
+        self.discount_left = timedelta(hours=23, minutes=39, seconds=30)   # сколько ещё действует скидка
+        self.purchases = []        # вызовы repo.buy_product
+
+        async def fake_promo(bot_id, uid):
+            if not self.discount:
+                return 0, None
+            return self.discount, datetime.now(timezone.utc) + self.discount_left
+
+        async def fake_buy(bot_id, uid, product_id):
+            self.purchases.append(product_id)
+            return types.SimpleNamespace(status="gone", name="", price=0, balance=0, percent=0)
+
+        names = ("get_candies", "list_shop_products", "get_shop_product", "get_promo_discount", "buy_product")
         orig = {n: getattr(handlers.repo, n, None) for n in names}
         orig_send = messaging.send_message
         messaging.send_message = fake_send
         handlers.repo.get_candies, handlers.repo.list_shop_products, handlers.repo.get_shop_product = (
             fake_candies, fake_list, fake_get)
+        handlers.repo.get_promo_discount, handlers.repo.buy_product = fake_promo, fake_buy
 
         def restore():
             messaging.send_message = orig_send
@@ -442,19 +460,24 @@ class ShopNavigationTests(unittest.TestCase):
             self.assertEqual([b.style for b in btns2], ["success", "danger"])
 
             n = len(sent)
-            await router.handlers["on_shop_menu_button"](call(btns2[0].callback_data, card_id), bot)   # заглушка: ничего не делает
-            self.assertEqual((len(sent), bot.deleted), (n, [10, menu_id]))
+            # «Купить»: покупкой занимается repo.buy_product (здесь он отвечает «товар скрыт» -> свежее меню магазина)
+            await router.handlers["on_shop_menu_button"](call(btns2[0].callback_data, card_id), bot)
+            self.assertEqual(self.purchases, [7])
+            self.assertEqual(len(sent), n + 1)
+            self.assertEqual(sent[-1][1], shop.render_menu(texts.shop_buttons.shop_label, 42))
+            self.assertEqual(bot.deleted, [10, menu_id, card_id])
+            fresh_id = sent[-1][0]   # свежее меню после «Купить»; дальше «Назад» нажимаем уже на нём
 
-            await router.handlers["on_shop_menu_button"](call(cfg.product_back_cb, card_id), bot)
+            await router.handlers["on_shop_menu_button"](call(cfg.product_back_cb, fresh_id), bot)
             menu2_id, text = sent[-1]
             self.assertEqual(text, shop.render_menu(texts.shop_buttons.shop_label, 42))
-            self.assertEqual(bot.deleted, [10, menu_id, card_id])
+            self.assertEqual(bot.deleted, [10, menu_id, card_id, fresh_id])
             await router.handlers["on_shop_menu_button"](call(cfg.back_cb, menu2_id), bot)
             _, text = sent[-1]
             self.assertIn("Бот", text)                                # главное меню — приветствие
             self.assertIn("42🍬", text)
             self.assertEqual(texts.shop_buttons.shop_label, self.sent_markup[-1].inline_keyboard[0][0].text)
-            self.assertEqual(bot.deleted, [10, menu_id, card_id, menu2_id])
+            self.assertEqual(bot.deleted, [10, menu_id, card_id, fresh_id, menu2_id])
             self.assertEqual(edits, [])                               # ни одного редактирования на месте
 
         asyncio.run(go())
@@ -506,6 +529,214 @@ class ShopNavigationTests(unittest.TestCase):
             await router.handlers["on_shop_menu_button"](call(cfg.product_cb), bot)            # кнопка версии без id
             self.assertEqual(sent[-1][1], shop.render_menu(texts.shop_buttons.shop_label, 42))
             self.assertEqual((len(sent), edits), (3, []))
+
+        asyncio.run(go())
+
+    # ---------- промокод: скидка в меню/карточке, покупка, ввод кода ----------
+
+    def test_discount_shows_struck_price_buttons_and_promo_line(self):
+        rows = [types.SimpleNamespace(id=7, name="Абсолют", price=100, about="", color="", is_visible=True)]
+        bot, router, texts, call, edits, sent = self._setup(products=rows)
+        self.discount = 15
+        cfg = texts.shop_menu
+
+        async def go():
+            await router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb, 10), bot)
+            menu_id, text = sent[-1]
+            self.assertTrue(text.endswith("\n\n<b>🔥 Действует промокод на 15%! Скидка истечёт через 23ч 40м</b>"))
+            btns = self._buttons(self.sent_markup[-1])
+            self.assertEqual(btns[0].text, "Абсолют — " + shop.strike("100🍬") + " 85🍬")
+            self.assertEqual(btns[-1].text, "⬅️ Назад")
+            await router.handlers["on_shop_menu_button"](call(btns[0].callback_data, menu_id), bot)
+            card = sent[-1][1]
+            self.assertIn("<s>100🍬</s> 85🍬", card)
+            self.assertTrue(card.endswith("<b>🔥 Действует промокод на 15%!</b>"))
+            self.assertEqual([b.text for b in self._buttons(self.sent_markup[-1])], ["🍭 Купить (85🍬)", "⬅️ Назад"])
+
+        asyncio.run(go())
+
+    def _shop_button(self, markup, texts):
+        return next(b for b in self._buttons(markup) if b.callback_data == texts.shop_buttons.shop_cb)
+
+    def test_shop_menu_promo_line_shows_time_left_and_hides_without_time(self):
+        bot, router, texts, call, edits, sent = self._setup()
+        self.discount = 15
+        for left, shown in ((timedelta(hours=23, minutes=39, seconds=30), "23ч 40м"), (timedelta(hours=1), "1ч 0м"),
+                            (timedelta(minutes=5, seconds=10), "0ч 6м"), (timedelta(seconds=20), "0ч 1м")):
+            self.discount_left = left
+            asyncio.run(router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb), bot))
+            self.assertTrue(sent[-1][1].endswith(f"<b>🔥 Действует промокод на 15%! Скидка истечёт через {shown}</b>"), shown)
+        self.discount_left = timedelta(seconds=-5)    # срок вышел между запросами — скидки нет
+        asyncio.run(router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb), bot))
+        self.assertNotIn("промокод", sent[-1][1])
+
+    def test_main_menu_shop_button_gets_discount_suffix(self):
+        bot, router, texts, call, edits, sent = self._setup()
+        self.discount = 15
+        asyncio.run(router.handlers["on_shop_menu_button"](call(texts.shop_menu.back_cb, 10), bot))   # «Назад» -> главное меню
+        label = self._shop_button(self.sent_markup[-1], texts).text
+        base = texts.shop_buttons.shop_label
+        self.assertEqual(label, base.replace(" 💫", " (🔥 -15% на 23ч) 💫"))   # перед закрывающим эмодзи, часы вниз
+        self.assertEqual(self._shop_button(self.sent_markup[-1], texts).style, "primary")
+        self.discount_left = timedelta(minutes=40)
+        asyncio.run(router.handlers["on_shop_menu_button"](call(texts.shop_menu.back_cb, 10), bot))
+        self.assertIn("(🔥 -15% на 40м)", self._shop_button(self.sent_markup[-1], texts).text)
+        self.discount = 0
+        asyncio.run(router.handlers["on_shop_menu_button"](call(texts.shop_menu.back_cb, 10), bot))
+        self.assertEqual(self._shop_button(self.sent_markup[-1], texts).text, base)               # скидки нет — как раньше
+
+    def test_activation_refreshes_main_menu_buttons_only_while_main_menu_is_shown(self):
+        from app import promo
+
+        bot, router, texts, call, edits, sent = self._setup()
+        replies = []
+
+        async def fake_send(b, chat_id, text, image=None, reply_markup=None):
+            replies.append(text)
+            return types.SimpleNamespace(message_id=900)
+
+        async def fake_activate(bot_id, uid, code):
+            return "ok", 15
+
+        async def fake_settings(*, fresh=False):
+            return promo.AutoSettings(text="t", percent=15, reply="ok {percent}")
+        orig = (messaging.send_message, handlers.repo.__dict__.get("activate_promo"), promo.load_settings)
+        self.addCleanup(lambda: (setattr(messaging, "send_message", orig[0]), setattr(promo, "load_settings", orig[2]),
+                                 setattr(handlers.repo, "activate_promo", orig[1]) if orig[1] else
+                                 handlers.repo.__dict__.pop("activate_promo", None)))
+        handlers.repo.activate_promo, promo.load_settings = fake_activate, fake_settings
+        msg = types.SimpleNamespace(text="AB12CD34", message_id=50, from_user=types.SimpleNamespace(id=5, username="u"),
+                                    chat=types.SimpleNamespace(id=5))
+
+        async def go():
+            await router.handlers["on_shop_menu_button"](call(texts.shop_menu.back_cb, 10), bot)   # показано главное меню
+            main_id = sent[-1][0]
+            messaging.send_message = fake_send
+            self.discount = 15
+            await router.handlers["on_private_message"](msg, bot)
+            kinds = [e for e in edits if e[0] == "markup"]
+            self.assertEqual([e[1] for e in kinds], [main_id])                                         # кнопки обновлены на месте
+            self.assertIn("(🔥 -15% на 23ч)", self._shop_button(kinds[0][3], texts).text)
+        asyncio.run(go())
+
+    def test_activation_does_not_touch_other_screens(self):
+        from app import promo
+
+        bot, router, texts, call, edits, sent = self._setup()
+
+        async def fake_send(b, chat_id, text, image=None, reply_markup=None):
+            return types.SimpleNamespace(message_id=900)
+
+        async def fake_activate(bot_id, uid, code):
+            return "ok", 15
+
+        async def fake_settings(*, fresh=False):
+            return promo.AutoSettings(text="t", percent=15, reply="ok")
+        orig_send, orig_load = messaging.send_message, promo.load_settings
+        had = "activate_promo" in handlers.repo.__dict__
+        old = handlers.repo.__dict__.get("activate_promo")
+        self.addCleanup(lambda: (setattr(promo, "load_settings", orig_load), setattr(handlers.repo, "activate_promo", old)
+                                 if had else handlers.repo.__dict__.pop("activate_promo", None)))
+        handlers.repo.activate_promo, promo.load_settings = fake_activate, fake_settings
+        msg = types.SimpleNamespace(text="AB12CD34", message_id=50, from_user=types.SimpleNamespace(id=5, username="u"),
+                                    chat=types.SimpleNamespace(id=5))
+
+        async def go():
+            await router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb, 10), bot)   # сейчас открыт МАГАЗИН
+            messaging.send_message = fake_send
+            self.discount = 15
+            await router.handlers["on_private_message"](msg, bot)
+            self.assertEqual([e for e in edits if e[0] == "markup"], [])                          # экран магазина не трогаем
+        try:
+            asyncio.run(go())
+        finally:
+            messaging.send_message = orig_send
+
+    def test_no_discount_means_plain_menu(self):
+        bot, router, texts, call, edits, sent = self._setup()
+        asyncio.run(router.handlers["on_shop_button"](call(texts.shop_buttons.shop_cb), bot))
+        self.assertNotIn("промокод", sent[-1][1])
+        self.assertNotIn(shop.STRIKE, "".join(b.text for b in self._buttons(self.sent_markup[-1])))
+
+    def test_buy_results(self):
+        bot, router, texts, call, edits, sent = self._setup()
+        cfg = texts.shop_menu
+        answers = []
+
+        def call_with_answers(data):
+            c = call(data)
+
+            async def answer(text=None, show_alert=False, **k):
+                answers.append((text, show_alert))
+            c.answer = answer
+            return c
+
+        async def go():
+            for status, expected in (("funds", ("❌ У вас недостаточно средств", True)),
+                                     ("ok", ("✅ Вы приобрели «Абсолют» за 85🍬", True))):
+                async def fake_buy(bot_id, uid, product_id, status=status):
+                    return types.SimpleNamespace(status=status, name="Абсолют", price=85, balance=1, percent=15)
+                handlers.repo.buy_product = fake_buy
+                answers.clear()
+                n = len(sent)
+                await router.handlers["on_shop_menu_button"](call_with_answers(f"{cfg.buy_cb}:1"), bot)
+                self.assertEqual(answers, [expected])               # на нажатие отвечено ровно один раз
+                self.assertEqual(len(sent), n + (1 if status == "ok" else 0))   # после покупки — обновлённое меню
+            answers.clear()
+            await router.handlers["on_shop_menu_button"](call_with_answers(cfg.buy_cb), bot)   # кнопка без id товара
+            self.assertEqual(answers, [(None, False)])
+
+        asyncio.run(go())
+
+    def test_typing_own_promo_activates_and_replies(self):
+        from app import promo
+
+        bot, router, texts, call, edits, sent = self._setup()
+        replies = []
+
+        async def fake_send(b, chat_id, text, image=None, reply_markup=None):
+            replies.append((chat_id, text, image))
+            return types.SimpleNamespace(message_id=1)
+
+        messaging.send_message = fake_send
+        state = {"status": "ok"}
+
+        async def fake_activate(bot_id, uid, code):
+            return (state["status"], 15 if state["status"] != "none" else None)
+
+        async def fake_settings(*, fresh=False):
+            return promo.AutoSettings(text="t", percent=15, reply="Скидка **{percent}%** твоя! [Ура/Класс]")
+        orig_a, orig_l = getattr(handlers.repo, "activate_promo", None), promo.load_settings
+        handlers.repo.activate_promo, promo.load_settings = fake_activate, fake_settings
+
+        def restore():
+            promo.load_settings = orig_l
+            if orig_a is not None:
+                handlers.repo.activate_promo = orig_a
+            else:
+                del handlers.repo.activate_promo
+        self.addCleanup(restore)
+
+        def text_msg(text):
+            return types.SimpleNamespace(
+                text=text, message_id=50, from_user=types.SimpleNamespace(id=5, username="u"),
+                chat=types.SimpleNamespace(id=5))
+
+        async def go():
+            await router.handlers["on_private_message"](text_msg("ab12cd34"), bot)   # регистр не важен
+            self.assertEqual(len(replies), 1)
+            self.assertIn("<b>15%</b> твоя!", replies[0][1])
+            self.assertNotIn("[", replies[0][1])
+            self.assertIsNone(replies[0][2])                                          # короткий ответ — без картинки
+            state["status"] = "used"
+            await router.handlers["on_private_message"](text_msg("AB12CD34"), bot)
+            self.assertEqual(replies[-1][1], promo.USED_TEXT)
+            state["status"] = "none"                                                  # чужой/неизвестный код — тишина
+            n = len(replies)
+            await router.handlers["on_private_message"](text_msg("ZZZZ9999"), bot)
+            await router.handlers["on_private_message"](text_msg("привет, как дела"), bot)
+            await router.handlers["on_private_message"](text_msg("AB12CD3"), bot)     # 7 символов — не код
+            self.assertEqual(len(replies), n)
 
         asyncio.run(go())
 

@@ -219,9 +219,21 @@ def generate_config(seed: str, taken: set[str] | None = None) -> ShopButtonsConf
 
 # ---------- клавиатура и разбор нажатий ----------
 
-def layout_rows(cfg: ShopButtonsConfig) -> list[list[tuple[str, str]]]:
-    """Ряды кнопок [(подпись, callback_data), ...] без зависимости от aiogram (удобно для тестов)."""
-    shop, gallery = (cfg.shop_label, cfg.shop_cb), (cfg.gallery_label, cfg.gallery_cb)
+def shop_label_with(cfg: ShopButtonsConfig, suffix: str) -> str:
+    """Подпись кнопки магазина с припиской (например, «(🔥 -15% на 23ч)»): она встаёт после названия, перед закрывающим
+    эмодзи («🍫 Магазин (🔥 -15% на 23ч) 💫»), как остаток времени у «Ежедневного подарка»."""
+    if not suffix:
+        return cfg.shop_label
+    tail = " " + SHOP_EMOJI[min(max(cfg.shop_emoji, 0), len(SHOP_EMOJI) - 1)][1]
+    if cfg.shop_label.endswith(tail):
+        return cfg.shop_label[: -len(tail)] + " " + suffix + tail
+    return f"{cfg.shop_label} {suffix}"
+
+
+def layout_rows(cfg: ShopButtonsConfig, shop_suffix: str = "") -> list[list[tuple[str, str]]]:
+    """Ряды кнопок [(подпись, callback_data), ...] без зависимости от aiogram (удобно для тестов).
+    shop_suffix — приписка к подписи кнопки магазина (скидка по промокоду)."""
+    shop, gallery = (shop_label_with(cfg, shop_suffix), cfg.shop_cb), (cfg.gallery_label, cfg.gallery_cb)
     pair = [shop, gallery] if cfg.order == "shop_first" else [gallery, shop]
     return [pair] if cfg.layout == "row" else [[b] for b in pair]
 
@@ -229,12 +241,12 @@ def layout_rows(cfg: ShopButtonsConfig) -> list[list[tuple[str, str]]]:
 BUTTON_STYLE = "primary"  # цвет кнопок под приветствием: синий (Bot API 9.4+, нужен aiogram >= 3.25)
 
 
-def build_keyboard(cfg: ShopButtonsConfig, extra_rows=()):
+def build_keyboard(cfg: ShopButtonsConfig, extra_rows=(), shop_suffix: str = ""):
     """Inline-клавиатура под приветствием: все кнопки синие. extra_rows — дополнительные ряды ниже
     [(подпись, callback_data, стиль), ...] (например, «Купить конфеты»); основные кнопки не меняются."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-    rows = [[InlineKeyboardButton(text=t, callback_data=cb, style=BUTTON_STYLE) for t, cb in row] for row in layout_rows(cfg)]
+    rows = [[InlineKeyboardButton(text=t, callback_data=cb, style=BUTTON_STYLE) for t, cb in row] for row in layout_rows(cfg, shop_suffix)]
     for t, cb, st in extra_rows:
         rows.append([InlineKeyboardButton(text=t, callback_data=cb, style=st)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
